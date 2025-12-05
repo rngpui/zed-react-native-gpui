@@ -5,6 +5,7 @@ use crate::{
     SharedString, SharedUri, StyleRefinement, Styled, Task, Window, px,
 };
 use anyhow::{Context as _, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
 use futures::{AsyncReadExt, Future};
 use image::{
@@ -602,6 +603,20 @@ impl Asset for ImageAssetLoader {
             let bytes = match source.clone() {
                 Resource::Path(uri) => fs::read(uri.as_ref())?,
                 Resource::Uri(uri) => {
+                    if let Some(data) = uri.as_ref().strip_prefix("data:") {
+                        let (meta, payload) = data.split_once(',').ok_or_else(|| {
+                            ImageCacheError::Asset("invalid data URI (missing comma)".into())
+                        })?;
+                        if meta.contains(";base64") {
+                            BASE64_STANDARD.decode(payload).map_err(|e| {
+                                ImageCacheError::Asset(
+                                    format!("invalid base64 data URI: {e}").into(),
+                                )
+                            })?
+                        } else {
+                            payload.as_bytes().to_vec()
+                        }
+                    } else {
                     let mut response = client
                         .get(uri.as_ref(), ().into(), true)
                         .await
@@ -619,6 +634,7 @@ impl Asset for ImageAssetLoader {
                         });
                     }
                     body
+                    }
                 }
                 Resource::Embedded(path) => {
                     let data = asset_source.load(&path).ok().flatten();

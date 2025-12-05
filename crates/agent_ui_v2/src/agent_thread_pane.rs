@@ -1,4 +1,4 @@
-use agent::{HistoryEntry, HistoryEntryId, HistoryStore, NativeAgentServer};
+use agent::{ActiveAcpThreadStore, HistoryEntry, HistoryEntryId, HistoryStore, NativeAgentServer};
 use agent_servers::AgentServer;
 use agent_settings::AgentSettings;
 use agent_ui::acp::AcpThreadView;
@@ -60,6 +60,7 @@ struct ActiveThreadView {
     view: Entity<AcpThreadView>,
     thread_id: HistoryEntryId,
     _notify: Subscription,
+    _active_thread_sync: Subscription,
 }
 
 pub struct AgentThreadPane {
@@ -114,13 +115,14 @@ impl AgentThreadPane {
 
         let agent: Rc<dyn AgentServer> = Rc::new(NativeAgentServer::new(fs, history_store.clone()));
 
+        let project_for_view = project.clone();
         let thread_view = cx.new(|cx| {
             AcpThreadView::new(
                 agent,
                 resume_thread,
                 None,
                 workspace,
-                project,
+                project_for_view,
                 history_store,
                 prompt_store,
                 true,
@@ -133,10 +135,28 @@ impl AgentThreadPane {
             cx.notify();
         });
 
+        let project_for_active = project.clone();
+        let active_thread_sync = cx.observe(&thread_view, move |_, thread_view, cx| {
+            let thread = thread_view.read(cx).thread().cloned();
+            if let Some(thread) = thread {
+                ActiveAcpThreadStore::global(cx).update(cx, |store, cx| {
+                    store.set_active_thread(&project_for_active, Some(thread), cx);
+                });
+            }
+        });
+
+        let initial_thread = thread_view.read(cx).thread().cloned();
+        if let Some(thread) = initial_thread {
+            ActiveAcpThreadStore::global(cx).update(cx, |store, cx| {
+                store.set_active_thread(&project, Some(thread), cx);
+            });
+        }
+
         self.thread_view = Some(ActiveThreadView {
             view: thread_view,
             thread_id,
             _notify: notify,
+            _active_thread_sync: active_thread_sync,
         });
 
         cx.notify();

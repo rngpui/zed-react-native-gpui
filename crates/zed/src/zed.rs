@@ -655,6 +655,8 @@ fn initialize_panels(
         let project_panel = ProjectPanel::load(workspace_handle.clone(), cx.clone());
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
+        #[cfg(feature = "rn-chat-demo")]
+        let rn_chat_panel = rn_chat_panel::RNChatPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
         let channels_panel =
             collab_ui::collab_panel::CollabPanel::load(workspace_handle.clone(), cx.clone());
@@ -679,6 +681,20 @@ fn initialize_panels(
             }
         }
 
+        #[cfg(feature = "rn-chat-demo")]
+        futures::join!(
+            add_panel_when_ready(project_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(rn_chat_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(notification_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
+            initialize_agent_panel(workspace_handle.clone(), prompt_builder, cx.clone()).map(|r| r.log_err()),
+            initialize_agents_panel(workspace_handle, cx.clone()).map(|r| r.log_err())
+        );
+        #[cfg(not(feature = "rn-chat-demo"))]
         futures::join!(
             add_panel_when_ready(project_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
@@ -1832,6 +1848,22 @@ pub fn load_default_keymap(cx: &mut App) {
     if VimModeSetting::get_global(cx).0 || vim_mode_setting::HelixModeSetting::get_global(cx).0 {
         cx.bind_keys(
             KeymapFile::load_asset(VIM_KEYMAP_PATH, Some(KeybindSource::Vim), cx).unwrap(),
+        );
+    }
+
+    // RNGPUI / Fabric keybindings used by the RN chat demo panel.
+    #[cfg(feature = "rn-chat-demo")]
+    {
+        #[cfg(target_os = "macos")]
+        const RNGPUI_FABRIC_KEYMAP_PATH: &str = "keymaps/rngpui-fabric-macos.json";
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        const RNGPUI_FABRIC_KEYMAP_PATH: &str = "keymaps/rngpui-fabric-linux.json";
+        #[cfg(target_os = "windows")]
+        const RNGPUI_FABRIC_KEYMAP_PATH: &str = "keymaps/rngpui-fabric-windows.json";
+
+        cx.bind_keys(
+            KeymapFile::load_asset(RNGPUI_FABRIC_KEYMAP_PATH, Some(KeybindSource::Default), cx)
+                .unwrap(),
         );
     }
 }
@@ -4996,6 +5028,8 @@ mod tests {
             project_panel::init(cx);
             outline_panel::init(cx);
             terminal_view::init(cx);
+            #[cfg(feature = "rn-chat-demo")]
+            rn_chat_panel::init(cx);
             copilot::copilot_chat::init(
                 app_state.fs.clone(),
                 app_state.client.http_client(),

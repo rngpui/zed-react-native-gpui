@@ -46,6 +46,8 @@ visual-tests = [
     "language_model/test-support",
     "fs/test-support",
 ]
+# React Native Chat Panel demo - embeds RNGPUI within Zed
+rn-chat-demo = ["dep:rn_chat_panel", "dep:rngpui_build", "dep:gpui_modules"]
 
 [[bin]]
 name = "zed"
@@ -167,6 +169,9 @@ release_channel.workspace = true
 remote.workspace = true
 repl.workspace = true
 reqwest.workspace = true
+rn_chat_panel = { workspace = true, optional = true }
+# Craby-generated TurboModules staticlib (links Rust FFI for C++ TurboModules)
+gpui_modules = { path = "../../../react-native-gpui/craby-modules/crates/lib", optional = true }
 reqwest_client.workspace = true
 rope.workspace = true
 search.workspace = true
@@ -218,6 +223,9 @@ chrono.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true
 chrono.workspace = true
+
+[build-dependencies]
+rngpui_build = { path = "../../../react-native-gpui/rust/rngpui_build", optional = true }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"

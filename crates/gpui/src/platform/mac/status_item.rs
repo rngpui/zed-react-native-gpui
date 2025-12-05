@@ -40,7 +40,9 @@ const STATE_IVAR: &str = "state";
 
 #[ctor]
 unsafe fn build_classes() {
-    VIEW_CLASS = {
+    VIEW_CLASS = if let Some(cls) = Class::get("GPUIStatusItemView") {
+        cls
+    } else {
         let mut decl = ClassDecl::new("GPUIStatusItemView", class!(NSView)).unwrap();
         decl.add_ivar::<*mut c_void>(STATE_IVAR);
 

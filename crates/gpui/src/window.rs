@@ -2,8 +2,8 @@
 use crate::Inspector;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
-    Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
+    AsyncWindowContext, AvailableSpace, Background, BackdropBlur, BorderStyle, Bounds, BoxShadow,
+    Capslock, Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
     DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
     FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
     KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
@@ -862,6 +862,9 @@ pub struct Window {
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
     next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>>,
+    frame_seq: u64,
+    render_layers: FxHashMap<ElementId, RenderLayerRegistration>,
+    next_render_layer_seq: usize,
     pub(crate) dirty_views: FxHashSet<EntityId>,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
@@ -892,6 +895,15 @@ pub struct Window {
     pub(crate) client_inset: Option<Pixels>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector: Option<Entity<Inspector>>,
+}
+
+type RenderLayerBuilder = Arc<dyn Fn(&mut Window, &mut App) -> AnyElement + 'static>;
+
+#[derive(Clone)]
+struct RenderLayerRegistration {
+    order: i32,
+    seq: usize,
+    build: RenderLayerBuilder,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1332,6 +1344,9 @@ impl Window {
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
             tooltip_bounds: None,
+            frame_seq: 0,
+            render_layers: FxHashMap::default(),
+            next_render_layer_seq: 0,
             dirty_views: FxHashSet::default(),
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
@@ -2029,6 +2044,50 @@ impl Window {
         self.default_prevented
     }
 
+    /// Register a window-global render layer.
+    ///
+    /// Render layers are invoked once per window per frame, after the root view
+    /// has been prepainted (so they can rely on layout-bound state) and before
+    /// hit-testing is finalized.
+    ///
+    /// Layers are painted after the root view and before deferred draws,
+    /// prompts, and tooltips. Ordering between layers is controlled by `order`
+    /// (lower first). Ties are broken by first-registration order.
+    pub fn register_render_layer<F>(&mut self, key: impl Into<ElementId>, order: i32, build: F)
+    where
+        F: Fn(&mut Window, &mut App) -> AnyElement + 'static,
+    {
+        let key = key.into();
+        let build: RenderLayerBuilder = Arc::new(build);
+
+        if let Some(registration) = self.render_layers.get_mut(&key) {
+            registration.order = order;
+            registration.build = build;
+            return;
+        }
+
+        let seq = self.next_render_layer_seq;
+        self.next_render_layer_seq = self.next_render_layer_seq.saturating_add(1);
+        self.render_layers.insert(
+            key,
+            RenderLayerRegistration {
+                order,
+                seq,
+                build,
+            },
+        );
+    }
+
+    /// Unregister a render layer by key.
+    pub fn unregister_render_layer(&mut self, key: &ElementId) {
+        self.render_layers.remove(key);
+    }
+
+    /// Returns true if the given render layer key is registered.
+    pub fn has_render_layer(&self, key: &ElementId) -> bool {
+        self.render_layers.contains_key(key)
+    }
+
     /// Determine whether the given action is available along the dispatch path to the currently focused element.
     pub fn is_action_available(&self, action: &dyn Action, cx: &App) -> bool {
         let node_id =
@@ -2049,6 +2108,13 @@ impl Window {
     /// The position of the mouse relative to the window.
     pub fn mouse_position(&self) -> Point<Pixels> {
         self.mouse_position
+    }
+
+    /// Hit-test the rendered frame at the given window position.
+    ///
+    /// Returns hitbox IDs from topmost to bottommost.
+    pub fn hit_test_ids(&self, position: Point<Pixels>) -> SmallVec<[HitboxId; 8]> {
+        self.rendered_frame.hit_test(position).ids
     }
 
     /// The current state of the keyboard's modifiers
@@ -2075,6 +2141,8 @@ impl Window {
     /// the contents of the new [`Scene`], use [`Self::present`].
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
+        self.frame_seq = self.frame_seq.wrapping_add(1);
+
         self.invalidate_entities();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
@@ -2145,6 +2213,11 @@ impl Window {
         ArenaClearNeeded
     }
 
+    /// A monotonically increasing value that changes once per `draw()` call.
+    pub fn frame_seq(&self) -> u64 {
+        self.frame_seq
+    }
+
     fn record_entities_accessed(&mut self, cx: &mut App) {
         let mut entities_ref = cx.entities.accessed_entities.borrow_mut();
         let mut entities = mem::take(entities_ref.deref_mut());
@@ -2175,6 +2248,69 @@ impl Window {
         profiling::finish_frame!();
     }
 
+    fn prepaint_render_layers(
+        &mut self,
+        root_size: Size<Pixels>,
+        cx: &mut App,
+    ) -> Vec<(ElementId, AnyElement)> {
+        if self.render_layers.is_empty() {
+            return Vec::new();
+        }
+
+        let mut layers: Vec<(ElementId, i32, usize, RenderLayerBuilder)> = self
+            .render_layers
+            .iter()
+            .map(|(key, reg)| (key.clone(), reg.order, reg.seq, reg.build.clone()))
+            .collect();
+        layers.sort_by_key(|(_, order, seq, _)| (*order, *seq));
+
+        // Many elements expect to run under a rendering view context (e.g. image caches
+        // consult `Window::current_view()`), so ensure a view ID is present.
+        let root_view_id = self.root.as_ref().map(|v| v.entity_id());
+        let mut elements: Vec<(ElementId, AnyElement)> = Vec::with_capacity(layers.len());
+        if let Some(root_view_id) = root_view_id {
+            self.with_rendered_view(root_view_id, |window| {
+                for (key, _order, _seq, build) in layers {
+                    let mut element = (&*build)(window, cx);
+                    window.element_id_stack.push(key.clone());
+                    element.prepaint_as_root(Point::default(), root_size.into(), window, cx);
+                    window.element_id_stack.pop();
+                    elements.push((key, element));
+                }
+            });
+        } else {
+            for (key, _order, _seq, build) in layers {
+                let mut element = (&*build)(self, cx);
+                self.element_id_stack.push(key.clone());
+                element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
+                self.element_id_stack.pop();
+                elements.push((key, element));
+            }
+        }
+
+        elements
+    }
+
+    fn paint_render_layers(&mut self, elements: &mut [(ElementId, AnyElement)], cx: &mut App) {
+        let root_view_id = self.root.as_ref().map(|v| v.entity_id());
+        if let Some(root_view_id) = root_view_id {
+            self.with_rendered_view(root_view_id, |window| {
+                for (key, element) in elements.iter_mut() {
+                    window.element_id_stack.push(key.clone());
+                    element.paint(window, cx);
+                    window.element_id_stack.pop();
+                }
+            });
+            return;
+        }
+
+        for (key, element) in elements.iter_mut() {
+            self.element_id_stack.push(key.clone());
+            element.paint(self, cx);
+            self.element_id_stack.pop();
+        }
+    }
+
     fn draw_roots(&mut self, cx: &mut App) {
         self.invalidator.set_phase(DrawPhase::Prepaint);
         self.tooltip_bounds.take();
@@ -2200,6 +2336,8 @@ impl Window {
         // Layout all root elements.
         let mut root_element = self.root.as_ref().unwrap().clone().into_any();
         root_element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
+
+        let mut render_layer_elements = self.prepaint_render_layers(root_size, cx);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         let inspector_element = self.prepaint_inspector(_inspector_width, cx);
@@ -2232,6 +2370,8 @@ impl Window {
         // Now actually paint the elements.
         self.invalidator.set_phase(DrawPhase::Paint);
         root_element.paint(self, cx);
+
+        self.paint_render_layers(&mut render_layer_elements, cx);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.paint_inspector(inspector_element, cx);
@@ -2570,13 +2710,13 @@ impl Window {
     }
 
     /// Updates the global element offset relative to the current offset. This is used to implement
-    /// scrolling. This method should only be called during the prepaint phase of element drawing.
+    /// scrolling. This method should only be called during element drawing.
     pub fn with_element_offset<R>(
         &mut self,
         offset: Point<Pixels>,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        self.invalidator.debug_assert_prepaint();
+        self.invalidator.debug_assert_paint_or_prepaint();
 
         if offset.is_zero() {
             return f(self);
@@ -2588,20 +2728,26 @@ impl Window {
 
     /// Updates the global element offset based on the given offset. This is used to implement
     /// drag handles and other manual painting of elements. This method should only be called during
-    /// the prepaint phase of element drawing.
+    /// element drawing.
     pub fn with_absolute_element_offset<R>(
         &mut self,
         offset: Point<Pixels>,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        self.invalidator.debug_assert_prepaint();
+        self.invalidator.debug_assert_paint_or_prepaint();
         self.element_offset_stack.push(offset);
         let result = f(self);
         self.element_offset_stack.pop();
         result
     }
 
-    pub(crate) fn with_element_opacity<R>(
+    /// Executes the given closure with an additional element opacity multiplier.
+    ///
+    /// This is used to implement inherited opacity for custom elements that paint directly
+    /// via window APIs.
+    ///
+    /// This method should only be called during the prepaint or paint phase of element drawing.
+    pub fn with_element_opacity<R>(
         &mut self,
         opacity: Option<f32>,
         f: impl FnOnce(&mut Self) -> R,
@@ -2700,10 +2846,9 @@ impl Window {
         let (task, _) = cx.fetch_asset::<A>(source);
         task.now_or_never()
     }
-    /// Obtain the current element offset. This method should only be called during the
-    /// prepaint phase of element drawing.
+    /// Obtain the current element offset. This method should only be called during element drawing.
     pub fn element_offset(&self) -> Point<Pixels> {
-        self.invalidator.debug_assert_prepaint();
+        self.invalidator.debug_assert_paint_or_prepaint();
         self.element_offset_stack
             .last()
             .copied()
@@ -2917,6 +3062,15 @@ impl Window {
         }
     }
 
+    /// Registers a focus handle as a tab stop for the current frame.
+    ///
+    /// This method should only be called during the paint phase of element drawing.
+    pub fn register_tab_stop(&mut self, focus_handle: &FocusHandle, tab_index: isize) {
+        self.invalidator.debug_assert_paint();
+        let handle = focus_handle.clone().tab_stop(true).tab_index(tab_index);
+        self.next_frame.tab_stops.insert(&handle);
+    }
+
     /// Defers the drawing of the given element, scheduling it to be painted on top of the currently-drawn tree
     /// at a later time. The `priority` parameter determines the drawing order relative to other deferred elements,
     /// with higher values being drawn on top.
@@ -2978,21 +3132,43 @@ impl Window {
         corner_radii: Corners<Pixels>,
         shadows: &[BoxShadow],
     ) {
+        self.paint_shadows_with_transform(
+            bounds,
+            corner_radii,
+            shadows,
+            TransformationMatrix::unit(),
+        );
+    }
+
+    /// Paint one or more drop shadows with an explicit visual transform.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_shadows_with_transform(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        shadows: &[BoxShadow],
+        transform: TransformationMatrix,
+    ) {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
         let content_mask = self.content_mask();
         let opacity = self.element_opacity();
+        let transform = self.scale_transform_for_scene(transform);
         for shadow in shadows {
             let shadow_bounds = (bounds + shadow.offset).dilate(shadow.spread_radius);
-            self.next_frame.scene.insert_primitive(Shadow {
-                order: 0,
-                blur_radius: shadow.blur_radius.scale(scale_factor),
-                bounds: shadow_bounds.scale(scale_factor),
-                content_mask: content_mask.scale(scale_factor),
-                corner_radii: corner_radii.scale(scale_factor),
-                color: shadow.color.opacity(opacity),
-            });
+            self.next_frame.scene.insert_primitive((
+                Shadow {
+                    order: 0,
+                    blur_radius: shadow.blur_radius.scale(scale_factor),
+                    bounds: shadow_bounds.scale(scale_factor),
+                    content_mask: content_mask.scale(scale_factor),
+                    corner_radii: corner_radii.scale(scale_factor),
+                    color: shadow.color.opacity(opacity),
+                },
+                transform,
+            ));
         }
     }
 
@@ -3006,21 +3182,83 @@ impl Window {
     /// where the circular arcs meet. This will not display well when combined with dashed borders.
     /// Use `Corners::clamp_radii_for_quad_size` if the radii should fit within the bounds.
     pub fn paint_quad(&mut self, quad: PaintQuad) {
+        self.paint_quad_with_transform(quad, TransformationMatrix::unit());
+    }
+
+    /// Paint one or more quads with an explicit visual transform.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_quad_with_transform(&mut self, quad: PaintQuad, transform: TransformationMatrix) {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
         let content_mask = self.content_mask();
         let opacity = self.element_opacity();
-        self.next_frame.scene.insert_primitive(Quad {
-            order: 0,
-            bounds: quad.bounds.scale(scale_factor),
-            content_mask: content_mask.scale(scale_factor),
-            background: quad.background.opacity(opacity),
-            border_color: quad.border_color.opacity(opacity),
-            corner_radii: quad.corner_radii.scale(scale_factor),
-            border_widths: quad.border_widths.scale(scale_factor),
-            border_style: quad.border_style,
-        });
+        let transform = self.scale_transform_for_scene(transform);
+
+        self.next_frame.scene.insert_primitive((
+            Quad {
+                order: 0,
+                bounds: quad.bounds.scale(scale_factor),
+                content_mask: content_mask.scale(scale_factor),
+                background: quad.background.opacity(opacity),
+                border_color: quad.border_color.opacity(opacity),
+                corner_radii: quad.corner_radii.scale(scale_factor),
+                border_widths: quad.border_widths.scale(scale_factor),
+                border_style: quad.border_style,
+            },
+            transform,
+        ));
+    }
+
+    /// Paint a backdrop blur into the scene for the next frame at the current z-index.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_backdrop_blur(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        blur_radius: Pixels,
+        tint: Hsla,
+    ) {
+        self.paint_backdrop_blur_with_transform(
+            bounds,
+            corner_radii,
+            blur_radius,
+            tint,
+            TransformationMatrix::unit(),
+        );
+    }
+
+    /// Paint a backdrop blur with an explicit visual transform.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_backdrop_blur_with_transform(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        blur_radius: Pixels,
+        tint: Hsla,
+        transform: TransformationMatrix,
+    ) {
+        self.invalidator.debug_assert_paint();
+
+        let scale_factor = self.scale_factor();
+        let content_mask = self.content_mask();
+        let opacity = self.element_opacity();
+        let transform = self.scale_transform_for_scene(transform);
+
+        self.next_frame.scene.insert_primitive((
+            BackdropBlur {
+                order: 0,
+                blur_radius: blur_radius.scale(scale_factor),
+                bounds: bounds.scale(scale_factor),
+                corner_radii: corner_radii.scale(scale_factor),
+                content_mask: content_mask.scale(scale_factor),
+                tint: tint.opacity(opacity),
+            },
+            transform,
+        ));
     }
 
     /// Paint the given `Path` into the scene for the next frame at the current z-index.
@@ -3049,6 +3287,19 @@ impl Window {
         width: Pixels,
         style: &UnderlineStyle,
     ) {
+        self.paint_underline_with_transform(origin, width, style, TransformationMatrix::unit());
+    }
+
+    /// Paint an underline with an explicit visual transform.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_underline_with_transform(
+        &mut self,
+        origin: Point<Pixels>,
+        width: Pixels,
+        style: &UnderlineStyle,
+        transform: TransformationMatrix,
+    ) {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
@@ -3063,16 +3314,20 @@ impl Window {
         };
         let content_mask = self.content_mask();
         let element_opacity = self.element_opacity();
+        let transform = self.scale_transform_for_scene(transform);
 
-        self.next_frame.scene.insert_primitive(Underline {
-            order: 0,
-            pad: 0,
-            bounds: bounds.scale(scale_factor),
-            content_mask: content_mask.scale(scale_factor),
-            color: style.color.unwrap_or_default().opacity(element_opacity),
-            thickness: style.thickness.scale(scale_factor),
-            wavy: if style.wavy { 1 } else { 0 },
-        });
+        self.next_frame.scene.insert_primitive((
+            Underline {
+                order: 0,
+                pad: 0,
+                bounds: bounds.scale(scale_factor),
+                content_mask: content_mask.scale(scale_factor),
+                color: style.color.unwrap_or_default().opacity(element_opacity),
+                thickness: style.thickness.scale(scale_factor),
+                wavy: if style.wavy { 1 } else { 0 },
+            },
+            transform,
+        ));
     }
 
     /// Paint a strikethrough into the scene for the next frame at the current z-index.
@@ -3084,6 +3339,19 @@ impl Window {
         width: Pixels,
         style: &StrikethroughStyle,
     ) {
+        self.paint_strikethrough_with_transform(origin, width, style, TransformationMatrix::unit());
+    }
+
+    /// Paint a strikethrough with an explicit visual transform.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_strikethrough_with_transform(
+        &mut self,
+        origin: Point<Pixels>,
+        width: Pixels,
+        style: &StrikethroughStyle,
+        transform: TransformationMatrix,
+    ) {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
@@ -3094,16 +3362,20 @@ impl Window {
         };
         let content_mask = self.content_mask();
         let opacity = self.element_opacity();
+        let transform = self.scale_transform_for_scene(transform);
 
-        self.next_frame.scene.insert_primitive(Underline {
-            order: 0,
-            pad: 0,
-            bounds: bounds.scale(scale_factor),
-            content_mask: content_mask.scale(scale_factor),
-            thickness: style.thickness.scale(scale_factor),
-            color: style.color.unwrap_or_default().opacity(opacity),
-            wavy: 0,
-        });
+        self.next_frame.scene.insert_primitive((
+            Underline {
+                order: 0,
+                pad: 0,
+                bounds: bounds.scale(scale_factor),
+                content_mask: content_mask.scale(scale_factor),
+                thickness: style.thickness.scale(scale_factor),
+                color: style.color.unwrap_or_default().opacity(opacity),
+                wavy: 0,
+            },
+            transform,
+        ));
     }
 
     /// Paints a monochrome (non-emoji) glyph into the scene for the next frame at the current z-index.
@@ -3122,11 +3394,32 @@ impl Window {
         font_size: Pixels,
         color: Hsla,
     ) -> Result<()> {
+        self.paint_glyph_with_transform(
+            origin,
+            font_id,
+            glyph_id,
+            font_size,
+            color,
+            TransformationMatrix::unit(),
+        )
+    }
+
+    /// Paints a monochrome glyph with an explicit visual transform.
+    pub fn paint_glyph_with_transform(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        transform: TransformationMatrix,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let element_opacity = self.element_opacity();
         let scale_factor = self.scale_factor();
         let glyph_origin = origin.scale(scale_factor);
+        let transform = self.scale_transform_for_scene(transform);
 
         let subpixel_variant = Point {
             x: (glyph_origin.x.0.fract() * SUBPIXEL_VARIANTS_X as f32).floor() as u8,
@@ -3176,7 +3469,7 @@ impl Window {
                     content_mask,
                     color: color.opacity(element_opacity),
                     tile,
-                    transformation: TransformationMatrix::unit(),
+                    transformation: transform,
                 });
             }
         }
@@ -3217,10 +3510,29 @@ impl Window {
         glyph_id: GlyphId,
         font_size: Pixels,
     ) -> Result<()> {
+        self.paint_emoji_with_transform(
+            origin,
+            font_id,
+            glyph_id,
+            font_size,
+            TransformationMatrix::unit(),
+        )
+    }
+
+    /// Paints an emoji glyph with an explicit visual transform.
+    pub fn paint_emoji_with_transform(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        transform: TransformationMatrix,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
         let glyph_origin = origin.scale(scale_factor);
+        let transform = self.scale_transform_for_scene(transform);
         let params = RenderGlyphParams {
             font_id,
             glyph_id,
@@ -3249,16 +3561,19 @@ impl Window {
             let content_mask = self.content_mask().scale(scale_factor);
             let opacity = self.element_opacity();
 
-            self.next_frame.scene.insert_primitive(PolychromeSprite {
-                order: 0,
-                pad: 0,
-                grayscale: false,
-                bounds,
-                corner_radii: Default::default(),
-                content_mask,
-                tile,
-                opacity,
-            });
+            self.next_frame.scene.insert_primitive((
+                PolychromeSprite {
+                    order: 0,
+                    pad: 0,
+                    grayscale: false,
+                    bounds,
+                    corner_radii: Default::default(),
+                    content_mask,
+                    tile,
+                    opacity,
+                },
+                transform,
+            ));
         }
         Ok(())
     }
@@ -3340,6 +3655,26 @@ impl Window {
         frame_index: usize,
         grayscale: bool,
     ) -> Result<()> {
+        self.paint_image_with_transform(
+            bounds,
+            corner_radii,
+            data,
+            frame_index,
+            grayscale,
+            TransformationMatrix::unit(),
+        )
+    }
+
+    /// Paint an image with an explicit visual transform.
+    pub fn paint_image_with_transform(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        data: Arc<RenderImage>,
+        frame_index: usize,
+        grayscale: bool,
+        transform: TransformationMatrix,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
@@ -3364,20 +3699,35 @@ impl Window {
         let content_mask = self.content_mask().scale(scale_factor);
         let corner_radii = corner_radii.scale(scale_factor);
         let opacity = self.element_opacity();
+        let transform = self.scale_transform_for_scene(transform);
 
-        self.next_frame.scene.insert_primitive(PolychromeSprite {
-            order: 0,
-            pad: 0,
-            grayscale,
-            bounds: bounds
-                .map_origin(|origin| origin.floor())
-                .map_size(|size| size.ceil()),
-            content_mask,
-            corner_radii,
-            tile,
-            opacity,
-        });
+        self.next_frame.scene.insert_primitive((
+            PolychromeSprite {
+                order: 0,
+                pad: 0,
+                grayscale,
+                bounds: bounds
+                    .map_origin(|origin| origin.floor())
+                    .map_size(|size| size.ceil()),
+                content_mask,
+                corner_radii,
+                tile,
+                opacity,
+            },
+            transform,
+        ));
         Ok(())
+    }
+
+    fn scale_transform_for_scene(&self, transform: TransformationMatrix) -> TransformationMatrix {
+        if transform.is_unit() {
+            return transform;
+        }
+        let scale_factor = self.scale_factor();
+        let mut scaled = transform;
+        scaled.translation[0] *= scale_factor;
+        scaled.translation[1] *= scale_factor;
+        scaled
     }
 
     /// Paint a surface into the scene for the next frame at the current z-index.
@@ -3563,10 +3913,26 @@ impl Window {
     /// Get the entity ID for the currently rendering view
     pub fn current_view(&self) -> EntityId {
         self.invalidator.debug_assert_paint_or_prepaint();
-        self.rendered_entity_stack.last().copied().unwrap()
+        if let Some(id) = self.rendered_entity_stack.last().copied() {
+            return id;
+        }
+
+        // Render layers and other out-of-tree rendering can legitimately run
+        // outside a view's `Element` implementation. When that happens, fall
+        // back to the window root view so subsystems like image caching can
+        // still associate work with a view.
+        self.root
+            .as_ref()
+            .map(|root| root.entity_id())
+            .expect("Window::current_view called with no rendered view and no root view")
     }
 
-    pub(crate) fn with_rendered_view<R>(
+    /// Execute `f` while treating `id` as the "current view".
+    ///
+    /// This is primarily intended for render layers and other out-of-tree
+    /// rendering that needs a stable view identity for subsystems like image
+    /// caching and view-local state.
+    pub fn with_rendered_view<R>(
         &mut self,
         id: EntityId,
         f: impl FnOnce(&mut Self) -> R,

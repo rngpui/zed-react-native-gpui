@@ -98,6 +98,15 @@ impl Drop for DisplayLink {
         // We might also want to upgrade to CADisplayLink, but that requires dropping old macOS support.
         std::mem::forget(self.display_link.take());
         unsafe {
+            // Clear the dispatch source context before canceling so any queued
+            // callbacks won't receive a stale pointer (e.g. if the window/view
+            // is being torn down concurrently).
+            dispatch_set_context(
+                crate::dispatch_sys::dispatch_object_t {
+                    _ds: self.frame_requests,
+                },
+                std::ptr::null_mut(),
+            );
             dispatch_source_cancel(self.frame_requests);
         }
     }

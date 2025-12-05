@@ -18,3 +18,10 @@ rustflags = [
 
 [env]
 MACOSX_DEPLOYMENT_TARGET = "10.15.7"
+# React Native root for JSI headers (react-native-gpui integration)
+# Relative to workspace root (zed/)
+JSI_RS_RN_ROOT = { value = "crates/rn_chat_panel/js/node_modules/react-native", relative = true }
+# JSI library location for rn-chat-demo feature (react-native-gpui integration)
+# Relative to workspace root (zed/) -> parent (rngpui/) -> react-native-gpui/...
+# This must be built first with: cd ../react-native-gpui/apps/example && cargo xtask cmake
+JSI_LIB_DIR = { value = "../react-native-gpui/apps/example/build/react/jsi", relative = true }

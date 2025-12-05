@@ -311,10 +311,11 @@ impl AcpThreadHistory {
     }
 
     fn confirm_entry(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(entry) = self.get_history_entry(ix) else {
+        let Some(entry) = self.get_history_entry(ix).cloned() else {
             return;
         };
-        cx.emit(ThreadHistoryEvent::Open(entry.clone()));
+        self.set_selected_index(ix, Bias::Right, cx);
+        cx.emit(ThreadHistoryEvent::Open(entry));
     }
 
     fn remove_selected_thread(

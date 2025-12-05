@@ -3,19 +3,20 @@
 
 use super::{BladeAtlas, BladeContext};
 use crate::{
-    Background, Bounds, DevicePixels, GpuSpecs, MonochromeSprite, Path, Point, PolychromeSprite,
-    PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, Underline,
-    get_gamma_correction_ratios,
+    BackdropBlur, Background, Bounds, DevicePixels, GpuSpecs, MonochromeSprite, Path, Point,
+    PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, TransformationMatrix,
+    Underline, get_gamma_correction_ratios,
 };
 #[cfg(any(test, feature = "test-support"))]
 use anyhow::Result;
-use blade_graphics as gpu;
+use blade_graphics::{self as gpu, ShaderData};
 use blade_util::{BufferBelt, BufferBeltDescriptor};
 use bytemuck::{Pod, Zeroable};
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
 #[cfg(target_os = "macos")]
 use media::core_video::CVMetalTextureCache;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 const MAX_FRAME_TIME_MS: u32 = 10000;
@@ -57,12 +58,23 @@ struct SurfaceParams {
 struct ShaderQuadsData {
     globals: GlobalParams,
     b_quads: gpu::BufferPiece,
+    b_quad_transforms: gpu::BufferPiece,
 }
 
 #[derive(blade_macros::ShaderData)]
 struct ShaderShadowsData {
     globals: GlobalParams,
     b_shadows: gpu::BufferPiece,
+    b_shadow_transforms: gpu::BufferPiece,
+}
+
+#[derive(blade_macros::ShaderData)]
+struct ShaderBackdropBlursData {
+    globals: GlobalParams,
+    t_sprite: gpu::TextureView,
+    s_sprite: gpu::Sampler,
+    b_backdrop_blurs: gpu::BufferPiece,
+    b_backdrop_blur_transforms: gpu::BufferPiece,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -83,6 +95,7 @@ struct ShaderPathsData {
 struct ShaderUnderlinesData {
     globals: GlobalParams,
     b_underlines: gpu::BufferPiece,
+    b_underline_transforms: gpu::BufferPiece,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -111,6 +124,7 @@ struct ShaderPolySpritesData {
     t_sprite: gpu::TextureView,
     s_sprite: gpu::Sampler,
     b_poly_sprites: gpu::BufferPiece,
+    b_poly_sprite_transforms: gpu::BufferPiece,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -140,6 +154,7 @@ struct PathRasterizationVertex {
 struct BladePipelines {
     quads: gpu::RenderPipeline,
     shadows: gpu::RenderPipeline,
+    backdrop_blurs: gpu::RenderPipeline,
     path_rasterization: gpu::RenderPipeline,
     paths: gpu::RenderPipeline,
     underlines: gpu::RenderPipeline,
@@ -164,6 +179,7 @@ impl BladePipelines {
         shader.check_struct_size::<SurfaceParams>();
         shader.check_struct_size::<Quad>();
         shader.check_struct_size::<Shadow>();
+        shader.check_struct_size::<BackdropBlur>();
         shader.check_struct_size::<PathRasterizationVertex>();
         shader.check_struct_size::<PathSprite>();
         shader.check_struct_size::<Underline>();
@@ -208,6 +224,20 @@ impl BladePipelines {
                 },
                 depth_stencil: None,
                 fragment: Some(shader.at("fs_shadow")),
+                color_targets,
+                multisample_state: gpu::MultisampleState::default(),
+            }),
+            backdrop_blurs: gpu.create_render_pipeline(gpu::RenderPipelineDesc {
+                name: "backdrop_blurs",
+                data_layouts: &[&ShaderBackdropBlursData::layout()],
+                vertex: shader.at("vs_backdrop_blur"),
+                vertex_fetches: &[],
+                primitive: gpu::PrimitiveState {
+                    topology: gpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                fragment: Some(shader.at("fs_backdrop_blur")),
                 color_targets,
                 multisample_state: gpu::MultisampleState::default(),
             }),
@@ -347,6 +377,7 @@ impl BladePipelines {
     fn destroy(&mut self, gpu: &gpu::Context) {
         gpu.destroy_render_pipeline(&mut self.quads);
         gpu.destroy_render_pipeline(&mut self.shadows);
+        gpu.destroy_render_pipeline(&mut self.backdrop_blurs);
         gpu.destroy_render_pipeline(&mut self.path_rasterization);
         gpu.destroy_render_pipeline(&mut self.paths);
         gpu.destroy_render_pipeline(&mut self.underlines);
@@ -378,6 +409,8 @@ pub struct BladeRenderer {
     atlas_sampler: gpu::Sampler,
     #[cfg(target_os = "macos")]
     core_video_texture_cache: CVMetalTextureCache,
+    backdrop_texture: gpu::Texture,
+    backdrop_texture_view: gpu::TextureView,
     path_intermediate_texture: gpu::Texture,
     path_intermediate_texture_view: gpu::TextureView,
     path_intermediate_msaa_texture: Option<gpu::Texture>,
@@ -427,6 +460,13 @@ impl BladeRenderer {
             ..Default::default()
         });
 
+        let (backdrop_texture, backdrop_texture_view) = create_backdrop_texture(
+            &context.gpu,
+            surface.info().format,
+            config.size.width,
+            config.size.height,
+        );
+
         let (path_intermediate_texture, path_intermediate_texture_view) =
             create_path_intermediate_texture(
                 &context.gpu,
@@ -464,6 +504,8 @@ impl BladeRenderer {
             atlas_sampler,
             #[cfg(target_os = "macos")]
             core_video_texture_cache,
+            backdrop_texture,
+            backdrop_texture_view,
             path_intermediate_texture,
             path_intermediate_texture_view,
             path_intermediate_msaa_texture,
@@ -521,6 +563,8 @@ impl BladeRenderer {
             self.surface_config.size = gpu_size;
             self.gpu
                 .reconfigure_surface(&mut self.surface, self.surface_config);
+            self.gpu.destroy_texture(self.backdrop_texture);
+            self.gpu.destroy_texture_view(self.backdrop_texture_view);
             self.gpu.destroy_texture(self.path_intermediate_texture);
             self.gpu
                 .destroy_texture_view(self.path_intermediate_texture_view);
@@ -530,6 +574,14 @@ impl BladeRenderer {
             if let Some(msaa_view) = self.path_intermediate_msaa_texture_view {
                 self.gpu.destroy_texture_view(msaa_view);
             }
+            let (backdrop_texture, backdrop_texture_view) = create_backdrop_texture(
+                &self.gpu,
+                self.surface.info().format,
+                gpu_size.width,
+                gpu_size.height,
+            );
+            self.backdrop_texture = backdrop_texture;
+            self.backdrop_texture_view = backdrop_texture_view;
             let (path_intermediate_texture, path_intermediate_texture_view) =
                 create_path_intermediate_texture(
                     &self.gpu,
@@ -671,6 +723,8 @@ impl BladeRenderer {
         self.gpu.destroy_command_encoder(&mut self.command_encoder);
         self.pipelines.destroy(&self.gpu);
         self.gpu.destroy_surface(&mut self.surface);
+        self.gpu.destroy_texture(self.backdrop_texture);
+        self.gpu.destroy_texture_view(self.backdrop_texture_view);
         self.gpu.destroy_texture(self.path_intermediate_texture);
         self.gpu
             .destroy_texture_view(self.path_intermediate_texture_view);
@@ -723,30 +777,91 @@ impl BladeRenderer {
         profiling::scope!("render pass");
         for batch in scene.batches() {
             match batch {
-                PrimitiveBatch::Quads(quads) => {
+                PrimitiveBatch::Quads(quads, transforms) => {
                     let instance_buf = unsafe { self.instance_belt.alloc_typed(quads, &self.gpu) };
+                    let transform_buf =
+                        unsafe { self.instance_belt.alloc_typed(transforms, &self.gpu) };
                     let mut encoder = pass.with(&self.pipelines.quads);
                     encoder.bind(
                         0,
                         &ShaderQuadsData {
                             globals,
                             b_quads: instance_buf,
+                            b_quad_transforms: transform_buf,
                         },
                     );
                     encoder.draw(0, 4, 0, quads.len() as u32);
                 }
-                PrimitiveBatch::Shadows(shadows) => {
+                PrimitiveBatch::Shadows(shadows, transforms) => {
                     let instance_buf =
                         unsafe { self.instance_belt.alloc_typed(shadows, &self.gpu) };
+                    let transform_buf =
+                        unsafe { self.instance_belt.alloc_typed(transforms, &self.gpu) };
                     let mut encoder = pass.with(&self.pipelines.shadows);
                     encoder.bind(
                         0,
                         &ShaderShadowsData {
                             globals,
                             b_shadows: instance_buf,
+                            b_shadow_transforms: transform_buf,
                         },
                     );
                     encoder.draw(0, 4, 0, shadows.len() as u32);
+                }
+                PrimitiveBatch::BackdropBlurs(blurs, transforms) => {
+                    if blurs.is_empty() {
+                        continue;
+                    }
+
+                    drop(pass);
+
+                    self.command_encoder.init_texture(self.backdrop_texture);
+                    {
+                        let mut transfers = self.command_encoder.transfer("backdrop");
+                        transfers.copy_texture_to_texture(
+                            gpu::TexturePiece {
+                                texture: frame.texture(),
+                                mip_level: 0,
+                                array_layer: 0,
+                                origin: [0, 0, 0],
+                            },
+                            gpu::TexturePiece {
+                                texture: self.backdrop_texture,
+                                mip_level: 0,
+                                array_layer: 0,
+                                origin: [0, 0, 0],
+                            },
+                            self.surface_config.size,
+                        );
+                    }
+
+                    pass = self.command_encoder.render(
+                        "main",
+                        gpu::RenderTargetSet {
+                            colors: &[gpu::RenderTarget {
+                                view: frame.texture_view(),
+                                init_op: gpu::InitOp::Load,
+                                finish_op: gpu::FinishOp::Store,
+                            }],
+                            depth_stencil: None,
+                        },
+                    );
+
+                    let instance_buf = unsafe { self.instance_belt.alloc_typed(blurs, &self.gpu) };
+                    let transform_buf =
+                        unsafe { self.instance_belt.alloc_typed(transforms, &self.gpu) };
+                    let mut encoder = pass.with(&self.pipelines.backdrop_blurs);
+                    encoder.bind(
+                        0,
+                        &ShaderBackdropBlursData {
+                            globals,
+                            t_sprite: self.backdrop_texture_view,
+                            s_sprite: self.atlas_sampler,
+                            b_backdrop_blurs: instance_buf,
+                            b_backdrop_blur_transforms: transform_buf,
+                        },
+                    );
+                    encoder.draw(0, 4, 0, blurs.len() as u32);
                 }
                 PrimitiveBatch::Paths(paths) => {
                     let Some(first_path) = paths.first() else {
@@ -804,15 +919,18 @@ impl BladeRenderer {
                     );
                     encoder.draw(0, 4, 0, sprites.len() as u32);
                 }
-                PrimitiveBatch::Underlines(underlines) => {
+                PrimitiveBatch::Underlines(underlines, transforms) => {
                     let instance_buf =
                         unsafe { self.instance_belt.alloc_typed(underlines, &self.gpu) };
+                    let transform_buf =
+                        unsafe { self.instance_belt.alloc_typed(transforms, &self.gpu) };
                     let mut encoder = pass.with(&self.pipelines.underlines);
                     encoder.bind(
                         0,
                         &ShaderUnderlinesData {
                             globals,
                             b_underlines: instance_buf,
+                            b_underline_transforms: transform_buf,
                         },
                     );
                     encoder.draw(0, 4, 0, underlines.len() as u32);
@@ -843,10 +961,13 @@ impl BladeRenderer {
                 PrimitiveBatch::PolychromeSprites {
                     texture_id,
                     sprites,
+                    transforms,
                 } => {
                     let tex_info = self.atlas.get_texture_info(texture_id);
                     let instance_buf =
                         unsafe { self.instance_belt.alloc_typed(sprites, &self.gpu) };
+                    let transform_buf =
+                        unsafe { self.instance_belt.alloc_typed(transforms, &self.gpu) };
                     let mut encoder = pass.with(&self.pipelines.poly_sprites);
                     encoder.bind(
                         0,
@@ -855,6 +976,7 @@ impl BladeRenderer {
                             t_sprite: tex_info.raw_view,
                             s_sprite: self.atlas_sampler,
                             b_poly_sprites: instance_buf,
+                            b_poly_sprite_transforms: transform_buf,
                         },
                     );
                     encoder.draw(0, 4, 0, sprites.len() as u32);
@@ -993,6 +1115,39 @@ impl BladeRenderer {
     pub fn render_to_image(&mut self, _scene: &Scene) -> Result<RgbaImage> {
         anyhow::bail!("render_to_image is not yet implemented for BladeRenderer")
     }
+}
+
+fn create_backdrop_texture(
+    gpu: &gpu::Context,
+    format: gpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> (gpu::Texture, gpu::TextureView) {
+    let texture = gpu.create_texture(gpu::TextureDesc {
+        name: "backdrop",
+        format,
+        size: gpu::Extent {
+            width,
+            height,
+            depth: 1,
+        },
+        array_layer_count: 1,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: gpu::TextureDimension::D2,
+        usage: gpu::TextureUsage::COPY | gpu::TextureUsage::RESOURCE,
+        external: None,
+    });
+    let texture_view = gpu.create_texture_view(
+        texture,
+        gpu::TextureViewDesc {
+            name: "backdrop view",
+            format,
+            dimension: gpu::ViewDimension::D2,
+            subresources: &Default::default(),
+        },
+    );
+    (texture, texture_view)
 }
 
 fn create_path_intermediate_texture(

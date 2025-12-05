@@ -67,14 +67,18 @@ static mut APP_DELEGATE_CLASS: *const Class = ptr::null();
 #[ctor]
 unsafe fn build_classes() {
     unsafe {
-        APP_CLASS = {
+        APP_CLASS = if let Some(cls) = Class::get("GPUIApplication") {
+            cls
+        } else {
             let mut decl = ClassDecl::new("GPUIApplication", class!(NSApplication)).unwrap();
             decl.add_ivar::<*mut c_void>(MAC_PLATFORM_IVAR);
             decl.register()
         }
     };
     unsafe {
-        APP_DELEGATE_CLASS = unsafe {
+        APP_DELEGATE_CLASS = if let Some(cls) = Class::get("GPUIApplicationDelegate") {
+            cls
+        } else {
             let mut decl = ClassDecl::new("GPUIApplicationDelegate", class!(NSResponder)).unwrap();
             decl.add_ivar::<*mut c_void>(MAC_PLATFORM_IVAR);
             decl.add_method(
@@ -97,7 +101,6 @@ unsafe fn build_classes() {
                 sel!(handleGPUIMenuItem:),
                 handle_menu_item as extern "C" fn(&mut Object, Sel, id),
             );
-            // Add menu item handlers so that OS save panels have the correct key commands
             decl.add_method(
                 sel!(cut:),
                 handle_menu_item as extern "C" fn(&mut Object, Sel, id),
@@ -138,12 +141,10 @@ unsafe fn build_classes() {
                 sel!(application:openURLs:),
                 open_urls as extern "C" fn(&mut Object, Sel, id, id),
             );
-
             decl.add_method(
                 sel!(onKeyboardLayoutChange:),
                 on_keyboard_layout_change as extern "C" fn(&mut Object, Sel, id),
             );
-
             decl.register()
         }
     }
