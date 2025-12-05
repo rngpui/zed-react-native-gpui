@@ -29,12 +29,21 @@
 /crates/project_panel/benches/linux_repo_snapshot.txt
 /dev.zed.Zed*.json
 /node_modules/
+**/node_modules/
+
+# React Native / JS tooling (rn_chat_panel)
+.pnpm-store/
+.metro/
+.metro-health-check*
+*.jsbundle
+*.jsbundle.map
+
 /plugins/bin
 /script/node_modules
 /snap
 /zed.xcworkspace
 DerivedData/
-Packages
+/Packages
 xcuserdata/
 crates/docs_preprocessor/actions.json
 

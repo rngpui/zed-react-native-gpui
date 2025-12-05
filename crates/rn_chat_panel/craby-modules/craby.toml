@@ -1,0 +1,14 @@
+[project]
+name = "zedmodules"
+source_dir = "src"
+
+# RNGPUI is desktop-only, so we disable iOS and Android codegen
+[android]
+enabled = false
+package_name = "com.zed.modules"
+
+[ios]
+enabled = false
+
+[desktop]
+enabled = true

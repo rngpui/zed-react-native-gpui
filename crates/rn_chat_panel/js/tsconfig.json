@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "esnext",
+    "lib": ["esnext"],
+    "jsx": "react-native",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "craby-modules": ["./node_modules/craby-modules"],
+      "craby-modules/*": ["./node_modules/craby-modules/*"],
+      "@zed/ui": ["./packages/zed-ui/src"],
+      "@zed/ui/*": ["./packages/zed-ui/src/*"]
+    }
+  },
+  "include": ["src/**/*", "packages/*/src/**/*"],
+  "exclude": ["node_modules"]
+}

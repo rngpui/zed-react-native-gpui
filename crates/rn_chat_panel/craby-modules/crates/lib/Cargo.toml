@@ -1,0 +1,23 @@
+[package]
+name = "zedmodules"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+craby = { path = "../../../../../../craby/crates/craby" }
+cxx = { version = "1.0", features = ["c++20"] }
+serde_json = "1.0"
+log = "0.4"
+
+# Shared types for command bus (breaks cyclic dependency)
+rn_chat_panel_types = { path = "../../../crates/types" }
+
+[build-dependencies]
+cxx-build = "1.0"
+cc = "1.0"
+
+[lib]
+name = "zedmodules"
+# staticlib for C++ linkage via CXX bridge, rlib for Rust consumers
+crate-type = ["staticlib", "rlib"]

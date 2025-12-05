@@ -4,15 +4,20 @@
 using namespace metal;
 
 float4 hsla_to_rgba(Hsla hsla);
-float3 srgb_to_linear(float3 color);
-float3 linear_to_srgb(float3 color);
-float4 srgb_to_oklab(float4 color);
-float4 oklab_to_srgb(float4 color);
+float srgb_to_linear_component(float a);
+float3 srgb_to_linear(float3 srgb);
+float linear_to_srgb_component(float a);
+float3 linear_to_srgb(float3 linear);
+float4 srgba_to_linear(float4 color);
+float4 linear_to_srgba(float4 color);
+float4 linear_srgb_to_oklab(float4 color);
+float4 oklab_to_linear_srgb(float4 color);
 float4 to_device_position(float2 unit_vertex, Bounds_ScaledPixels bounds,
                           constant Size_DevicePixels *viewport_size);
 float4 to_device_position_transformed(float2 unit_vertex, Bounds_ScaledPixels bounds,
                           TransformationMatrix transformation,
                           constant Size_DevicePixels *input_viewport_size);
+float2 apply_transform(float2 position, TransformationMatrix transformation);
 
 float2 to_tile_position(float2 unit_vertex, AtlasTile tile,
                         constant Size_DevicePixels *atlas_size);
@@ -20,6 +25,7 @@ float4 distance_from_clip_rect(float2 unit_vertex, Bounds_ScaledPixels bounds,
                                Bounds_ScaledPixels clip_bounds);
 float4 distance_from_clip_rect_transformed(float2 unit_vertex, Bounds_ScaledPixels bounds,
                                Bounds_ScaledPixels clip_bounds, TransformationMatrix transformation);
+float2 to_local_position(float2 world, TransformationMatrix transformation);
 float corner_dash_velocity(float dv1, float dv2);
 float dash_alpha(float t, float period, float length, float dash_velocity,
                  float antialias_threshold);
@@ -44,6 +50,10 @@ struct GradientColor {
 };
 GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid, Hsla color0, Hsla color1);
 
+float4 to_gradient_interpolation_space(float4 color, uint color_space);
+float4 from_gradient_interpolation_space(float4 color, uint color_space);
+float4 mix_premultiplied(float4 c0, float4 c1, float t);
+
 struct QuadVertexOutput {
   uint quad_id [[flat]];
   float4 position [[position]];
@@ -63,21 +73,24 @@ struct QuadFragmentInput {
   float4 background_color1 [[flat]];
 };
 
-vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
-                                    uint quad_id [[instance_id]],
-                                    constant float2 *unit_vertices
-                                    [[buffer(QuadInputIndex_Vertices)]],
-                                    constant Quad *quads
-                                    [[buffer(QuadInputIndex_Quads)]],
-                                    constant Size_DevicePixels *viewport_size
-                                    [[buffer(QuadInputIndex_ViewportSize)]]) {
-  float2 unit_vertex = unit_vertices[unit_vertex_id];
-  Quad quad = quads[quad_id];
-  float4 device_position =
-      to_device_position(unit_vertex, quad.bounds, viewport_size);
-  float4 clip_distance = distance_from_clip_rect(unit_vertex, quad.bounds,
-                                                 quad.content_mask.bounds);
-  float4 border_color = hsla_to_rgba(quad.border_color);
+	vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
+	                                    uint quad_id [[instance_id]],
+	                                    constant float2 *unit_vertices
+	                                    [[buffer(QuadInputIndex_Vertices)]],
+	                                    constant Quad *quads
+	                                    [[buffer(QuadInputIndex_Quads)]],
+	                                    constant TransformationMatrix *quad_transforms
+	                                    [[buffer(QuadInputIndex_Transforms)]],
+	                                    constant Size_DevicePixels *viewport_size
+	                                    [[buffer(QuadInputIndex_ViewportSize)]]) {
+	  float2 unit_vertex = unit_vertices[unit_vertex_id];
+	  Quad quad = quads[quad_id];
+	  TransformationMatrix transform = quad_transforms[quad_id];
+	  float4 device_position =
+	      to_device_position_transformed(unit_vertex, quad.bounds, transform, viewport_size);
+	   float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, quad.bounds,
+	                                                 quad.content_mask.bounds, transform);
+	  float4 border_color = hsla_to_rgba(quad.border_color);
 
   GradientColor gradient = prepare_fill_color(
     quad.background.tag,
@@ -97,11 +110,17 @@ vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
-fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
-                              constant Quad *quads
-                              [[buffer(QuadInputIndex_Quads)]]) {
-  Quad quad = quads[input.quad_id];
-  float4 background_color = fill_color(quad.background, input.position.xy, quad.bounds,
+	fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
+	                              constant Quad *quads
+	                              [[buffer(QuadInputIndex_Quads)]],
+	                              constant TransformationMatrix *quad_transforms
+	                              [[buffer(QuadInputIndex_Transforms)]]) {
+	  Quad quad = quads[input.quad_id];
+	  TransformationMatrix transform = quad_transforms[input.quad_id];
+	  // Map device-space position to the quad's local space using the inverse transform
+	  float2 local_position = to_local_position(input.position.xy, transform);
+
+  float4 background_color = fill_color(quad.background, local_position, quad.bounds,
     input.background_solid, input.background_color0, input.background_color1);
 
   bool unrounded = quad.corner_radii.top_left == 0.0 &&
@@ -120,7 +139,7 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
 
   float2 size = float2(quad.bounds.size.width, quad.bounds.size.height);
   float2 half_size = size / 2.0;
-  float2 point = input.position.xy - float2(quad.bounds.origin.x, quad.bounds.origin.y);
+  float2 point = local_position - float2(quad.bounds.origin.x, quad.bounds.origin.y);
   float2 center_to_point = point - half_size;
 
   // Signed distance field threshold for inclusion of pixels. 0.5 is the
@@ -446,6 +465,126 @@ float quarter_ellipse_sdf(float2 point, float2 radii) {
   return unit_circle_sdf * (radii.x + radii.y) * -0.5;
 }
 
+struct BackdropBlurVertexOutput {
+  uint blur_id [[flat]];
+  float4 position [[position]];
+  float clip_distance [[clip_distance]][4];
+};
+
+struct BackdropBlurFragmentInput {
+  uint blur_id [[flat]];
+  float4 position [[position]];
+};
+
+	vertex BackdropBlurVertexOutput backdrop_blur_vertex(
+	    uint unit_vertex_id [[vertex_id]], uint blur_id [[instance_id]],
+	    constant float2 *unit_vertices [[buffer(BackdropBlurInputIndex_Vertices)]],
+	    constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_BackdropBlurs)]],
+	    constant TransformationMatrix *blur_transforms
+	    [[buffer(BackdropBlurInputIndex_Transforms)]],
+	    constant Size_DevicePixels *viewport_size [[buffer(BackdropBlurInputIndex_ViewportSize)]]) {
+	  float2 unit_vertex = unit_vertices[unit_vertex_id];
+	  BackdropBlur blur = blurs[blur_id];
+	  TransformationMatrix transform = blur_transforms[blur_id];
+
+	  float4 device_position =
+	      to_device_position_transformed(unit_vertex, blur.bounds, transform, viewport_size);
+	  float4 clip_distance =
+	      distance_from_clip_rect_transformed(unit_vertex, blur.bounds, blur.content_mask.bounds, transform);
+
+  return BackdropBlurVertexOutput{
+      blur_id,
+      device_position,
+      {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
+}
+
+	fragment float4 backdrop_blur_fragment(
+	    BackdropBlurFragmentInput input [[stage_in]],
+	    constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_BackdropBlurs)]],
+	    constant TransformationMatrix *blur_transforms
+	    [[buffer(BackdropBlurInputIndex_Transforms)]],
+	    constant Size_DevicePixels *viewport_size [[buffer(BackdropBlurInputIndex_ViewportSize)]],
+	    texture2d<float> backdrop_texture [[texture(BackdropBlurInputIndex_BackdropTexture)]]) {
+	  BackdropBlur blur = blurs[input.blur_id];
+	  TransformationMatrix transform = blur_transforms[input.blur_id];
+
+	  // Compute mask in the quad's local space so rotations/transforms work.
+	  float2 local_position = to_local_position(input.position.xy, transform);
+	  float mask = saturate(0.5 - quad_sdf(local_position, blur.bounds, blur.corner_radii));
+
+  float2 viewport = float2(viewport_size->width, viewport_size->height);
+  float2 uv = input.position.xy / viewport;
+  float2 texel = 1.0 / viewport;
+
+  float sigma = max(1.0, blur.blur_radius);
+  float step = max(1.0, sigma * 0.35);
+
+  constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
+
+  float4 accum = float4(0.0);
+  float wsum = 0.0;
+
+  // Higher-sample isotropic kernel (2 rings) to avoid "smear" artifacts from
+  // the low-sample cross kernel at larger radii.
+  constexpr float kInvSqrt2 = 0.70710678;
+  float2 dirs[8] = {
+      float2(1.0, 0.0),
+      float2(kInvSqrt2, kInvSqrt2),
+      float2(0.0, 1.0),
+      float2(-kInvSqrt2, kInvSqrt2),
+      float2(-1.0, 0.0),
+      float2(-kInvSqrt2, -kInvSqrt2),
+      float2(0.0, -1.0),
+      float2(kInvSqrt2, -kInvSqrt2),
+  };
+
+  // Center sample
+  {
+    float2 d = float2(0.0, 0.0);
+    float w = 1.0;
+    accum += backdrop_texture.sample(s, uv) * w;
+    wsum += w;
+  }
+
+  // Ring 1 + Ring 2
+  for (int i = 0; i < 8; i++) {
+    float2 dir = dirs[i];
+    float2 d1 = dir * step;
+    float2 d2 = dir * (2.0 * step);
+
+    float w1 = exp(-(d1.x * d1.x + d1.y * d1.y) / (2.0 * sigma * sigma));
+    float w2 = exp(-(d2.x * d2.x + d2.y * d2.y) / (2.0 * sigma * sigma));
+
+    float2 suv1 = uv + d1 * texel;
+    float2 suv2 = uv + d2 * texel;
+
+    accum += backdrop_texture.sample(s, suv1) * w1;
+    accum += backdrop_texture.sample(s, suv2) * w2;
+    wsum += (w1 + w2);
+  }
+
+  // Diagonal ring (helps keep large radii from looking anisotropic)
+  float2 diag_dirs[4] = {
+      float2(1.0, 1.0),
+      float2(1.0, -1.0),
+      float2(-1.0, 1.0),
+      float2(-1.0, -1.0),
+  };
+  for (int i = 0; i < 4; i++) {
+    float2 d = normalize(diag_dirs[i]) * (1.5 * step);
+    float w = exp(-(d.x * d.x + d.y * d.y) / (2.0 * sigma * sigma));
+    float2 suv = uv + d * texel;
+    accum += backdrop_texture.sample(s, suv) * w;
+    wsum += w;
+  }
+
+  float4 blurred = accum / max(wsum, 0.00001);
+  float4 tint = hsla_to_rgba(blur.tint);
+  float4 out_color = over(blurred, tint);
+  out_color.a *= mask;
+  return out_color;
+}
+
 struct ShadowVertexOutput {
   float4 position [[position]];
   float4 color [[flat]];
@@ -459,14 +598,17 @@ struct ShadowFragmentInput {
   uint shadow_id [[flat]];
 };
 
-vertex ShadowVertexOutput shadow_vertex(
-    uint unit_vertex_id [[vertex_id]], uint shadow_id [[instance_id]],
-    constant float2 *unit_vertices [[buffer(ShadowInputIndex_Vertices)]],
-    constant Shadow *shadows [[buffer(ShadowInputIndex_Shadows)]],
-    constant Size_DevicePixels *viewport_size
-    [[buffer(ShadowInputIndex_ViewportSize)]]) {
-  float2 unit_vertex = unit_vertices[unit_vertex_id];
-  Shadow shadow = shadows[shadow_id];
+	vertex ShadowVertexOutput shadow_vertex(
+	    uint unit_vertex_id [[vertex_id]], uint shadow_id [[instance_id]],
+	    constant float2 *unit_vertices [[buffer(ShadowInputIndex_Vertices)]],
+	    constant Shadow *shadows [[buffer(ShadowInputIndex_Shadows)]],
+	    constant TransformationMatrix *shadow_transforms
+	    [[buffer(ShadowInputIndex_Transforms)]],
+	    constant Size_DevicePixels *viewport_size
+	    [[buffer(ShadowInputIndex_ViewportSize)]]) {
+	  float2 unit_vertex = unit_vertices[unit_vertex_id];
+	  Shadow shadow = shadows[shadow_id];
+	  TransformationMatrix transform = shadow_transforms[shadow_id];
 
   float margin = 3. * shadow.blur_radius;
   // Set the bounds of the shadow and adjust its size based on the shadow's
@@ -477,11 +619,11 @@ vertex ShadowVertexOutput shadow_vertex(
   bounds.size.width += 2. * margin;
   bounds.size.height += 2. * margin;
 
-  float4 device_position =
-      to_device_position(unit_vertex, bounds, viewport_size);
-  float4 clip_distance =
-      distance_from_clip_rect(unit_vertex, bounds, shadow.content_mask.bounds);
-  float4 color = hsla_to_rgba(shadow.color);
+	  float4 device_position =
+	      to_device_position_transformed(unit_vertex, bounds, transform, viewport_size);
+	  float4 clip_distance =
+	      distance_from_clip_rect_transformed(unit_vertex, bounds, shadow.content_mask.bounds, transform);
+	  float4 color = hsla_to_rgba(shadow.color);
 
   return ShadowVertexOutput{
       device_position,
@@ -490,16 +632,20 @@ vertex ShadowVertexOutput shadow_vertex(
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
-fragment float4 shadow_fragment(ShadowFragmentInput input [[stage_in]],
-                                constant Shadow *shadows
-                                [[buffer(ShadowInputIndex_Shadows)]]) {
-  Shadow shadow = shadows[input.shadow_id];
+	fragment float4 shadow_fragment(ShadowFragmentInput input [[stage_in]],
+	                                constant Shadow *shadows
+	                                [[buffer(ShadowInputIndex_Shadows)]],
+	                                constant TransformationMatrix *shadow_transforms
+	                                [[buffer(ShadowInputIndex_Transforms)]]) {
+	  Shadow shadow = shadows[input.shadow_id];
+	  TransformationMatrix transform = shadow_transforms[input.shadow_id];
 
+	  float2 local_position = to_local_position(input.position.xy, transform);
   float2 origin = float2(shadow.bounds.origin.x, shadow.bounds.origin.y);
   float2 size = float2(shadow.bounds.size.width, shadow.bounds.size.height);
   float2 half_size = size / 2.;
   float2 center = origin + half_size;
-  float2 point = input.position.xy - center;
+  float2 point = local_position - center;
   float corner_radius;
   if (point.x < 0.) {
     if (point.y < 0.) {
@@ -554,19 +700,22 @@ struct UnderlineFragmentInput {
   uint underline_id [[flat]];
 };
 
-vertex UnderlineVertexOutput underline_vertex(
-    uint unit_vertex_id [[vertex_id]], uint underline_id [[instance_id]],
-    constant float2 *unit_vertices [[buffer(UnderlineInputIndex_Vertices)]],
-    constant Underline *underlines [[buffer(UnderlineInputIndex_Underlines)]],
-    constant Size_DevicePixels *viewport_size
-    [[buffer(ShadowInputIndex_ViewportSize)]]) {
-  float2 unit_vertex = unit_vertices[unit_vertex_id];
-  Underline underline = underlines[underline_id];
-  float4 device_position =
-      to_device_position(unit_vertex, underline.bounds, viewport_size);
-  float4 clip_distance = distance_from_clip_rect(unit_vertex, underline.bounds,
-                                                 underline.content_mask.bounds);
-  float4 color = hsla_to_rgba(underline.color);
+	vertex UnderlineVertexOutput underline_vertex(
+	    uint unit_vertex_id [[vertex_id]], uint underline_id [[instance_id]],
+	    constant float2 *unit_vertices [[buffer(UnderlineInputIndex_Vertices)]],
+	    constant Underline *underlines [[buffer(UnderlineInputIndex_Underlines)]],
+	    constant TransformationMatrix *underline_transforms
+	    [[buffer(UnderlineInputIndex_Transforms)]],
+	    constant Size_DevicePixels *viewport_size
+	    [[buffer(ShadowInputIndex_ViewportSize)]]) {
+	  float2 unit_vertex = unit_vertices[unit_vertex_id];
+	  Underline underline = underlines[underline_id];
+	  TransformationMatrix transform = underline_transforms[underline_id];
+	  float4 device_position =
+	      to_device_position_transformed(unit_vertex, underline.bounds, transform, viewport_size);
+	  float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, underline.bounds,
+	                                                 underline.content_mask.bounds, transform);
+	  float4 color = hsla_to_rgba(underline.color);
   return UnderlineVertexOutput{
       device_position,
       color,
@@ -574,19 +723,23 @@ vertex UnderlineVertexOutput underline_vertex(
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
-fragment float4 underline_fragment(UnderlineFragmentInput input [[stage_in]],
-                                   constant Underline *underlines
-                                   [[buffer(UnderlineInputIndex_Underlines)]]) {
+	fragment float4 underline_fragment(UnderlineFragmentInput input [[stage_in]],
+	                                   constant Underline *underlines
+	                                   [[buffer(UnderlineInputIndex_Underlines)]],
+	                                   constant TransformationMatrix *underline_transforms
+	                                   [[buffer(UnderlineInputIndex_Transforms)]]) {
   const float WAVE_FREQUENCY = 2.0;
   const float WAVE_HEIGHT_RATIO = 0.8;
 
-  Underline underline = underlines[input.underline_id];
-  if (underline.wavy) {
-    float half_thickness = underline.thickness * 0.5;
-    float2 origin =
-        float2(underline.bounds.origin.x, underline.bounds.origin.y);
+	  Underline underline = underlines[input.underline_id];
+	  TransformationMatrix transform = underline_transforms[input.underline_id];
+	  if (underline.wavy) {
+	    float half_thickness = underline.thickness * 0.5;
+	    float2 origin =
+	        float2(underline.bounds.origin.x, underline.bounds.origin.y);
+	    float2 local_position = to_local_position(input.position.xy, transform);
 
-    float2 st = ((input.position.xy - origin) / underline.bounds.size.height) -
+    float2 st = ((local_position - origin) / underline.bounds.size.height) -
                 float2(0., 0.5);
     float frequency = (M_PI_F * WAVE_FREQUENCY * underline.thickness) / underline.bounds.size.height;
     float amplitude = (underline.thickness * WAVE_HEIGHT_RATIO) / underline.bounds.size.height;
@@ -672,22 +825,25 @@ struct PolychromeSpriteFragmentInput {
   uint sprite_id [[flat]];
 };
 
-vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex(
-    uint unit_vertex_id [[vertex_id]], uint sprite_id [[instance_id]],
-    constant float2 *unit_vertices [[buffer(SpriteInputIndex_Vertices)]],
-    constant PolychromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
-    constant Size_DevicePixels *viewport_size
-    [[buffer(SpriteInputIndex_ViewportSize)]],
-    constant Size_DevicePixels *atlas_size
-    [[buffer(SpriteInputIndex_AtlasTextureSize)]]) {
+	vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex(
+	    uint unit_vertex_id [[vertex_id]], uint sprite_id [[instance_id]],
+	    constant float2 *unit_vertices [[buffer(SpriteInputIndex_Vertices)]],
+	    constant PolychromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
+	    constant TransformationMatrix *sprite_transforms
+	    [[buffer(SpriteInputIndex_Transforms)]],
+	    constant Size_DevicePixels *viewport_size
+	    [[buffer(SpriteInputIndex_ViewportSize)]],
+	    constant Size_DevicePixels *atlas_size
+	    [[buffer(SpriteInputIndex_AtlasTextureSize)]]) {
 
-  float2 unit_vertex = unit_vertices[unit_vertex_id];
-  PolychromeSprite sprite = sprites[sprite_id];
-  float4 device_position =
-      to_device_position(unit_vertex, sprite.bounds, viewport_size);
-  float4 clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds,
-                                                 sprite.content_mask.bounds);
-  float2 tile_position = to_tile_position(unit_vertex, sprite.tile, atlas_size);
+	  float2 unit_vertex = unit_vertices[unit_vertex_id];
+	  PolychromeSprite sprite = sprites[sprite_id];
+	  TransformationMatrix transform = sprite_transforms[sprite_id];
+	  float4 device_position =
+	      to_device_position_transformed(unit_vertex, sprite.bounds, transform, viewport_size);
+	  float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds,
+	                                                 sprite.content_mask.bounds, transform);
+	  float2 tile_position = to_tile_position(unit_vertex, sprite.tile, atlas_size);
   return PolychromeSpriteVertexOutput{
       device_position,
       tile_position,
@@ -695,17 +851,22 @@ vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex(
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
-fragment float4 polychrome_sprite_fragment(
-    PolychromeSpriteFragmentInput input [[stage_in]],
-    constant PolychromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
-    texture2d<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
-  PolychromeSprite sprite = sprites[input.sprite_id];
+	fragment float4 polychrome_sprite_fragment(
+	    PolychromeSpriteFragmentInput input [[stage_in]],
+	    constant PolychromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
+	    constant TransformationMatrix *sprite_transforms
+	    [[buffer(SpriteInputIndex_Transforms)]],
+	    texture2d<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
+	  PolychromeSprite sprite = sprites[input.sprite_id];
+	  TransformationMatrix transform = sprite_transforms[input.sprite_id];
   constexpr sampler atlas_texture_sampler(mag_filter::linear,
                                           min_filter::linear);
-  float4 sample =
-      atlas_texture.sample(atlas_texture_sampler, input.tile_position);
+	  float4 sample =
+	      atlas_texture.sample(atlas_texture_sampler, input.tile_position);
+	  // Map to local coordinates for correct rounded-corner SDF when transformed.
+	  float2 local_position = to_local_position(input.position.xy, transform);
   float distance =
-      quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+      quad_sdf(local_position, sprite.bounds, sprite.corner_radii);
 
   float4 color = sample;
   if (sprite.grayscale) {
@@ -934,20 +1095,48 @@ float4 hsla_to_rgba(Hsla hsla) {
   return rgba;
 }
 
-float3 srgb_to_linear(float3 color) {
-  return pow(color, float3(2.2));
+// https://gamedev.stackexchange.com/questions/92015/optimized-linear-to-srgb-glsl
+float srgb_to_linear_component(float a) {
+  if (a <= 0.04045) {
+    return a / 12.92;
+  }
+  return pow((a + 0.055) / 1.055, 2.4);
 }
 
-float3 linear_to_srgb(float3 color) {
-  return pow(color, float3(1.0 / 2.2));
+float3 srgb_to_linear(float3 srgb) {
+  return float3(
+    srgb_to_linear_component(srgb.r),
+    srgb_to_linear_component(srgb.g),
+    srgb_to_linear_component(srgb.b)
+  );
 }
 
-// Converts a sRGB color to the Oklab color space.
+float linear_to_srgb_component(float a) {
+  if (a <= 0.0031308) {
+    return a * 12.92;
+  }
+  return 1.055 * pow(a, 1.0 / 2.4) - 0.055;
+}
+
+float3 linear_to_srgb(float3 linear) {
+  return float3(
+    linear_to_srgb_component(linear.r),
+    linear_to_srgb_component(linear.g),
+    linear_to_srgb_component(linear.b)
+  );
+}
+
+float4 srgba_to_linear(float4 color) {
+  return float4(srgb_to_linear(color.rgb), color.a);
+}
+
+float4 linear_to_srgba(float4 color) {
+  return float4(linear_to_srgb(color.rgb), color.a);
+}
+
+// Converts a linear sRGB color to the Oklab color space.
 // Reference: https://bottosson.github.io/posts/oklab/#converting-from-linear-srgb-to-oklab
-float4 srgb_to_oklab(float4 color) {
-  // Convert non-linear sRGB to linear sRGB
-  color = float4(srgb_to_linear(color.rgb), color.a);
-
+float4 linear_srgb_to_oklab(float4 color) {
   float l = 0.4122214708 * color.r + 0.5363325363 * color.g + 0.0514459929 * color.b;
   float m = 0.2119034982 * color.r + 0.6806995451 * color.g + 0.1073969566 * color.b;
   float s = 0.0883024619 * color.r + 0.2817188376 * color.g + 0.6299787005 * color.b;
@@ -961,11 +1150,11 @@ float4 srgb_to_oklab(float4 color) {
    	1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
    	0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
    	color.a
-  );
+	  );
 }
 
-// Converts an Oklab color to the sRGB color space.
-float4 oklab_to_srgb(float4 color) {
+// Converts an Oklab color to linear sRGB space.
+float4 oklab_to_linear_srgb(float4 color) {
   float l_ = color.r + 0.3963377774 * color.g + 0.2158037573 * color.b;
   float m_ = color.r - 0.1055613458 * color.g - 0.0638541728 * color.b;
   float s_ = color.r - 0.0894841775 * color.g - 1.2914855480 * color.b;
@@ -974,14 +1163,12 @@ float4 oklab_to_srgb(float4 color) {
   float m = m_ * m_ * m_;
   float s = s_ * s_ * s_;
 
-  float3 linear_rgb = float3(
-   	4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
-   	-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
-   	-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
-  );
-
-  // Convert linear sRGB to non-linear sRGB
-  return float4(linear_to_srgb(linear_rgb), color.a);
+	  float3 linear_rgb = float3(
+	   	4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+	   	-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+	   	-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
+	  );
+	  return float4(linear_rgb, color.a);
 }
 
 float4 to_device_position(float2 unit_vertex, Bounds_ScaledPixels bounds,
@@ -996,6 +1183,31 @@ float4 to_device_position(float2 unit_vertex, Bounds_ScaledPixels bounds,
   return float4(device_position, 0., 1.);
 }
 
+float2 apply_transform(float2 position, TransformationMatrix transformation) {
+  float2 transformed_position = float2(0, 0);
+  transformed_position[0] = position[0] * transformation.rotation_scale[0][0] + position[1] * transformation.rotation_scale[0][1];
+  transformed_position[1] = position[0] * transformation.rotation_scale[1][0] + position[1] * transformation.rotation_scale[1][1];
+  transformed_position[0] += transformation.translation[0];
+  transformed_position[1] += transformation.translation[1];
+  return transformed_position;
+}
+
+float2 to_local_position(float2 world, TransformationMatrix transformation) {
+  float a = transformation.rotation_scale[0][0];
+  float b = transformation.rotation_scale[0][1];
+  float c = transformation.rotation_scale[1][0];
+  float d = transformation.rotation_scale[1][1];
+  float tx = transformation.translation[0];
+  float ty = transformation.translation[1];
+  float det = a * d - b * c;
+  float2 tmp = float2(world.x - tx, world.y - ty);
+
+  float2 local_position;
+  local_position.x = (d * tmp.x + (-b) * tmp.y) / det;
+  local_position.y = ((-c) * tmp.x + a * tmp.y) / det;
+  return local_position;
+}
+
 float4 to_device_position_transformed(float2 unit_vertex, Bounds_ScaledPixels bounds,
                           TransformationMatrix transformation,
                           constant Size_DevicePixels *input_viewport_size) {
@@ -1003,14 +1215,7 @@ float4 to_device_position_transformed(float2 unit_vertex, Bounds_ScaledPixels bo
       unit_vertex * float2(bounds.size.width, bounds.size.height) +
       float2(bounds.origin.x, bounds.origin.y);
 
-  // Apply the transformation matrix to the position via matrix multiplication.
-  float2 transformed_position = float2(0, 0);
-  transformed_position[0] = position[0] * transformation.rotation_scale[0][0] + position[1] * transformation.rotation_scale[0][1];
-  transformed_position[1] = position[0] * transformation.rotation_scale[1][0] + position[1] * transformation.rotation_scale[1][1];
-
-  // Add in the translation component of the transformation matrix.
-  transformed_position[0] += transformation.translation[0];
-  transformed_position[1] += transformation.translation[1];
+  float2 transformed_position = apply_transform(position, transformation);
 
   float2 viewport_size = float2((float)input_viewport_size->width,
                                 (float)input_viewport_size->height);
@@ -1116,11 +1321,7 @@ float4 distance_from_clip_rect_transformed(float2 unit_vertex, Bounds_ScaledPixe
   float2 position =
       unit_vertex * float2(bounds.size.width, bounds.size.height) +
       float2(bounds.origin.x, bounds.origin.y);
-  float2 transformed_position = float2(0, 0);
-  transformed_position[0] = position[0] * transformation.rotation_scale[0][0] + position[1] * transformation.rotation_scale[0][1];
-  transformed_position[1] = position[0] * transformation.rotation_scale[1][0] + position[1] * transformation.rotation_scale[1][1];
-  transformed_position[0] += transformation.translation[0];
-  transformed_position[1] += transformation.translation[1];
+  float2 transformed_position = apply_transform(position, transformation);
 
   return float4(transformed_position.x - clip_bounds.origin.x,
                 clip_bounds.origin.x + clip_bounds.size.width - transformed_position.x,
@@ -1148,14 +1349,42 @@ GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid,
 
     // Prepare color space in vertex for avoid conversion
     // in fragment shader for performance reasons
-    if (color_space == 1) {
+    if (color_space == 0) {
+      // sRGB (interpolate in gamma-encoded sRGBA)
+      out.color0 = linear_to_srgba(out.color0);
+      out.color1 = linear_to_srgba(out.color1);
+    } else if (color_space == 1) {
       // Oklab
-      out.color0 = srgb_to_oklab(out.color0);
-      out.color1 = srgb_to_oklab(out.color1);
+      out.color0 = linear_srgb_to_oklab(out.color0);
+      out.color1 = linear_srgb_to_oklab(out.color1);
     }
   }
 
   return out;
+}
+
+float4 to_gradient_interpolation_space(float4 color, uint color_space) {
+  if (color_space == 1) {
+    return linear_srgb_to_oklab(color);
+  }
+  return linear_to_srgba(color);
+}
+
+float4 from_gradient_interpolation_space(float4 color, uint color_space) {
+  if (color_space == 1) {
+    return oklab_to_linear_srgb(color);
+  }
+  return srgba_to_linear(color);
+}
+
+float4 mix_premultiplied(float4 c0, float4 c1, float t) {
+  float4 p0 = float4(c0.rgb * c0.a, c0.a);
+  float4 p1 = float4(c1.rgb * c1.a, c1.a);
+  float4 p = mix(p0, p1, t);
+  if (p.a <= 0.0) {
+    return float4(0.0);
+  }
+  return float4(p.rgb / p.a, p.a);
 }
 
 float2x2 rotate2d(float angle) {
@@ -1198,20 +1427,58 @@ float4 fill_color(Background background,
       } else {
           t = (t + half_size.y) / bounds.size.height;
       }
-
-      // Adjust t based on the stop percentages
-      t = (t - background.colors[0].percentage)
-        / (background.colors[1].percentage
-        - background.colors[0].percentage);
       t = clamp(t, 0.0, 1.0);
 
-      switch (background.color_space) {
-        case 0:
-          color = mix(color0, color1, t);
-          break;
-        case 1: {
-          float4 oklab_color = mix(color0, color1, t);
-          color = oklab_to_srgb(oklab_color);
+      uint stop_count = min(background.stop_count, 8u);
+      if (stop_count == 0u) {
+        color = float4(0.0);
+        break;
+      }
+      if (stop_count == 1u) {
+        color = hsla_to_rgba(background.colors[0].color);
+        break;
+      }
+
+      if (stop_count == 2u) {
+        float p0 = background.colors[0].percentage;
+        float p1 = background.colors[1].percentage;
+        float denom = max(p1 - p0, 0.000001);
+        float local_t = clamp((t - p0) / denom, 0.0, 1.0);
+
+        float4 interp = mix_premultiplied(color0, color1, local_t);
+        color = from_gradient_interpolation_space(interp, background.color_space);
+        break;
+      }
+
+      float first_p = background.colors[0].percentage;
+      if (t <= first_p) {
+        color = hsla_to_rgba(background.colors[0].color);
+        break;
+      }
+      uint last_index = stop_count - 1u;
+      float last_p = background.colors[last_index].percentage;
+      if (t >= last_p) {
+        color = hsla_to_rgba(background.colors[last_index].color);
+        break;
+      }
+
+      color = hsla_to_rgba(background.colors[last_index].color);
+      for (uint i = 0u; i + 1u < stop_count; i++) {
+        float p0 = background.colors[i].percentage;
+        float p1 = background.colors[i + 1u].percentage;
+        if (t <= p1) {
+          float denom = max(p1 - p0, 0.000001);
+          float local_t = clamp((t - p0) / denom, 0.0, 1.0);
+
+          float4 c0 = (i == 0u)
+            ? color0
+            : ((i == 1u) ? color1 : to_gradient_interpolation_space(hsla_to_rgba(background.colors[i].color), background.color_space));
+          float4 c1 = (i + 1u == 0u)
+            ? color0
+            : ((i + 1u == 1u) ? color1 : to_gradient_interpolation_space(hsla_to_rgba(background.colors[i + 1u].color), background.color_space));
+
+          float4 interp = mix_premultiplied(c0, c1, local_t);
+          color = from_gradient_interpolation_space(interp, background.color_space);
           break;
         }
       }

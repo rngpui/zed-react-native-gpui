@@ -1,0 +1,39 @@
+[
+  {
+    "context": "fabric_text_input",
+    "bindings": {
+      "backspace": "fabric_text_edit::TextBackspace",
+      "delete": "fabric_text_edit::TextDeleteForward",
+      "ctrl-backspace": "fabric_text_edit::TextDeleteWordBackward",
+      "ctrl-delete": "fabric_text_edit::TextDeleteWordForward",
+      "home": "fabric_text_edit::TextMoveLineStart",
+      "end": "fabric_text_edit::TextMoveLineEnd",
+      "ctrl-home": "fabric_text_edit::TextMoveDocStart",
+      "ctrl-end": "fabric_text_edit::TextMoveDocEnd",
+      "left": "fabric_text_edit::TextMoveLeft",
+      "right": "fabric_text_edit::TextMoveRight",
+      "up": "fabric_text_edit::TextMoveUp",
+      "down": "fabric_text_edit::TextMoveDown",
+      "ctrl-left": "fabric_text_edit::TextMoveWordLeft",
+      "ctrl-right": "fabric_text_edit::TextMoveWordRight",
+      "shift-left": "fabric_text_edit::TextSelectLeft",
+      "shift-right": "fabric_text_edit::TextSelectRight",
+      "shift-up": "fabric_text_edit::TextSelectUp",
+      "shift-down": "fabric_text_edit::TextSelectDown",
+      "ctrl-shift-left": "fabric_text_edit::TextSelectWordLeft",
+      "ctrl-shift-right": "fabric_text_edit::TextSelectWordRight",
+      "shift-home": "fabric_text_edit::TextSelectLineStart",
+      "shift-end": "fabric_text_edit::TextSelectLineEnd",
+      "ctrl-shift-home": "fabric_text_edit::TextSelectDocStart",
+      "ctrl-shift-end": "fabric_text_edit::TextSelectDocEnd",
+      "ctrl-a": "fabric_text_edit::TextSelectAll",
+      "ctrl-c": "fabric_text_edit::TextCopy",
+      "ctrl-x": "fabric_text_edit::TextCut",
+      "ctrl-v": "fabric_text_edit::TextPaste",
+      "ctrl-z": "fabric_text_edit::TextUndo",
+      "ctrl-shift-z": "fabric_text_edit::TextRedo",
+      "ctrl-y": "fabric_text_edit::TextRedo"
+    }
+  }
+]
+

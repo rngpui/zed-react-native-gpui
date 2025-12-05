@@ -125,6 +125,11 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     fn enabled(&self, _cx: &App) -> bool {
         true
     }
+    /// Whether this panel needs overflow visible (e.g., for dropdown menus).
+    /// When true, the dock container won't clip this panel's content.
+    fn needs_overflow_visible(&self) -> bool {
+        false
+    }
 }
 
 pub trait PanelHandle: Send + Sync {
@@ -149,6 +154,7 @@ pub trait PanelHandle: Send + Sync {
     fn to_any(&self) -> AnyView;
     fn activation_priority(&self, cx: &App) -> u32;
     fn enabled(&self, cx: &App) -> bool;
+    fn needs_overflow_visible(&self, cx: &App) -> bool;
     fn move_to_next_position(&self, window: &mut Window, cx: &mut App) {
         let current_position = self.position(window, cx);
         let next_position = [
@@ -252,6 +258,10 @@ where
 
     fn enabled(&self, cx: &App) -> bool {
         self.read(cx).enabled(cx)
+    }
+
+    fn needs_overflow_visible(&self, cx: &App) -> bool {
+        self.read(cx).needs_overflow_visible()
     }
 }
 
@@ -918,7 +928,9 @@ impl Render for Dock {
                 .flex()
                 .bg(cx.theme().colors().panel_background)
                 .border_color(cx.theme().colors().border)
-                .overflow_hidden()
+                .when(!entry.panel.needs_overflow_visible(cx), |this| {
+                    this.overflow_hidden()
+                })
                 .map(|this| match self.position().axis() {
                     Axis::Horizontal => this.w(size).h_full().flex_row(),
                     Axis::Vertical => this.h(size).w_full().flex_col(),

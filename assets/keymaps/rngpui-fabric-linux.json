@@ -1,0 +1,43 @@
+[
+  {
+    "context": "fabric_text_input",
+    "bindings": {
+      "backspace": "fabric_text_edit::TextBackspace",
+      "delete": "fabric_text_edit::TextDeleteForward",
+      "alt-backspace": "fabric_text_edit::TextDeleteWordBackward",
+      "alt-delete": "fabric_text_edit::TextDeleteWordForward",
+      "ctrl-u": "fabric_text_edit::TextDeleteToLineStart",
+      "ctrl-k": "fabric_text_edit::TextDeleteToLineEnd",
+      "left": "fabric_text_edit::TextMoveLeft",
+      "right": "fabric_text_edit::TextMoveRight",
+      "up": "fabric_text_edit::TextMoveUp",
+      "down": "fabric_text_edit::TextMoveDown",
+      "alt-left": "fabric_text_edit::TextMoveWordLeft",
+      "alt-right": "fabric_text_edit::TextMoveWordRight",
+      "home": "fabric_text_edit::TextMoveLineStart",
+      "end": "fabric_text_edit::TextMoveLineEnd",
+      "ctrl-home": "fabric_text_edit::TextMoveDocStart",
+      "ctrl-end": "fabric_text_edit::TextMoveDocEnd",
+      "shift-left": "fabric_text_edit::TextSelectLeft",
+      "shift-right": "fabric_text_edit::TextSelectRight",
+      "shift-up": "fabric_text_edit::TextSelectUp",
+      "shift-down": "fabric_text_edit::TextSelectDown",
+      "alt-shift-left": "fabric_text_edit::TextSelectWordLeft",
+      "shift-alt-left": "fabric_text_edit::TextSelectWordLeft",
+      "alt-shift-right": "fabric_text_edit::TextSelectWordRight",
+      "shift-alt-right": "fabric_text_edit::TextSelectWordRight",
+      "shift-home": "fabric_text_edit::TextSelectLineStart",
+      "shift-end": "fabric_text_edit::TextSelectLineEnd",
+      "ctrl-shift-home": "fabric_text_edit::TextSelectDocStart",
+      "ctrl-shift-end": "fabric_text_edit::TextSelectDocEnd",
+      "ctrl-a": "fabric_text_edit::TextSelectAll",
+      "ctrl-c": "fabric_text_edit::TextCopy",
+      "ctrl-x": "fabric_text_edit::TextCut",
+      "ctrl-v": "fabric_text_edit::TextPaste",
+      "ctrl-z": "fabric_text_edit::TextUndo",
+      "ctrl-shift-z": "fabric_text_edit::TextRedo",
+      "ctrl-y": "fabric_text_edit::TextRedo"
+    }
+  }
+]
+

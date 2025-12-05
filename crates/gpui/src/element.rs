@@ -615,6 +615,14 @@ impl AnyElement {
         self.0.paint(window, cx);
     }
 
+    /// Paints this element at the given absolute origin.
+    ///
+    /// This mirrors `prepaint_at` for out-of-tree element trees that need to
+    /// paint at a specific window origin (e.g. external scenegraph layers).
+    pub fn paint_at(&mut self, origin: Point<Pixels>, window: &mut Window, cx: &mut App) {
+        window.with_absolute_element_offset(origin, |window| self.paint(window, cx))
+    }
+
     /// Performs layout for this element within the given available space and returns its size.
     pub fn layout_as_root(
         &mut self,
