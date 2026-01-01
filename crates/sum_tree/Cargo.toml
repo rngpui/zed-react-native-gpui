@@ -1,10 +1,12 @@
 [package]
-name = "sum_tree"
+name = "gpui_rn_sum_tree"
 version = "0.1.0"
 edition.workspace = true
-publish = false
+authors = ["Nathan Sobo <nathan@zed.dev>", "Madeline Lane <maddythewisp@gmail.com>"]
+publish = true
 license = "Apache-2.0"
-description = "A sum tree data structure, a concurrency-friendly B-tree"
+repository = "https://github.com/rngpui/zed-react-native-gpui"
+description = "A sum tree data structure (fork for React Native GPUI)"
 
 [lints]
 workspace = true
@@ -17,13 +19,7 @@ doctest = false
 arrayvec = "0.7.1"
 rayon.workspace = true
 log.workspace = true
-ztracing.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
-ctor.workspace = true
 rand.workspace = true
-zlog.workspace = true
 
-[package.metadata.cargo-machete]
-ignored = ["tracing"]

@@ -1,10 +1,12 @@
 [package]
-name = "collections"
+name = "gpui_rn_collections"
 version = "0.1.0"
 edition.workspace = true
-publish = false
+authors = ["Nathan Sobo <nathan@zed.dev>", "Madeline Lane <maddythewisp@gmail.com>"]
+publish = true
 license = "Apache-2.0"
-description = "Standard collection type re-exports used by Zed and GPUI"
+repository = "https://github.com/rngpui/zed-react-native-gpui"
+description = "Standard collection type re-exports (fork for React Native GPUI)"
 
 [lints]
 workspace = true

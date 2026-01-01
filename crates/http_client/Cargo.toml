@@ -1,10 +1,12 @@
 [package]
-name = "http_client"
+name = "gpui_rn_http_client"
 version = "0.1.0"
 edition.workspace = true
-publish = false
+authors = ["Nathan Sobo <nathan@zed.dev>", "Madeline Lane <maddythewisp@gmail.com>"]
+publish = true
 license = "Apache-2.0"
-description = "A HTTP client library for Zed and GPUI"
+repository = "https://github.com/rngpui/zed-react-native-gpui"
+description = "HTTP client library (fork for React Native GPUI)"
 
 [lints]
 workspace = true

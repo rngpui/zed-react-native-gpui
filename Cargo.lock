@@ -12,13 +12,14 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "buffer_diff",
- "collections",
  "editor",
  "env_logger 0.11.8",
  "file_icons",
  "futures 0.3.31",
  "gpui",
  "image",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -40,7 +41,6 @@ dependencies = [
  "ui",
  "url",
  "urlencoding",
- "util",
  "uuid",
  "watch",
  "zlog",
@@ -51,8 +51,9 @@ name = "acp_tools"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
- "collections",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "markdown",
  "project",
@@ -61,7 +62,6 @@ dependencies = [
  "settings",
  "theme",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -72,10 +72,11 @@ dependencies = [
  "anyhow",
  "buffer_diff",
  "clock",
- "collections",
  "ctor",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "language",
  "log",
@@ -86,7 +87,6 @@ dependencies = [
  "settings",
  "telemetry",
  "text",
- "util",
  "watch",
  "zlog",
 ]
@@ -102,6 +102,7 @@ dependencies = [
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_util",
  "language",
  "project",
  "proto",
@@ -109,7 +110,6 @@ dependencies = [
  "semver",
  "smallvec",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -164,7 +164,6 @@ dependencies = [
  "client",
  "clock",
  "cloud_llm_client",
- "collections",
  "context_server",
  "ctor",
  "db",
@@ -176,10 +175,12 @@ dependencies = [
  "futures 0.3.31",
  "git",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
  "handlebars 4.5.0",
  "html_to_markdown",
- "http_client",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -216,7 +217,6 @@ dependencies = [
  "tree-sitter-rust",
  "ui",
  "unindent",
- "util",
  "uuid",
  "watch",
  "web_search",
@@ -268,14 +268,15 @@ dependencies = [
  "anyhow",
  "async-trait",
  "client",
- "collections",
  "env_logger 0.11.8",
  "feature_flags",
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "indoc",
  "language",
  "language_model",
@@ -295,7 +296,6 @@ dependencies = [
  "terminal",
  "thiserror 2.0.17",
  "ui",
- "util",
  "uuid",
  "watch",
 ]
@@ -307,10 +307,11 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "cloud_llm_client",
- "collections",
  "convert_case 0.8.0",
  "fs",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language_model",
  "paths",
  "project",
@@ -319,7 +320,6 @@ dependencies = [
  "serde_json",
  "serde_json_lenient",
  "settings",
- "util",
 ]
 
 [[package]]
@@ -346,7 +346,6 @@ dependencies = [
  "client",
  "clock",
  "cloud_llm_client",
- "collections",
  "command_palette_hooks",
  "component",
  "context_server",
@@ -361,9 +360,11 @@ dependencies = [
  "futures 0.3.31",
  "fuzzy",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
  "html_to_markdown",
- "http_client",
  "image",
  "indoc",
  "itertools 0.14.0",
@@ -414,7 +415,6 @@ dependencies = [
  "ui_input",
  "unindent",
  "url",
- "util",
  "uuid",
  "watch",
  "workspace",
@@ -438,6 +438,7 @@ dependencies = [
  "fs",
  "fuzzy",
  "gpui",
+ "gpui_rn_util",
  "menu",
  "project",
  "prompt_store",
@@ -448,7 +449,6 @@ dependencies = [
  "time",
  "time_format",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -677,7 +677,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "schemars",
  "serde",
  "serde_json",
@@ -826,11 +826,11 @@ dependencies = [
  "anyhow",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_util",
  "log",
  "net",
  "smol",
  "tempfile",
- "util",
  "windows 0.61.3",
  "zeroize",
 ]
@@ -850,11 +850,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "collections",
  "derive_more 0.99.20",
  "extension",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "language_model",
  "parking_lot",
@@ -862,7 +863,6 @@ dependencies = [
  "serde",
  "serde_json",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -873,7 +873,6 @@ dependencies = [
  "anyhow",
  "assistant_slash_command",
  "chrono",
- "collections",
  "context_server",
  "editor",
  "feature_flags",
@@ -881,8 +880,10 @@ dependencies = [
  "futures 0.3.31",
  "fuzzy",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "html_to_markdown",
- "http_client",
  "language",
  "pretty_assertions",
  "project",
@@ -894,7 +895,6 @@ dependencies = [
  "smol",
  "text",
  "ui",
- "util",
  "workspace",
  "worktree",
  "zlog",
@@ -912,12 +912,13 @@ dependencies = [
  "client",
  "clock",
  "cloud_llm_client",
- "collections",
  "context_server",
  "fs",
  "futures 0.3.31",
  "fuzzy",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -942,7 +943,6 @@ dependencies = [
  "text",
  "ui",
  "unindent",
- "util",
  "uuid",
  "workspace",
  "zed_env_vars",
@@ -1017,7 +1017,6 @@ dependencies = [
  "futures-core",
  "futures-io",
  "pin-project-lite",
- "tokio",
 ]
 
 [[package]]
@@ -1328,10 +1327,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-tar",
- "collections",
  "crossbeam",
  "denoise",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "libwebrtc",
  "log",
  "parking_lot",
@@ -1340,7 +1340,6 @@ dependencies = [
  "settings",
  "smol",
  "thiserror 2.0.17",
- "util",
 ]
 
 [[package]]
@@ -1366,7 +1365,8 @@ dependencies = [
  "db",
  "futures 0.3.31",
  "gpui",
- "http_client",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "log",
  "parking_lot",
  "paths",
@@ -1377,7 +1377,6 @@ dependencies = [
  "settings",
  "smol",
  "tempfile",
- "util",
  "which 6.0.3",
  "workspace",
  "zlog",
@@ -1404,13 +1403,14 @@ dependencies = [
  "client",
  "editor",
  "gpui",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "markdown_preview",
  "release_channel",
  "semver",
  "serde",
  "serde_json",
  "smol",
- "util",
  "workspace",
 ]
 
@@ -1929,7 +1929,7 @@ version = "0.1.0"
 dependencies = [
  "aws-smithy-runtime-api",
  "aws-smithy-types",
- "http_client",
+ "gpui_rn_http_client",
 ]
 
 [[package]]
@@ -2383,6 +2383,8 @@ dependencies = [
  "futures 0.3.31",
  "git2",
  "gpui",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "language",
  "log",
  "pretty_assertions",
@@ -2390,10 +2392,8 @@ dependencies = [
  "rope",
  "serde_json",
  "settings",
- "sum_tree",
  "text",
  "unindent",
- "util",
  "zlog",
 ]
 
@@ -2564,13 +2564,14 @@ dependencies = [
  "anyhow",
  "audio",
  "client",
- "collections",
  "feature_flags",
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "language",
  "livekit_client",
  "log",
@@ -2579,7 +2580,6 @@ dependencies = [
  "serde",
  "settings",
  "telemetry",
- "util",
 ]
 
 [[package]]
@@ -2794,7 +2794,6 @@ version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eadd868a2ce9ca38de7eeafdcec9c7065ef89b42b32f0839278d55f35c54d1ff"
 dependencies = [
- "clap",
  "heck 0.4.1",
  "indexmap",
  "log",
@@ -2878,10 +2877,11 @@ dependencies = [
  "anyhow",
  "client",
  "clock",
- "collections",
  "futures 0.3.31",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "language",
  "log",
  "postage",
@@ -2891,7 +2891,6 @@ dependencies = [
  "settings",
  "text",
  "time",
- "util",
 ]
 
 [[package]]
@@ -3037,11 +3036,12 @@ dependencies = [
  "anyhow",
  "askpass",
  "clap",
- "collections",
  "core-foundation 0.10.0",
  "core-services",
  "exec",
  "fork",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "ipc-channel",
  "parking_lot",
  "paths",
@@ -3051,7 +3051,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "util",
  "windows 0.61.3",
 ]
 
@@ -3066,15 +3065,16 @@ dependencies = [
  "clock",
  "cloud_api_client",
  "cloud_llm_client",
- "collections",
  "credentials_provider",
  "derive_more 0.99.20",
  "feature_flags",
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "http_client_tls",
  "httparse",
  "log",
@@ -3105,7 +3105,6 @@ dependencies = [
  "tokio-rustls 0.26.2",
  "tokio-socks",
  "url",
- "util",
  "windows 0.61.3",
  "worktree",
 ]
@@ -3127,8 +3126,8 @@ dependencies = [
  "cloud_api_types",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_http_client",
  "gpui_tokio",
- "http_client",
  "parking_lot",
  "serde_json",
  "yawc",
@@ -3270,7 +3269,7 @@ dependencies = [
  "edit_prediction_types",
  "futures 0.3.31",
  "gpui",
- "http_client",
+ "gpui_rn_http_client",
  "language",
  "language_models",
  "log",
@@ -3308,7 +3307,6 @@ dependencies = [
  "client",
  "clock",
  "collab_ui",
- "collections",
  "command_palette_hooks",
  "context_server",
  "ctor",
@@ -3327,9 +3325,11 @@ dependencies = [
  "git_hosting_providers",
  "git_ui",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
  "hex",
- "http_client",
  "hyper 0.14.32",
  "indoc",
  "language",
@@ -3381,7 +3381,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unindent",
- "util",
  "uuid",
  "workspace",
  "worktree",
@@ -3397,13 +3396,14 @@ dependencies = [
  "channel",
  "chrono",
  "client",
- "collections",
  "db",
  "editor",
  "futures 0.3.31",
  "fuzzy",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "log",
  "menu",
  "notifications",
@@ -3424,16 +3424,7 @@ dependencies = [
  "title_bar",
  "tree-sitter-md",
  "ui",
- "util",
  "workspace",
-]
-
-[[package]]
-name = "collections"
-version = "0.1.0"
-dependencies = [
- "indexmap",
- "rustc-hash 2.1.1",
 ]
 
 [[package]]
@@ -3474,7 +3465,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "collections",
  "command_palette_hooks",
  "ctor",
  "db",
@@ -3483,6 +3473,8 @@ dependencies = [
  "fuzzy",
  "go_to_line",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "log",
  "menu",
@@ -3496,7 +3488,6 @@ dependencies = [
  "theme",
  "time",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -3505,9 +3496,9 @@ dependencies = [
 name = "command_palette_hooks"
 version = "0.1.0"
 dependencies = [
- "collections",
  "derive_more 0.99.20",
  "gpui",
+ "gpui_rn_collections",
  "workspace",
 ]
 
@@ -3515,9 +3506,9 @@ dependencies = [
 name = "component"
 version = "0.1.0"
 dependencies = [
- "collections",
  "documented",
  "gpui",
+ "gpui_rn_collections",
  "inventory",
  "parking_lot",
  "strum 0.27.2",
@@ -3530,11 +3521,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "collections",
  "component",
  "db",
  "fs",
  "gpui",
+ "gpui_rn_collections",
  "language",
  "log",
  "node_runtime",
@@ -3557,7 +3548,6 @@ version = "0.4.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef8a506ec4b81c460798f572caead636d57d3d7e940f998160f52bd254bf2d23"
 dependencies = [
- "brotli",
  "compression-core",
  "deflate64",
  "flate2",
@@ -3650,10 +3640,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "collections",
  "futures 0.3.31",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "log",
  "net",
  "parking_lot",
@@ -3667,7 +3658,6 @@ dependencies = [
  "tempfile",
  "terminal",
  "url",
- "util",
 ]
 
 [[package]]
@@ -3686,53 +3676,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cookie"
-version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ddef33a339a91ea89fb53151bd0a4689cfce27055c291dfa69945475d22c747"
-dependencies = [
- "percent-encoding",
- "time",
- "version_check",
-]
-
-[[package]]
-name = "cookie_store"
-version = "0.21.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eac901828f88a5241ee0600950ab981148a18f2f756900ffba1b125ca6a3ef9"
-dependencies = [
- "cookie",
- "document-features",
- "idna",
- "log",
- "publicsuffix",
- "serde",
- "serde_derive",
- "serde_json",
- "time",
- "url",
-]
-
-[[package]]
-name = "cookie_store"
-version = "0.22.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fc4bff745c9b4c7fb1e97b25d13153da2bc7796260141df62378998d070207f"
-dependencies = [
- "cookie",
- "document-features",
- "idna",
- "log",
- "publicsuffix",
- "serde",
- "serde_derive",
- "serde_json",
- "time",
- "url",
-]
-
-[[package]]
 name = "copilot"
 version = "0.1.0"
 dependencies = [
@@ -3741,7 +3684,6 @@ dependencies = [
  "chrono",
  "client",
  "clock",
- "collections",
  "command_palette_hooks",
  "ctor",
  "dirs 4.0.0",
@@ -3750,7 +3692,10 @@ dependencies = [
  "fs",
  "futures 0.3.31",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -3766,12 +3711,10 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
- "sum_tree",
  "task",
  "theme",
  "ui",
  "url",
- "util",
  "workspace",
  "zlog",
 ]
@@ -3967,7 +3910,7 @@ dependencies = [
  "rustc-hash 1.1.0",
  "rustybuzz 0.14.1",
  "self_cell",
- "smol_str 0.2.2",
+ "smol_str",
  "swash",
  "sys-locale",
  "ttf-parser 0.21.1",
@@ -4019,31 +3962,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "craby"
-version = "0.1.0-rc.4"
-dependencies = [
- "anyhow",
- "craby_macro",
-]
-
-[[package]]
-name = "craby_build"
-version = "0.1.0-rc.4"
-dependencies = [
- "cxx-build",
- "toml 0.9.8",
-]
-
-[[package]]
-name = "craby_macro"
-version = "0.1.0-rc.4"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.111",
 ]
 
 [[package]]
@@ -4539,12 +4457,13 @@ dependencies = [
  "async-tar",
  "async-trait",
  "client",
- "collections",
  "dap-types",
  "fs",
  "futures 0.3.31",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "language",
  "libc",
  "log",
@@ -4562,7 +4481,6 @@ dependencies = [
  "telemetry",
  "tree-sitter",
  "tree-sitter-go",
- "util",
  "zlog",
 ]
 
@@ -4582,13 +4500,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "collections",
  "dap",
  "dotenvy",
  "fs",
  "futures 0.3.31",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "json_dotpath",
  "language",
  "log",
@@ -4599,7 +4518,6 @@ dependencies = [
  "settings",
  "smol",
  "task",
- "util",
 ]
 
 [[package]]
@@ -4688,6 +4606,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui",
+ "gpui_rn_util",
  "indoc",
  "log",
  "paths",
@@ -4696,7 +4615,6 @@ dependencies = [
  "sqlez",
  "sqlez_macros",
  "tempfile",
- "util",
  "zed_env_vars",
 ]
 
@@ -4717,13 +4635,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "collections",
  "dap",
  "extension",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "serde_json",
  "task",
- "util",
 ]
 
 [[package]]
@@ -4735,11 +4653,11 @@ dependencies = [
  "editor",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_util",
  "project",
  "serde_json",
  "settings",
  "smol",
- "util",
  "workspace",
 ]
 
@@ -4751,7 +4669,6 @@ dependencies = [
  "anyhow",
  "bitflags 2.9.4",
  "client",
- "collections",
  "command_palette_hooks",
  "dap",
  "dap_adapters",
@@ -4763,6 +4680,8 @@ dependencies = [
  "futures 0.3.31",
  "fuzzy",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "hex",
  "indoc",
  "itertools 0.14.0",
@@ -4795,7 +4714,6 @@ dependencies = [
  "ui",
  "ui_input",
  "unindent",
- "util",
  "workspace",
  "zed_actions",
  "zlog",
@@ -4816,7 +4734,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "schemars",
  "serde",
  "serde_json",
@@ -4918,15 +4836,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive_refineable"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.111",
-]
-
-[[package]]
 name = "derive_setters"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4950,11 +4859,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "collections",
  "component",
  "ctor",
  "editor",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -4972,7 +4882,6 @@ dependencies = [
  "theme",
  "ui",
  "unindent",
- "util",
  "workspace",
  "zed_actions",
  "zlog",
@@ -5122,6 +5031,7 @@ name = "docs_preprocessor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "gpui_rn_util",
  "mdbook",
  "regex",
  "serde",
@@ -5129,17 +5039,7 @@ dependencies = [
  "settings",
  "task",
  "theme",
- "util",
  "zlog",
-]
-
-[[package]]
-name = "document-features"
-version = "0.2.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
-dependencies = [
- "litrs",
 ]
 
 [[package]]
@@ -5300,7 +5200,6 @@ dependencies = [
  "clock",
  "cloud_api_types",
  "cloud_llm_client",
- "collections",
  "copilot",
  "ctor",
  "db",
@@ -5310,6 +5209,8 @@ dependencies = [
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -5338,7 +5239,6 @@ dependencies = [
  "time",
  "toml 0.8.23",
  "ui",
- "util",
  "uuid",
  "workspace",
  "worktree",
@@ -5357,7 +5257,6 @@ dependencies = [
  "clap",
  "client",
  "cloud_llm_client",
- "collections",
  "debug_adapter_extension",
  "dirs 4.0.0",
  "edit_prediction",
@@ -5365,8 +5264,10 @@ dependencies = [
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "indoc",
  "language",
  "language_extension",
@@ -5392,7 +5293,6 @@ dependencies = [
  "sqlez",
  "sqlez_macros",
  "terminal_view",
- "util",
  "wasmtime",
  "watch",
  "zeta_prompt",
@@ -5404,10 +5304,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cloud_llm_client",
- "collections",
  "env_logger 0.11.8",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "language",
  "log",
@@ -5421,7 +5322,6 @@ dependencies = [
  "smallvec",
  "text",
  "tree-sitter",
- "util",
  "zeta_prompt",
  "zlog",
 ]
@@ -5446,7 +5346,6 @@ dependencies = [
  "clock",
  "cloud_llm_client",
  "codestral",
- "collections",
  "command_palette_hooks",
  "copilot",
  "edit_prediction",
@@ -5456,6 +5355,8 @@ dependencies = [
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "language",
  "language_model",
@@ -5477,7 +5378,6 @@ dependencies = [
  "theme",
  "time",
  "ui",
- "util",
  "workspace",
  "zed_actions",
  "zeta_prompt",
@@ -5494,7 +5394,6 @@ dependencies = [
  "buffer_diff",
  "client",
  "clock",
- "collections",
  "convert_case 0.8.0",
  "criterion",
  "ctor",
@@ -5509,7 +5408,10 @@ dependencies = [
  "fuzzy",
  "git",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -5537,7 +5439,6 @@ dependencies = [
  "smallvec",
  "smol",
  "snippet",
- "sum_tree",
  "task",
  "telemetry",
  "tempfile",
@@ -5558,7 +5459,6 @@ dependencies = [
  "unicode-segmentation",
  "unindent",
  "url",
- "util",
  "uuid",
  "vim_mode_setting",
  "workspace",
@@ -5864,7 +5764,6 @@ dependencies = [
  "chrono",
  "clap",
  "client",
- "collections",
  "debug_adapter_extension",
  "dirs 4.0.0",
  "dotenvy",
@@ -5873,6 +5772,8 @@ dependencies = [
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "gpui_tokio",
  "handlebars 4.5.0",
  "language",
@@ -5899,7 +5800,6 @@ dependencies = [
  "terminal_view",
  "toml 0.8.23",
  "unindent",
- "util",
  "uuid",
  "watch",
 ]
@@ -5986,13 +5886,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "collections",
  "dap",
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "heck 0.5.0",
- "http_client",
  "indoc",
  "language",
  "log",
@@ -6007,7 +5908,6 @@ dependencies = [
  "tempfile",
  "toml 0.8.23",
  "url",
- "util",
  "wasm-encoder 0.221.3",
  "wasmparser 0.221.3",
 ]
@@ -6044,7 +5944,6 @@ dependencies = [
  "async-tar",
  "async-trait",
  "client",
- "collections",
  "criterion",
  "ctor",
  "dap",
@@ -6052,8 +5951,10 @@ dependencies = [
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "language",
  "language_extension",
  "log",
@@ -6079,7 +5980,6 @@ dependencies = [
  "theme_extension",
  "toml 0.8.23",
  "url",
- "util",
  "wasmparser 0.221.3",
  "wasmtime",
  "wasmtime-wasi",
@@ -6092,7 +5992,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "collections",
  "db",
  "editor",
  "extension",
@@ -6100,6 +5999,8 @@ dependencies = [
  "fs",
  "fuzzy",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "log",
  "num-format",
@@ -6114,7 +6015,6 @@ dependencies = [
  "telemetry",
  "theme",
  "ui",
- "util",
  "vim_mode_setting",
  "workspace",
  "zed_actions",
@@ -6213,9 +6113,9 @@ version = "0.1.0"
 dependencies = [
  "editor",
  "gpui",
+ "gpui_rn_util",
  "system_specs",
  "urlencoding",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -6235,13 +6135,14 @@ name = "file_finder"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "ctor",
  "editor",
  "file_icons",
  "futures 0.3.31",
  "fuzzy",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "menu",
  "picker",
@@ -6255,7 +6156,6 @@ dependencies = [
  "text",
  "theme",
  "ui",
- "util",
  "workspace",
  "zlog",
 ]
@@ -6265,9 +6165,9 @@ name = "file_icons"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "gpui_rn_util",
  "serde",
  "theme",
- "util",
 ]
 
 [[package]]
@@ -6522,11 +6422,12 @@ dependencies = [
  "async-tar",
  "async-trait",
  "cocoa 0.26.0",
- "collections",
  "fsevent",
  "futures 0.3.31",
  "git",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "ignore",
  "is_executable",
  "libc",
@@ -6543,7 +6444,6 @@ dependencies = [
  "tempfile",
  "text",
  "time",
- "util",
  "windows 0.61.3",
 ]
 
@@ -6769,8 +6669,8 @@ name = "fuzzy"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "gpui_rn_util",
  "log",
- "util",
 ]
 
 [[package]]
@@ -7063,15 +6963,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "getopts"
-version = "0.2.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
-dependencies = [
- "unicode-width",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7159,12 +7050,14 @@ dependencies = [
  "anyhow",
  "askpass",
  "async-trait",
- "collections",
  "derive_more 0.99.20",
  "futures 0.3.31",
  "git2",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "log",
  "parking_lot",
@@ -7176,7 +7069,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
- "sum_tree",
  "tempfile",
  "text",
  "thiserror 2.0.17",
@@ -7184,7 +7076,6 @@ dependencies = [
  "unindent",
  "url",
  "urlencoding",
- "util",
  "uuid",
 ]
 
@@ -7210,7 +7101,8 @@ dependencies = [
  "futures 0.3.31",
  "git",
  "gpui",
- "http_client",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "pretty_assertions",
@@ -7220,7 +7112,6 @@ dependencies = [
  "settings",
  "url",
  "urlencoding",
- "util",
 ]
 
 [[package]]
@@ -7233,7 +7124,6 @@ dependencies = [
  "buffer_diff",
  "call",
  "cloud_llm_client",
- "collections",
  "command_palette_hooks",
  "component",
  "ctor",
@@ -7244,6 +7134,8 @@ dependencies = [
  "git",
  "git_hosting_providers",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -7275,7 +7167,6 @@ dependencies = [
  "tracing",
  "ui",
  "unindent",
- "util",
  "watch",
  "windows 0.61.3",
  "workspace",
@@ -7334,6 +7225,7 @@ version = "0.1.0"
 dependencies = [
  "editor",
  "gpui",
+ "gpui_rn_util",
  "indoc",
  "language",
  "menu",
@@ -7347,7 +7239,6 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -7368,7 +7259,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "schemars",
  "serde",
  "serde_json",
@@ -7408,7 +7299,7 @@ dependencies = [
 
 [[package]]
 name = "gpui"
-version = "0.2.2"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "as-raw-xcb-connection",
@@ -7429,7 +7320,6 @@ dependencies = [
  "circular-buffer",
  "cocoa 0.26.0",
  "cocoa-foundation 0.2.0",
- "collections",
  "core-foundation 0.10.0",
  "core-foundation-sys",
  "core-graphics 0.24.0",
@@ -7445,8 +7335,13 @@ dependencies = [
  "flume",
  "foreign-types 0.5.0",
  "futures 0.3.31",
- "gpui_macros",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_macros",
+ "gpui_rn_refineable",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
+ "gpui_rn_util_macros",
  "image",
  "inventory",
  "itertools 0.14.0",
@@ -7472,7 +7367,6 @@ dependencies = [
  "profiling",
  "rand 0.9.2",
  "raw-window-handle",
- "refineable",
  "reqwest_client",
  "resvg",
  "schemars",
@@ -7492,8 +7386,6 @@ dependencies = [
  "thiserror 2.0.17",
  "unicode-segmentation",
  "usvg",
- "util",
- "util_macros",
  "uuid",
  "waker-fn",
  "wayland-backend",
@@ -7515,147 +7407,48 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui_host"
+name = "gpui_rn_collections"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
- "anyhow",
- "arrayvec",
- "async-channel 2.5.0",
- "base64 0.22.1",
- "bitflags 2.9.4",
- "bumpalo",
- "bytes 1.10.1",
- "cocoa 0.26.0",
- "collections",
- "core-foundation 0.10.0",
- "core-foundation-sys",
- "cxx",
- "cxx-build",
- "dashmap 6.1.0",
- "futures-util",
- "gpui",
- "gpui_host_abi",
- "gpui_host_core",
- "gpui_host_macros",
- "gpui_host_network",
- "gpui_host_protocol",
- "gpui_host_runtime",
- "hashbrown 0.16.1",
- "http_client",
- "iddqd",
- "image",
  "indexmap",
- "libc",
- "lru",
- "mime_guess",
- "moka",
- "objc",
- "parking_lot",
- "paste",
- "reqwest 0.12.24",
- "reqwest_client",
- "reqwest_cookie_store",
  "rustc-hash 2.1.1",
- "ryu",
- "serde",
- "serde_json",
- "slotmap",
- "smallvec",
- "smol_str 0.3.4",
- "strum 0.27.2",
- "tokio",
- "unicode-segmentation",
- "url",
- "zlog",
- "ztracing",
 ]
 
 [[package]]
-name = "gpui_host_abi"
+name = "gpui_rn_derive_refineable"
 version = "0.1.0"
 dependencies = [
- "gpui_host_macros",
-]
-
-[[package]]
-name = "gpui_host_core"
-version = "0.1.0"
-dependencies = [
- "bytes 1.10.1",
- "gpui",
- "gpui_host_abi",
- "parking_lot",
- "serde",
- "tokio",
- "zlog",
-]
-
-[[package]]
-name = "gpui_host_ffi"
-version = "0.1.0"
-dependencies = [
- "cbindgen",
- "cxx",
- "cxx-build",
- "gpui_host",
- "gpui_host_abi",
- "gpui_host_core",
- "gpui_host_network",
- "gpui_host_protocol",
- "reqwest 0.12.24",
- "sha2",
- "smol_str 0.3.4",
- "strum 0.27.2",
- "zlog",
-]
-
-[[package]]
-name = "gpui_host_macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro-crate",
  "proc-macro2",
  "quote",
  "syn 2.0.111",
 ]
 
 [[package]]
-name = "gpui_host_network"
+name = "gpui_rn_http_client"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-compression",
+ "async-fs",
+ "async-tar",
  "bytes 1.10.1",
- "cookie",
- "cookie_store 0.22.0",
- "dashmap 6.1.0",
- "dirs 6.0.0",
- "futures-util",
- "gpui_host_core",
+ "derive_more 0.99.20",
+ "futures 0.3.31",
+ "gpui_rn_util",
+ "http 1.3.1",
+ "http-body 1.0.1",
+ "log",
  "parking_lot",
- "reqwest 0.12.24",
- "reqwest_cookie_store",
- "smallvec",
- "tokio",
- "tokio-tungstenite 0.23.1",
- "tracing",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha2",
+ "tempfile",
+ "url",
 ]
 
 [[package]]
-name = "gpui_host_protocol"
-version = "0.1.0"
-dependencies = [
- "gpui_host_abi",
-]
-
-[[package]]
-name = "gpui_host_runtime"
-version = "0.1.0"
-dependencies = [
- "gpui_host_protocol",
-]
-
-[[package]]
-name = "gpui_macros"
+name = "gpui_rn_macros"
 version = "0.1.0"
 dependencies = [
  "gpui",
@@ -7666,27 +7459,78 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui_modules"
-version = "0.0.0"
+name = "gpui_rn_perf"
+version = "0.1.0"
+dependencies = [
+ "gpui_rn_collections",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "gpui_rn_refineable"
+version = "0.1.0"
+dependencies = [
+ "gpui_rn_derive_refineable",
+]
+
+[[package]]
+name = "gpui_rn_sum_tree"
+version = "0.1.0"
+dependencies = [
+ "arrayvec",
+ "log",
+ "rand 0.9.2",
+ "rayon",
+]
+
+[[package]]
+name = "gpui_rn_util"
+version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
- "bytes 1.10.1",
- "collections",
- "craby",
- "craby_build",
- "cxx",
- "dashmap 6.1.0",
- "futures-util",
- "gpui",
- "gpui_host",
- "gpui_host_core",
- "gpui_host_network",
- "indexmap",
- "mime_guess",
- "reqwest 0.12.24",
- "reqwest_cookie_store",
+ "async-fs",
+ "async_zip",
+ "command-fds",
+ "dirs 4.0.0",
+ "dunce",
+ "futures 0.3.31",
+ "futures-lite 1.13.0",
+ "git2",
+ "globset",
+ "gpui_rn_collections",
+ "gpui_rn_util_macros",
+ "indoc",
+ "itertools 0.14.0",
+ "libc",
+ "log",
+ "mach2 0.5.0",
+ "nix 0.29.0",
+ "pretty_assertions",
+ "rand 0.9.2",
+ "regex",
+ "rust-embed",
+ "schemars",
+ "serde",
  "serde_json",
+ "serde_json_lenient",
+ "shlex",
+ "smol",
+ "take-until",
+ "tempfile",
+ "tendril",
+ "unicase",
+ "walkdir",
+ "which 6.0.3",
+]
+
+[[package]]
+name = "gpui_rn_util_macros"
+version = "0.1.0"
+dependencies = [
+ "gpui_rn_perf",
+ "quote",
+ "syn 2.0.111",
 ]
 
 [[package]]
@@ -7695,8 +7539,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui",
+ "gpui_rn_util",
  "tokio",
- "util",
 ]
 
 [[package]]
@@ -8106,30 +7950,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "add0ab9360ddbd88cfeb3bd9574a1d85cfdfa14db10b3e21d3700dbc4328758f"
 
 [[package]]
-name = "http_client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-compression",
- "async-fs",
- "async-tar",
- "bytes 1.10.1",
- "derive_more 0.99.20",
- "futures 0.3.31",
- "http 1.3.1",
- "http-body 1.0.1",
- "log",
- "parking_lot",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sha2",
- "tempfile",
- "url",
- "util",
-]
-
-[[package]]
 name = "http_client_tls"
 version = "0.1.0"
 dependencies = [
@@ -8238,7 +8058,6 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.2",
  "tower-service",
- "webpki-roots 1.0.4",
 ]
 
 [[package]]
@@ -8403,19 +8222,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25a2bc672d1148e28034f176e01fffebb08b35768468cc954630da77a1449005"
 
 [[package]]
-name = "iddqd"
-version = "0.3.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b215e67ed1d1a4b1702acd787c487d16e4c977c5dcbcc4587bdb5ea26b6ce06"
-dependencies = [
- "allocator-api2",
- "equivalent",
- "foldhash 0.2.0",
- "hashbrown 0.16.1",
- "rustc-hash 2.1.1",
-]
-
-[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8501,6 +8307,7 @@ dependencies = [
  "editor",
  "file_icons",
  "gpui",
+ "gpui_rn_util",
  "language",
  "log",
  "project",
@@ -8508,7 +8315,6 @@ dependencies = [
  "settings",
  "theme",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -8612,6 +8418,8 @@ dependencies = [
  "editor",
  "fuzzy",
  "gpui",
+ "gpui_rn_util",
+ "gpui_rn_util_macros",
  "language",
  "project",
  "serde_json",
@@ -8619,8 +8427,6 @@ dependencies = [
  "theme",
  "title_bar",
  "ui",
- "util",
- "util_macros",
  "workspace",
  "zed_actions",
 ]
@@ -8632,9 +8438,9 @@ dependencies = [
  "anyhow",
  "client",
  "gpui",
+ "gpui_rn_util",
  "release_channel",
  "smol",
- "util",
  "workspace",
 ]
 
@@ -8927,6 +8733,7 @@ dependencies = [
  "dap",
  "extension",
  "gpui",
+ "gpui_rn_util",
  "language",
  "paths",
  "project",
@@ -8937,7 +8744,6 @@ dependencies = [
  "snippet_provider",
  "task",
  "theme",
- "util",
 ]
 
 [[package]]
@@ -9022,7 +8828,6 @@ name = "keymap_editor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "command_palette",
  "component",
  "db",
@@ -9030,6 +8835,8 @@ dependencies = [
  "fs",
  "fuzzy",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "json_schema_store",
  "language",
@@ -9049,7 +8856,6 @@ dependencies = [
  "tree-sitter-rust",
  "ui",
  "ui_input",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -9111,7 +8917,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clock",
- "collections",
  "ctor",
  "diffy",
  "ec4rs",
@@ -9121,7 +8926,10 @@ dependencies = [
  "fuzzy",
  "globset",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "imara-diff",
  "indoc",
  "itertools 0.14.0",
@@ -9143,7 +8951,6 @@ dependencies = [
  "smol",
  "streaming-iterator",
  "strsim",
- "sum_tree",
  "task",
  "text",
  "theme",
@@ -9161,7 +8968,6 @@ dependencies = [
  "tree-sitter-typescript",
  "unicase",
  "unindent",
- "util",
  "watch",
  "zlog",
 ]
@@ -9172,18 +8978,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "collections",
  "extension",
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "log",
  "lsp",
  "project",
  "serde",
  "serde_json",
- "util",
 ]
 
 [[package]]
@@ -9196,11 +9002,12 @@ dependencies = [
  "client",
  "cloud_api_types",
  "cloud_llm_client",
- "collections",
  "credentials_provider",
  "futures 0.3.31",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "icons",
  "image",
  "log",
@@ -9214,7 +9021,6 @@ dependencies = [
  "settings",
  "smol",
  "thiserror 2.0.17",
- "util",
  "zed_env_vars",
 ]
 
@@ -9232,7 +9038,6 @@ dependencies = [
  "chrono",
  "client",
  "cloud_llm_client",
- "collections",
  "component",
  "convert_case 0.8.0",
  "copilot",
@@ -9245,8 +9050,10 @@ dependencies = [
  "futures 0.3.31",
  "google_ai",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "language",
  "language_model",
  "lmstudio",
@@ -9272,7 +9079,6 @@ dependencies = [
  "tokio",
  "ui",
  "ui_input",
- "util",
  "vercel",
  "x_ai",
 ]
@@ -9299,12 +9105,12 @@ dependencies = [
  "file_icons",
  "fuzzy",
  "gpui",
+ "gpui_rn_util",
  "language",
  "picker",
  "project",
  "settings",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -9314,12 +9120,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "collections",
  "command_palette_hooks",
  "copilot",
  "editor",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "language",
  "lsp",
@@ -9332,7 +9139,6 @@ dependencies = [
  "theme",
  "tree-sitter",
  "ui",
- "util",
  "workspace",
  "zed_actions",
  "zlog",
@@ -9348,11 +9154,12 @@ dependencies = [
  "async-tar",
  "async-trait",
  "chrono",
- "collections",
  "futures 0.3.31",
  "globset",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "json_schema_store",
  "language",
@@ -9405,7 +9212,6 @@ dependencies = [
  "tree-sitter-yaml",
  "unindent",
  "url",
- "util",
  "workspace",
 ]
 
@@ -9578,11 +9384,11 @@ version = "0.1.0"
 dependencies = [
  "editor",
  "gpui",
+ "gpui_rn_util",
  "language",
  "picker",
  "project",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -9621,12 +9427,6 @@ name = "litemap"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "241eaef5fd12c88705a01fc1066c48c4b36e0dd4377dcdc7ec3942cea7a69956"
-
-[[package]]
-name = "litrs"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "livekit"
@@ -9731,6 +9531,8 @@ dependencies = [
  "cpal",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "gpui_tokio",
  "http_client_tls",
  "image",
@@ -9752,7 +9554,6 @@ dependencies = [
  "smallvec",
  "tokio-tungstenite 0.26.2",
  "ui",
- "util",
  "zed-scap",
 ]
 
@@ -9773,7 +9574,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "schemars",
  "serde",
  "serde_json",
@@ -9841,10 +9642,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-pipe",
- "collections",
  "ctor",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "log",
  "lsp-types",
  "parking_lot",
@@ -9855,7 +9657,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
- "util",
  "zlog",
 ]
 
@@ -9978,11 +9779,13 @@ version = "0.1.0"
 dependencies = [
  "assets",
  "base64 0.22.1",
- "collections",
  "env_logger 0.11.8",
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "language",
  "languages",
  "linkify",
@@ -9990,10 +9793,8 @@ dependencies = [
  "node_runtime",
  "pulldown-cmark 0.12.2",
  "settings",
- "sum_tree",
  "theme",
  "ui",
- "util",
 ]
 
 [[package]]
@@ -10002,10 +9803,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-recursion",
- "collections",
  "editor",
  "fs",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "html5ever 0.27.0",
  "language",
  "linkify",
@@ -10017,7 +9819,6 @@ dependencies = [
  "theme",
  "ui",
  "urlencoding",
- "util",
  "workspace",
 ]
 
@@ -10243,8 +10044,8 @@ name = "migrator"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "convert_case 0.8.0",
+ "gpui_rn_collections",
  "log",
  "pretty_assertions",
  "serde_json",
@@ -10349,9 +10150,9 @@ name = "miniprofiler_ui"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "gpui_rn_util",
  "serde_json",
  "smol",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -10411,7 +10212,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "schemars",
  "serde",
  "serde_json",
@@ -10462,9 +10263,11 @@ dependencies = [
  "anyhow",
  "buffer_diff",
  "clock",
- "collections",
  "ctor",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -10478,12 +10281,10 @@ dependencies = [
  "settings",
  "smallvec",
  "smol",
- "sum_tree",
  "text",
  "theme",
  "tracing",
  "tree-sitter",
- "util",
  "zlog",
  "ztracing",
 ]
@@ -10678,14 +10479,14 @@ dependencies = [
  "async-tar",
  "async-trait",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "log",
  "paths",
  "semver",
  "serde",
  "serde_json",
  "smol",
- "util",
  "watch",
  "which 6.0.3",
 ]
@@ -10731,16 +10532,16 @@ dependencies = [
  "anyhow",
  "channel",
  "client",
- "collections",
  "component",
  "db",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "rpc",
  "settings",
- "sum_tree",
  "time",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -11198,7 +10999,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "schemars",
  "serde",
  "serde_json",
@@ -11217,6 +11018,7 @@ dependencies = [
  "fs",
  "fuzzy",
  "gpui",
+ "gpui_rn_util",
  "menu",
  "notifications",
  "picker",
@@ -11227,7 +11029,6 @@ dependencies = [
  "telemetry",
  "theme",
  "ui",
- "util",
  "vim_mode_setting",
  "workspace",
  "zed_actions",
@@ -11304,7 +11105,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "log",
  "schemars",
  "serde",
@@ -11320,7 +11121,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "schemars",
  "serde",
  "serde_json",
@@ -11461,6 +11262,7 @@ dependencies = [
  "editor",
  "fuzzy",
  "gpui",
+ "gpui_rn_util",
  "indoc",
  "language",
  "menu",
@@ -11475,7 +11277,6 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -11485,12 +11286,13 @@ name = "outline_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "db",
  "editor",
  "file_icons",
  "fuzzy",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "language",
  "log",
@@ -11506,7 +11308,6 @@ dependencies = [
  "smol",
  "theme",
  "ui",
- "util",
  "workspace",
  "worktree",
  "zed_actions",
@@ -11676,8 +11477,8 @@ name = "paths"
 version = "0.1.0"
 dependencies = [
  "dirs 4.0.0",
+ "gpui_rn_util",
  "ignore",
- "util",
 ]
 
 [[package]]
@@ -11769,15 +11570,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "perf"
-version = "0.1.0"
-dependencies = [
- "collections",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "pest"
@@ -12627,9 +12419,10 @@ name = "prettier"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "fs",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "log",
  "lsp",
@@ -12638,7 +12431,6 @@ dependencies = [
  "paths",
  "serde",
  "serde_json",
- "util",
 ]
 
 [[package]]
@@ -12789,7 +12581,6 @@ dependencies = [
  "circular-buffer",
  "client",
  "clock",
- "collections",
  "context_server",
  "dap",
  "dap_adapters",
@@ -12805,7 +12596,10 @@ dependencies = [
  "git_hosting_providers",
  "globset",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "image",
  "indexmap",
  "itertools 0.14.0",
@@ -12835,7 +12629,6 @@ dependencies = [
  "smol",
  "snippet",
  "snippet_provider",
- "sum_tree",
  "task",
  "tempfile",
  "terminal",
@@ -12844,7 +12637,6 @@ dependencies = [
  "tracing",
  "unindent",
  "url",
- "util",
  "watch",
  "wax",
  "which 6.0.3",
@@ -12863,7 +12655,7 @@ dependencies = [
  "client",
  "futures 0.3.31",
  "gpui",
- "http_client",
+ "gpui_rn_http_client",
  "language",
  "node_runtime",
  "project",
@@ -12877,7 +12669,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "collections",
  "command_palette_hooks",
  "criterion",
  "db",
@@ -12886,6 +12677,8 @@ dependencies = [
  "git",
  "git_ui",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "menu",
  "notifications",
@@ -12902,7 +12695,6 @@ dependencies = [
  "tempfile",
  "theme",
  "ui",
- "util",
  "workspace",
  "worktree",
  "zed_actions",
@@ -12917,6 +12709,7 @@ dependencies = [
  "futures 0.3.31",
  "fuzzy",
  "gpui",
+ "gpui_rn_util",
  "language",
  "lsp",
  "ordered-float 2.10.1",
@@ -12927,7 +12720,6 @@ dependencies = [
  "serde_json",
  "settings",
  "theme",
- "util",
  "workspace",
 ]
 
@@ -12953,11 +12745,12 @@ dependencies = [
  "anyhow",
  "assets",
  "chrono",
- "collections",
  "fs",
  "futures 0.3.31",
  "fuzzy",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "handlebars 4.5.0",
  "heed",
  "language",
@@ -12969,7 +12762,6 @@ dependencies = [
  "strum 0.27.2",
  "tempfile",
  "text",
- "util",
  "uuid",
 ]
 
@@ -13084,7 +12876,7 @@ name = "proto"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
+ "gpui_rn_collections",
  "prost 0.9.0",
  "prost-build 0.9.0",
  "serde",
@@ -13110,12 +12902,6 @@ checksum = "3e36c2f31e0a47f9280fb347ef5e461ffcd2c52dd520d8e216b52f93b0b0d7d6"
 dependencies = [
  "thiserror 1.0.69",
 ]
-
-[[package]]
-name = "psl-types"
-version = "2.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "psm"
@@ -13147,16 +12933,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "publicsuffix"
-version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f42ea446cab60335f76979ec15e12619a2165b5ae2c12166bef27d283a9fadf"
-dependencies = [
- "idna",
- "psl-types",
-]
-
-[[package]]
 name = "pulldown-cmark"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13164,7 +12940,7 @@ checksum = "76979bea66e7875e7509c4ec5300112b316af87fa7a252ca91c448b32dfe3993"
 dependencies = [
  "bitflags 2.9.4",
  "memchr",
- "pulldown-cmark-escape 0.10.1",
+ "pulldown-cmark-escape",
  "unicase",
 ]
 
@@ -13175,9 +12951,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f86ba2052aebccc42cbbb3ed234b8b13ce76f75c3551a303cb2bcffcff12bb14"
 dependencies = [
  "bitflags 2.9.4",
- "getopts",
  "memchr",
- "pulldown-cmark-escape 0.11.0",
  "unicase",
 ]
 
@@ -13186,12 +12960,6 @@ name = "pulldown-cmark-escape"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd348ff538bc9caeda7ee8cad2d1d48236a1f443c1fa3913c6a02fe0043b1dd3"
-
-[[package]]
-name = "pulldown-cmark-escape"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "pulley-interpreter"
@@ -13587,6 +13355,7 @@ dependencies = [
  "futures 0.3.31",
  "fuzzy",
  "gpui",
+ "gpui_rn_util",
  "indoc",
  "language",
  "log",
@@ -13608,7 +13377,6 @@ dependencies = [
  "telemetry",
  "theme",
  "ui",
- "util",
  "windows-registry 0.6.1",
  "workspace",
  "worktree",
@@ -13691,13 +13459,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "refineable"
-version = "0.1.0"
-dependencies = [
- "derive_refineable",
-]
-
-[[package]]
 name = "regalloc2"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13762,10 +13523,11 @@ dependencies = [
  "anyhow",
  "askpass",
  "async-trait",
- "collections",
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "log",
  "parking_lot",
  "paths",
@@ -13781,7 +13543,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "urlencoding",
- "util",
  "which 6.0.3",
 ]
 
@@ -13797,7 +13558,6 @@ dependencies = [
  "clap",
  "client",
  "clock",
- "collections",
  "crash-handler",
  "crashes",
  "dap",
@@ -13814,8 +13574,10 @@ dependencies = [
  "git2",
  "git_hosting_providers",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "image",
  "json_schema_store",
  "language",
@@ -13850,7 +13612,6 @@ dependencies = [
  "thiserror 2.0.17",
  "toml 0.8.23",
  "unindent",
- "util",
  "watch",
  "workspace",
  "worktree",
@@ -13876,7 +13637,6 @@ dependencies = [
  "async-tungstenite",
  "base64 0.22.1",
  "client",
- "collections",
  "command_palette_hooks",
  "editor",
  "env_logger 0.11.8",
@@ -13884,7 +13644,9 @@ dependencies = [
  "file_icons",
  "futures 0.3.31",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "image",
  "indoc",
  "jupyter-protocol",
@@ -13911,7 +13673,6 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-typescript",
  "ui",
- "util",
  "uuid",
  "workspace",
 ]
@@ -13966,45 +13727,32 @@ version = "0.12.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d0946410b9f7b082a427e4ef5c8ff541a88b357bc6c637c40db3a68ac70a36f"
 dependencies = [
- "async-compression",
  "base64 0.22.1",
  "bytes 1.10.1",
- "cookie",
- "cookie_store 0.21.1",
  "futures-channel",
  "futures-core",
  "futures-util",
- "h2 0.4.12",
  "http 1.3.1",
  "http-body 1.0.1",
  "http-body-util",
  "hyper 1.7.0",
- "hyper-rustls 0.27.7",
  "hyper-util",
  "js-sys",
  "log",
- "mime_guess",
  "percent-encoding",
  "pin-project-lite",
- "quinn",
- "rustls 0.23.33",
- "rustls-pki-types",
  "serde",
  "serde_json",
  "serde_urlencoded",
  "sync_wrapper 1.0.2",
  "tokio",
- "tokio-rustls 0.26.2",
- "tokio-util",
  "tower 0.5.2",
  "tower-http 0.6.6",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
  "web-sys",
- "webpki-roots 1.0.4",
 ]
 
 [[package]]
@@ -14015,25 +13763,13 @@ dependencies = [
  "bytes 1.10.1",
  "futures 0.3.31",
  "gpui",
- "http_client",
+ "gpui_rn_http_client",
  "http_client_tls",
  "log",
  "regex",
  "serde",
  "tokio",
  "zed-reqwest",
-]
-
-[[package]]
-name = "reqwest_cookie_store"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e75bc88d954b228850d19e3685cedb38c030a17da34aa01c307f95d6e33de34"
-dependencies = [
- "bytes 1.10.1",
- "cookie_store 0.22.0",
- "reqwest 0.12.24",
- "url",
 ]
 
 [[package]]
@@ -14076,12 +13812,12 @@ version = "0.1.0"
 dependencies = [
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_util",
  "language",
  "linkify",
  "pulldown-cmark 0.12.2",
  "theme",
  "ui",
- "util",
 ]
 
 [[package]]
@@ -14149,79 +13885,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "rn_chat_panel"
-version = "0.1.0"
-dependencies = [
- "acp_thread",
- "agent",
- "agent-client-protocol",
- "agent_servers",
- "agent_settings",
- "anyhow",
- "assistant_slash_command",
- "assistant_text_thread",
- "async-channel 2.5.0",
- "chrono",
- "dirs 5.0.1",
- "editor",
- "fs",
- "futures 0.3.31",
- "gpui",
- "gpui_host",
- "gpui_host_core",
- "gpui_host_ffi",
- "gpui_host_macros",
- "gpui_modules",
- "icons",
- "language_model",
- "log",
- "parking_lot",
- "project",
- "prompt_store",
- "pulldown-cmark 0.12.2",
- "rn_chat_panel_types",
- "rngpui_ext_rnsvg",
- "serde",
- "serde_json",
- "settings",
- "strum 0.27.2",
- "terminal_view",
- "theme",
- "tokio",
- "ui",
- "uuid",
- "workspace",
- "zedmodules",
-]
-
-[[package]]
-name = "rn_chat_panel_types"
-version = "0.1.0"
-dependencies = [
- "async-channel 2.5.0",
- "log",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "rngpui_build"
 version = "0.1.0"
-
-[[package]]
-name = "rngpui_ext_rnsvg"
-version = "0.1.0"
-dependencies = [
- "collections",
- "gpui",
- "gpui_host",
- "gpui_host_abi",
- "gpui_host_core",
- "gpui_host_macros",
- "parking_lot",
- "serde_json",
- "zlog",
-]
+source = "git+https://github.com/rngpui/react-native-gpui?rev=c6f35530b32ade9b61710ca9c59268afe3909bd3#c6f35530b32ade9b61710ca9c59268afe3909bd3"
 
 [[package]]
 name = "rodio"
@@ -14245,13 +13911,13 @@ dependencies = [
  "criterion",
  "ctor",
  "gpui",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "log",
  "rand 0.9.2",
  "rayon",
- "sum_tree",
  "tracing",
  "unicode-segmentation",
- "util",
  "zlog",
  "ztracing",
 ]
@@ -14270,9 +13936,10 @@ dependencies = [
  "async-tungstenite",
  "base64 0.22.1",
  "chrono",
- "collections",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "parking_lot",
  "proto",
  "rand 0.9.2",
@@ -14282,7 +13949,6 @@ dependencies = [
  "sha2",
  "strum 0.27.2",
  "tracing",
- "util",
  "zlog",
  "zstd",
 ]
@@ -14318,9 +13984,10 @@ name = "rules_library"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "editor",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "language_model",
  "log",
@@ -14334,7 +14001,6 @@ dependencies = [
  "theme",
  "title_bar",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -14964,10 +14630,12 @@ dependencies = [
  "anyhow",
  "bitflags 2.9.4",
  "client",
- "collections",
  "editor",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
+ "gpui_rn_util_macros",
  "itertools 0.14.0",
  "language",
  "lsp",
@@ -14983,8 +14651,6 @@ dependencies = [
  "tracing",
  "ui",
  "unindent",
- "util",
- "util_macros",
  "workspace",
  "zed_actions",
  "ztracing",
@@ -15221,8 +14887,8 @@ version = "0.1.0"
 dependencies = [
  "db",
  "gpui",
+ "gpui_rn_util",
  "serde_json",
- "util",
  "uuid",
 ]
 
@@ -15231,12 +14897,13 @@ name = "settings"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "derive_more 0.99.20",
  "ec4rs",
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "inventory",
  "log",
@@ -15255,7 +14922,6 @@ dependencies = [
  "smallvec",
  "strum 0.27.2",
  "unindent",
- "util",
  "zlog",
 ]
 
@@ -15264,6 +14930,7 @@ name = "settings_json"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "gpui_rn_util",
  "pretty_assertions",
  "serde",
  "serde_json",
@@ -15272,7 +14939,6 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-json",
  "unindent",
- "util",
 ]
 
 [[package]]
@@ -15320,6 +14986,7 @@ dependencies = [
  "futures 0.3.31",
  "fuzzy",
  "gpui",
+ "gpui_rn_util",
  "heck 0.5.0",
  "language",
  "language_models",
@@ -15342,7 +15009,6 @@ dependencies = [
  "title_bar",
  "ui",
  "ui_input",
- "util",
  "workspace",
  "zed_actions",
  "zlog",
@@ -15605,16 +15271,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 
 [[package]]
-name = "smol_str"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3498b0a27f93ef1402f20eefacfaa1691272ac4eca1cdc8c596cb0a245d6cbf5"
-dependencies = [
- "borsh",
- "serde_core",
-]
-
-[[package]]
 name = "snippet"
 version = "0.1.0"
 dependencies = [
@@ -15627,11 +15283,12 @@ name = "snippet_provider"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "extension",
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "parking_lot",
  "paths",
@@ -15640,7 +15297,6 @@ dependencies = [
  "serde_json",
  "serde_json_lenient",
  "snippet",
- "util",
 ]
 
 [[package]]
@@ -15651,12 +15307,12 @@ dependencies = [
  "file_icons",
  "fuzzy",
  "gpui",
+ "gpui_rn_util",
  "language",
  "paths",
  "picker",
  "settings",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -15747,8 +15403,9 @@ name = "sqlez"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "futures 0.3.31",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "libsqlite3-sys",
  "log",
@@ -15756,7 +15413,6 @@ dependencies = [
  "smol",
  "sqlformat",
  "thread_local",
- "util",
  "uuid",
 ]
 
@@ -15830,7 +15486,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
- "webpki-roots 0.26.8",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -16090,10 +15746,10 @@ checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
 name = "streaming_diff"
 version = "0.1.0"
 dependencies = [
+ "gpui_rn_util",
  "ordered-float 2.10.1",
  "rand 0.9.2",
  "rope",
- "util",
 ]
 
 [[package]]
@@ -16203,32 +15859,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
-name = "sum_tree"
-version = "0.1.0"
-dependencies = [
- "arrayvec",
- "ctor",
- "log",
- "rand 0.9.2",
- "rayon",
- "tracing",
- "zlog",
- "ztracing",
-]
-
-[[package]]
 name = "supermaven"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "collections",
  "edit_prediction_types",
  "editor",
  "env_logger 0.11.8",
  "futures 0.3.31",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "language",
  "log",
  "postage",
@@ -16242,7 +15885,6 @@ dependencies = [
  "theme",
  "ui",
  "unicode-segmentation",
- "util",
 ]
 
 [[package]]
@@ -16251,12 +15893,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "paths",
  "serde",
  "serde_json",
  "smol",
- "util",
 ]
 
 [[package]]
@@ -16736,11 +16378,12 @@ name = "tab_switcher"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "ctor",
  "editor",
  "fuzzy",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "menu",
  "picker",
@@ -16752,7 +16395,6 @@ dependencies = [
  "smol",
  "theme",
  "ui",
- "util",
  "workspace",
  "zlog",
 ]
@@ -16816,9 +16458,10 @@ name = "task"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "hex",
  "log",
  "parking_lot",
@@ -16830,7 +16473,6 @@ dependencies = [
  "serde_json_lenient",
  "sha2",
  "shellexpand 2.1.2",
- "util",
  "zed_actions",
 ]
 
@@ -16839,11 +16481,12 @@ name = "tasks_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "editor",
  "file_icons",
  "fuzzy",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "language",
  "menu",
@@ -16855,7 +16498,6 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -16918,9 +16560,11 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
- "collections",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
+ "gpui_rn_util_macros",
  "itertools 0.14.0",
  "libc",
  "log",
@@ -16938,8 +16582,6 @@ dependencies = [
  "thiserror 2.0.17",
  "url",
  "urlencoding",
- "util",
- "util_macros",
  "windows 0.61.3",
 ]
 
@@ -16962,12 +16604,13 @@ dependencies = [
  "async-recursion",
  "breadcrumbs",
  "client",
- "collections",
  "db",
  "dirs 4.0.0",
  "editor",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "language",
  "log",
@@ -16985,7 +16628,6 @@ dependencies = [
  "terminal",
  "theme",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -16996,10 +16638,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clock",
- "collections",
  "ctor",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "log",
  "parking_lot",
  "postage",
@@ -17007,8 +16651,6 @@ dependencies = [
  "regex",
  "rope",
  "smallvec",
- "sum_tree",
- "util",
  "zlog",
 ]
 
@@ -17017,15 +16659,16 @@ name = "theme"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "derive_more 0.99.20",
  "fs",
  "futures 0.3.31",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_refineable",
+ "gpui_rn_util",
  "log",
  "palette",
  "parking_lot",
- "refineable",
  "schemars",
  "serde",
  "serde_json",
@@ -17033,7 +16676,6 @@ dependencies = [
  "settings",
  "strum 0.27.2",
  "thiserror 2.0.17",
- "util",
  "uuid",
 ]
 
@@ -17054,8 +16696,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "collections",
  "gpui",
+ "gpui_rn_collections",
  "indexmap",
  "log",
  "palette",
@@ -17075,6 +16717,7 @@ dependencies = [
  "fs",
  "fuzzy",
  "gpui",
+ "gpui_rn_util",
  "log",
  "picker",
  "serde",
@@ -17082,7 +16725,6 @@ dependencies = [
  "telemetry",
  "theme",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -17301,11 +16943,12 @@ dependencies = [
  "chrono",
  "client",
  "cloud_llm_client",
- "collections",
  "db",
  "git_ui",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "notifications",
  "pretty_assertions",
  "project",
@@ -17321,7 +16964,6 @@ dependencies = [
  "theme",
  "tree-sitter-md",
  "ui",
- "util",
  "windows 0.61.3",
  "workspace",
  "zed_actions",
@@ -17442,22 +17084,6 @@ dependencies = [
  "log",
  "tokio",
  "tungstenite 0.21.0",
-]
-
-[[package]]
-name = "tokio-tungstenite"
-version = "0.23.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6989540ced10490aaf14e6bad2e3d33728a2813310a0c71d1574304c49631cd"
-dependencies = [
- "futures-util",
- "log",
- "rustls 0.23.33",
- "rustls-pki-types",
- "tokio",
- "tokio-rustls 0.26.2",
- "tungstenite 0.23.0",
- "webpki-roots 0.26.8",
 ]
 
 [[package]]
@@ -17601,12 +17227,12 @@ dependencies = [
  "futures 0.3.31",
  "fuzzy",
  "gpui",
+ "gpui_rn_util",
  "language",
  "menu",
  "picker",
  "project",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -18142,26 +17768,6 @@ dependencies = [
 
 [[package]]
 name = "tungstenite"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e2e2ce1e47ed2994fd43b04c8f618008d4cabdd5ee34027cf14f9d918edd9c8"
-dependencies = [
- "byteorder",
- "bytes 1.10.1",
- "data-encoding",
- "http 1.3.1",
- "httparse",
- "log",
- "rand 0.8.5",
- "rustls 0.23.33",
- "rustls-pki-types",
- "sha1",
- "thiserror 1.0.69",
- "utf-8",
-]
-
-[[package]]
-name = "tungstenite"
 version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4793cb5e56680ecbb1d843515b23b6de9a75eb04b66643e256a396d43be33c13"
@@ -18271,7 +17877,8 @@ dependencies = [
  "component",
  "documented",
  "gpui",
- "gpui_macros",
+ "gpui_rn_macros",
+ "gpui_rn_util",
  "icons",
  "itertools 0.14.0",
  "menu",
@@ -18283,7 +17890,6 @@ dependencies = [
  "strum 0.27.2",
  "theme",
  "ui_macros",
- "util",
  "windows 0.61.3",
 ]
 
@@ -18516,55 +18122,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
-name = "util"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-fs",
- "async_zip",
- "collections",
- "command-fds",
- "dirs 4.0.0",
- "dunce",
- "futures 0.3.31",
- "futures-lite 1.13.0",
- "git2",
- "globset",
- "indoc",
- "itertools 0.14.0",
- "libc",
- "log",
- "mach2 0.5.0",
- "nix 0.29.0",
- "pretty_assertions",
- "rand 0.9.2",
- "regex",
- "rust-embed",
- "schemars",
- "serde",
- "serde_json",
- "serde_json_lenient",
- "shlex",
- "smol",
- "take-until",
- "tempfile",
- "tendril",
- "unicase",
- "util_macros",
- "walkdir",
- "which 6.0.3",
-]
-
-[[package]]
-name = "util_macros"
-version = "0.1.0"
-dependencies = [
- "perf",
- "quote",
- "syn 2.0.111",
-]
-
-[[package]]
 name = "uuid"
 version = "1.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -18676,7 +18233,6 @@ dependencies = [
  "assets",
  "async-compat",
  "async-trait",
- "collections",
  "command_palette",
  "command_palette_hooks",
  "db",
@@ -18686,6 +18242,10 @@ dependencies = [
  "fuzzy",
  "git_ui",
  "gpui",
+ "gpui_rn_collections",
+ "gpui_rn_perf",
+ "gpui_rn_util",
+ "gpui_rn_util_macros",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -18697,7 +18257,6 @@ dependencies = [
  "nvim-rs",
  "outline_panel",
  "parking_lot",
- "perf",
  "picker",
  "project",
  "project_panel",
@@ -18715,8 +18274,6 @@ dependencies = [
  "theme",
  "tokio",
  "ui",
- "util",
- "util_macros",
  "vim_mode_setting",
  "workspace",
  "zed_actions",
@@ -19524,8 +19081,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cloud_llm_client",
- "collections",
  "gpui",
+ "gpui_rn_collections",
  "serde",
 ]
 
@@ -19538,7 +19095,7 @@ dependencies = [
  "cloud_llm_client",
  "futures 0.3.31",
  "gpui",
- "http_client",
+ "gpui_rn_http_client",
  "language_model",
  "serde",
  "serde_json",
@@ -19559,15 +19116,6 @@ name = "webpki-roots"
 version = "0.26.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2210b291f7ea53617fbafcc4939f10914214ec15aace5ba62293a668f322c5c9"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2878ef029c47c6e8cf779119f20fcf52bde7ad42a731b2a304bc221df17571e"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -19634,11 +19182,11 @@ version = "0.1.0"
 dependencies = [
  "command_palette",
  "gpui",
+ "gpui_rn_util",
  "serde",
  "settings",
  "theme",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -20692,7 +20240,6 @@ dependencies = [
  "call",
  "client",
  "clock",
- "collections",
  "component",
  "dap",
  "db",
@@ -20701,7 +20248,9 @@ dependencies = [
  "futures 0.3.31",
  "git",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "language",
  "log",
@@ -20726,7 +20275,6 @@ dependencies = [
  "tempfile",
  "theme",
  "ui",
- "util",
  "uuid",
  "windows 0.61.3",
  "zed_actions",
@@ -20741,7 +20289,6 @@ dependencies = [
  "async-lock 2.8.0",
  "chardetng",
  "clock",
- "collections",
  "encoding_rs",
  "fs",
  "futures 0.3.31",
@@ -20749,7 +20296,10 @@ dependencies = [
  "git",
  "git2",
  "gpui",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "ignore",
  "language",
  "log",
@@ -20764,9 +20314,7 @@ dependencies = [
  "settings",
  "smallvec",
  "smol",
- "sum_tree",
  "text",
- "util",
  "zlog",
 ]
 
@@ -20990,7 +20538,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots 0.26.8",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -21151,7 +20699,6 @@ dependencies = [
  "clock",
  "codestral",
  "collab_ui",
- "collections",
  "command_palette",
  "component",
  "component_preview",
@@ -21181,7 +20728,9 @@ dependencies = [
  "git_ui",
  "go_to_line",
  "gpui",
- "gpui_modules",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
  "http_client",
  "image",
@@ -21230,7 +20779,6 @@ dependencies = [
  "remote",
  "repl",
  "reqwest_client",
- "rn_chat_panel",
  "rngpui_build",
  "rope",
  "search",
@@ -21268,7 +20816,6 @@ dependencies = [
  "ui_prompt",
  "url",
  "urlencoding",
- "util",
  "uuid",
  "vim",
  "vim_mode_setting",
@@ -21471,20 +21018,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zedmodules"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "cc",
- "craby",
- "cxx",
- "cxx-build",
- "log",
- "rn_chat_panel_types",
- "serde_json",
-]
-
-[[package]]
 name = "zeno"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -21656,7 +21189,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "collections",
+ "gpui_rn_collections",
  "log",
  "tempfile",
 ]
@@ -21665,8 +21198,8 @@ dependencies = [
 name = "zlog_settings"
 version = "0.1.0"
 dependencies = [
- "collections",
  "gpui",
+ "gpui_rn_collections",
  "settings",
  "zlog",
 ]
