@@ -6,7 +6,7 @@ export function useWorkspaceInfo() {
 
   useEffect(() => {
     try {
-      const { NativeModuleRegistry } = require('craby-modules');
+      const { NativeModuleRegistry } = require('@rngpui/craby-modules');
       const mod = NativeModuleRegistry.get('ZedWorkspace');
       if (mod?.getWorkspaceInfo) {
         const data = mod.getWorkspaceInfo();

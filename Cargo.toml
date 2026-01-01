@@ -782,6 +782,37 @@ notify-types = { git = "https://github.com/zed-industries/notify.git", rev = "b4
 windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
 calloop = { git = "https://github.com/zed-industries/calloop" }
 
+# Override zed crates that react-native-gpui fetches from zed-react-native-gpui
+# This ensures transitive deps use local workspace crates instead of the git mirror
+[patch."https://github.com/rngpui/zed-react-native-gpui"]
+collections = { path = "crates/collections" }
+derive_refineable = { path = "crates/refineable/derive_refineable" }
+gpui = { path = "crates/gpui" }
+http_client = { path = "crates/http_client" }
+refineable = { path = "crates/refineable" }
+reqwest_client = { path = "crates/reqwest_client" }
+rope = { path = "crates/rope" }
+sum_tree = { path = "crates/sum_tree" }
+util = { path = "crates/util" }
+zlog = { path = "crates/zlog" }
+ztracing = { path = "crates/ztracing" }
+ztracing_macro = { path = "crates/ztracing_macro" }
+
+# Also patch the react-native-gpui repo itself for workspace dep resolution
+[patch."https://github.com/rngpui/react-native-gpui"]
+collections = { path = "crates/collections" }
+derive_refineable = { path = "crates/refineable/derive_refineable" }
+gpui = { path = "crates/gpui" }
+http_client = { path = "crates/http_client" }
+refineable = { path = "crates/refineable" }
+reqwest_client = { path = "crates/reqwest_client" }
+rope = { path = "crates/rope" }
+sum_tree = { path = "crates/sum_tree" }
+util = { path = "crates/util" }
+zlog = { path = "crates/zlog" }
+ztracing = { path = "crates/ztracing" }
+ztracing_macro = { path = "crates/ztracing_macro" }
+
 [profile.dev]
 split-debuginfo = "unpacked"
 # https://github.com/rust-lang/cargo/issues/16104

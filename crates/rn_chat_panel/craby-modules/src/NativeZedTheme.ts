@@ -1,5 +1,5 @@
-import type { NativeModule, Signal } from 'craby-modules';
-import { NativeModuleRegistry } from 'craby-modules';
+import type { NativeModule, Signal } from '@rngpui/craby-modules';
+import { NativeModuleRegistry } from '@rngpui/craby-modules';
 
 export interface ThemeColors {
   // Backgrounds

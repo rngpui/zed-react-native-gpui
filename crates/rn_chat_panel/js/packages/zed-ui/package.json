@@ -9,10 +9,10 @@
     "react": "19.2.0",
     "react-native": "0.83.0",
     "@rngpui/svg": "*",
-    "craby-modules": "*"
+    "@rngpui/craby-modules": "*"
   },
   "peerDependenciesMeta": {
-    "craby-modules": {
+    "@rngpui/craby-modules": {
       "optional": true
     },
     "@rngpui/svg": {

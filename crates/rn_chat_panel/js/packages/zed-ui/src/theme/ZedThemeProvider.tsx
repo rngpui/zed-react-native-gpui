@@ -76,7 +76,7 @@ let _nativeZedTheme: any = null;
 function getNativeZedTheme() {
   if (_nativeZedTheme !== null) return _nativeZedTheme;
   try {
-    const { NativeModuleRegistry } = require('craby-modules');
+    const { NativeModuleRegistry } = require('@rngpui/craby-modules');
     _nativeZedTheme = NativeModuleRegistry.get('ZedTheme');
   } catch (e) {
     console.error('Failed to get ZedTheme module:', e);

@@ -62,11 +62,11 @@ pulldown-cmark = "0.12"
 dirs = "5.0"
 
 # RNGPUI - git reference
-gpui_host = { git = "https://github.com/rngpui/react-native-gpui", rev = "c6f35530b32ade9b61710ca9c59268afe3909bd3", features = ["library-mode"] }
-gpui_host_core = { git = "https://github.com/rngpui/react-native-gpui", rev = "c6f35530b32ade9b61710ca9c59268afe3909bd3" }
-gpui_host_ffi = { git = "https://github.com/rngpui/react-native-gpui", rev = "c6f35530b32ade9b61710ca9c59268afe3909bd3" }
-gpui_host_macros = { git = "https://github.com/rngpui/react-native-gpui", rev = "c6f35530b32ade9b61710ca9c59268afe3909bd3" }
-rngpui_ext_rnsvg = { git = "https://github.com/rngpui/react-native-gpui", rev = "c6f35530b32ade9b61710ca9c59268afe3909bd3" }
+gpui_host = { git = "https://github.com/rngpui/react-native-gpui", rev = "dac732e98414f88f5cce0bbe4eb78d5f7a4d5e8f", features = ["library-mode"] }
+gpui_host_core = { git = "https://github.com/rngpui/react-native-gpui", rev = "dac732e98414f88f5cce0bbe4eb78d5f7a4d5e8f" }
+gpui_host_ffi = { git = "https://github.com/rngpui/react-native-gpui", rev = "dac732e98414f88f5cce0bbe4eb78d5f7a4d5e8f" }
+gpui_host_macros = { git = "https://github.com/rngpui/react-native-gpui", rev = "dac732e98414f88f5cce0bbe4eb78d5f7a4d5e8f" }
+rngpui_ext_rnsvg = { git = "https://github.com/rngpui/react-native-gpui", rev = "dac732e98414f88f5cce0bbe4eb78d5f7a4d5e8f" }
 # gpui_host = { path = "../../../react-native-gpui/rust/gpui_host", features = ["library-mode"] }
 # gpui_host_core = { path = "../../../react-native-gpui/rust/gpui_host_core" }
 # gpui_host_ffi = { path = "../../../react-native-gpui/rust/gpui_host_ffi" }
@@ -74,7 +74,7 @@ rngpui_ext_rnsvg = { git = "https://github.com/rngpui/react-native-gpui", rev = 
 # rngpui_ext_rnsvg = { path = "../../../react-native-gpui/extensions/rnsvg/rust" }
 
 # Craby-generated TurboModules (FFI layer for C++ → Rust)
-gpui_modules = { git = "https://github.com/rngpui/react-native-gpui", rev = "c6f35530b32ade9b61710ca9c59268afe3909bd3" }
+gpui_modules = { git = "https://github.com/rngpui/react-native-gpui", rev = "dac732e98414f88f5cce0bbe4eb78d5f7a4d5e8f" }
 # gpui_modules = { path = "../../../react-native-gpui/craby-modules/crates/lib" }
 # Shared types crate (breaks cyclic dependency)
 rn_chat_panel_types = { path = "./crates/types" }

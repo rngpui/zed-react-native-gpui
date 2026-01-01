@@ -5,8 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
-craby = { git = "https://github.com/rngpui/craby", rev = "840bb5ead619460e8c93455ff917b79dcbc7547f" }
-# craby = { path = "../../../../../../craby/crates/craby" }
+rngpui-craby = "0.2.0"
 cxx = { version = "1.0", features = ["c++20"] }
 serde_json = "1.0"
 log = "0.4"
