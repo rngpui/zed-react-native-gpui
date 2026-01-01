@@ -1,10 +1,12 @@
 [package]
-name = "refineable"
+name = "gpui_rn_refineable"
 version = "0.1.0"
 edition.workspace = true
-publish = false
+authors = ["Nathan Sobo <nathan@zed.dev>", "Madeline Lane <maddythewisp@gmail.com>"]
+publish = true
 license = "Apache-2.0"
-description = "A macro for creating 'refinement' types that can be used to partially initialize or mutate a complex struct"
+repository = "https://github.com/rngpui/zed-react-native-gpui"
+description = "Refinement types for partial struct initialization (fork for React Native GPUI)"
 
 [lints]
 workspace = true
