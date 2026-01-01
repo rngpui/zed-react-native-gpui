@@ -379,12 +379,12 @@ repl = { path = "crates/repl" }
 reqwest_client = { path = "crates/reqwest_client" }
 rn_chat_panel = { path = "crates/rn_chat_panel" }
 # RNGPUI crates from react-native-gpui
-rngpui = { git = "https://github.com/rngpui/react-native-gpui", rev = "39eb2f3cd4f0dafba04def11b147d48cb6816ea5", features = ["library-mode"] }
-rngpui_core = { git = "https://github.com/rngpui/react-native-gpui", rev = "39eb2f3cd4f0dafba04def11b147d48cb6816ea5" }
-rngpui_ffi = { git = "https://github.com/rngpui/react-native-gpui", rev = "39eb2f3cd4f0dafba04def11b147d48cb6816ea5" }
-rngpui_macros = { git = "https://github.com/rngpui/react-native-gpui", rev = "39eb2f3cd4f0dafba04def11b147d48cb6816ea5" }
-rngpui_ext_rnsvg = { git = "https://github.com/rngpui/react-native-gpui", rev = "39eb2f3cd4f0dafba04def11b147d48cb6816ea5" }
-gpui_modules = { git = "https://github.com/rngpui/react-native-gpui", rev = "39eb2f3cd4f0dafba04def11b147d48cb6816ea5" }
+rngpui = { git = "https://github.com/rngpui/react-native-gpui", rev = "3d5e42c838be73d104daf9210d7ccd85337721c7", features = ["library-mode"] }
+rngpui_core = { git = "https://github.com/rngpui/react-native-gpui", rev = "3d5e42c838be73d104daf9210d7ccd85337721c7" }
+rngpui_ffi = { git = "https://github.com/rngpui/react-native-gpui", rev = "3d5e42c838be73d104daf9210d7ccd85337721c7" }
+rngpui_macros = { git = "https://github.com/rngpui/react-native-gpui", rev = "3d5e42c838be73d104daf9210d7ccd85337721c7" }
+rngpui_ext_rnsvg = { git = "https://github.com/rngpui/react-native-gpui", rev = "3d5e42c838be73d104daf9210d7ccd85337721c7" }
+gpui_modules = { git = "https://github.com/rngpui/react-native-gpui", rev = "3d5e42c838be73d104daf9210d7ccd85337721c7" }
 rodio = { git = "https://github.com/RustAudio/rodio", rev ="e2074c6c2acf07b57cf717e076bdda7a9ac6e70b", features = ["wav", "playback", "wav_output", "recording"] }
 rope = { path = "crates/rope" }
 rpc = { path = "crates/rpc" }

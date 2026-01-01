@@ -228,7 +228,7 @@ windows.workspace = true
 chrono.workspace = true
 
 [build-dependencies]
-rngpui_build = { git = "https://github.com/rngpui/react-native-gpui", rev = "c6f35530b32ade9b61710ca9c59268afe3909bd3", optional = true }
+rngpui_build = { git = "https://github.com/rngpui/react-native-gpui", rev = "3d5e42c838be73d104daf9210d7ccd85337721c7", optional = true }
 # rngpui_build = { path = "../../../react-native-gpui/rust/rngpui_build", optional = true }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
