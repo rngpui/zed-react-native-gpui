@@ -1,5 +1,5 @@
 [package]
-name = "gpui"
+name = "gpui_rn"
 version = "0.1.0"
 edition.workspace = true
 authors = ["Nathan Sobo <nathan@zed.dev>", "Madeline Lane <maddythewisp@gmail.com>"]
@@ -80,6 +80,7 @@ screen-capture = [
 windows-manifest = []
 
 [lib]
+name = "gpui"
 path = "src/gpui.rs"
 doctest = false
 
