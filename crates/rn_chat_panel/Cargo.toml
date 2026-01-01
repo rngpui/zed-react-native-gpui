@@ -20,6 +20,7 @@ doctest = false
 
 [dependencies]
 # Core Zed dependencies
+collections.workspace = true
 gpui.workspace = true
 editor.workspace = true
 terminal_view.workspace = true
@@ -61,21 +62,15 @@ pulldown-cmark = "0.12"
 # File system utilities
 dirs = "5.0"
 
-# RNGPUI - git reference
-gpui_host = { git = "https://github.com/rngpui/react-native-gpui", rev = "dac732e98414f88f5cce0bbe4eb78d5f7a4d5e8f", features = ["library-mode"] }
-gpui_host_core = { git = "https://github.com/rngpui/react-native-gpui", rev = "dac732e98414f88f5cce0bbe4eb78d5f7a4d5e8f" }
-gpui_host_ffi = { git = "https://github.com/rngpui/react-native-gpui", rev = "dac732e98414f88f5cce0bbe4eb78d5f7a4d5e8f" }
-gpui_host_macros = { git = "https://github.com/rngpui/react-native-gpui", rev = "dac732e98414f88f5cce0bbe4eb78d5f7a4d5e8f" }
-rngpui_ext_rnsvg = { git = "https://github.com/rngpui/react-native-gpui", rev = "dac732e98414f88f5cce0bbe4eb78d5f7a4d5e8f" }
-# gpui_host = { path = "../../../react-native-gpui/rust/gpui_host", features = ["library-mode"] }
-# gpui_host_core = { path = "../../../react-native-gpui/rust/gpui_host_core" }
-# gpui_host_ffi = { path = "../../../react-native-gpui/rust/gpui_host_ffi" }
-# gpui_host_macros = { path = "../../../react-native-gpui/rust/gpui_host_macros" }
-# rngpui_ext_rnsvg = { path = "../../../react-native-gpui/extensions/rnsvg/rust" }
+# RNGPUI - workspace dependencies
+rngpui.workspace = true
+rngpui_core.workspace = true
+rngpui_ffi.workspace = true
+rngpui_macros.workspace = true
+rngpui_ext_rnsvg.workspace = true
 
 # Craby-generated TurboModules (FFI layer for C++ → Rust)
-gpui_modules = { git = "https://github.com/rngpui/react-native-gpui", rev = "dac732e98414f88f5cce0bbe4eb78d5f7a4d5e8f" }
-# gpui_modules = { path = "../../../react-native-gpui/craby-modules/crates/lib" }
+gpui_modules.workspace = true
 # Shared types crate (breaks cyclic dependency)
 rn_chat_panel_types = { path = "./crates/types" }
 # Zed-specific craby modules (theme, workspace, llm)

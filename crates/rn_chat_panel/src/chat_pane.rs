@@ -2,7 +2,7 @@ use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement, Pixels, Render, Styled,
     Window, px,
 };
-use gpui_host::{SurfaceId, SurfaceSlot};
+use rngpui::{SurfaceId, SurfaceSlot};
 use ui::{ActiveTheme, IconName, IntoElement, ParentElement, div};
 use workspace::{
     Workspace,
@@ -50,8 +50,8 @@ impl RNChatPane {
             self.position_left = new_left;
 
             if let Some(surface_id) = self.surface_id.take() {
-                gpui_host::window::unregister_surface_from_compositor(surface_id, cx);
-                gpui_host::library_mode::destroy_surface(surface_id, cx);
+                rngpui::window::unregister_surface_from_compositor(surface_id, cx);
+                rngpui::library_mode::destroy_surface(surface_id, cx);
             }
 
             self.surface_created = false;
@@ -82,7 +82,7 @@ impl RNChatPane {
             }
         };
 
-        match gpui_host::library_mode::create_surface_for_panel_with_initial_props_json(
+        match rngpui::library_mode::create_surface_for_panel_with_initial_props_json(
             "RNChatPanel",
             &initial_props_json,
             cx,
@@ -123,7 +123,7 @@ impl UtilityPane for RNChatPane {
         self.expanded = expanded;
         if !expanded {
             if let Some(surface_id) = self.surface_id {
-                gpui_host::window::unregister_surface_from_compositor(surface_id, cx);
+                rngpui::window::unregister_surface_from_compositor(surface_id, cx);
             }
         }
         cx.notify();

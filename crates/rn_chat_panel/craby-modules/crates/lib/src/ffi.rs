@@ -666,3 +666,9 @@ unsafe fn drop_zed_workspace_signal(signal: *mut ZedWorkspaceSignal) {
         drop(Box::from_raw(signal));
     }
 }
+
+/// Anchor function to ensure generated symbols are linked.
+#[inline(never)]
+pub(crate) fn __craby_link_anchor() {
+    std::hint::black_box(());
+}

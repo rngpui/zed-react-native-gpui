@@ -19,8 +19,8 @@ use gpui::{
     IntoElement, ParentElement, Pixels, Render, Styled, Task, WeakEntity, Window, actions,
     deferred, div, px,
 };
-use gpui_host::{SurfaceId, SurfaceSlot};
-use gpui_host_core::EntityProjection;
+use rngpui::{SurfaceId, SurfaceSlot};
+use rngpui_core::EntityProjection;
 use project::Project;
 use prompt_store::{PromptBuilder, PromptStore};
 use rn_chat_panel_types::AgentServerType;
@@ -146,7 +146,7 @@ impl RNChatPanel {
         // and registers the window waker before any surfaces are created, avoiding
         // first-frame edge cases where animations may not start correctly.
         if crate::is_initialized() {
-            gpui_host::library_mode::prepare_window(window, cx);
+            rngpui::library_mode::prepare_window(window, cx);
         }
 
         // Create history store from text_thread_store
@@ -275,7 +275,7 @@ impl RNChatPanel {
             }
         };
 
-        match gpui_host::library_mode::create_surface_for_panel_with_initial_props_json(
+        match rngpui::library_mode::create_surface_for_panel_with_initial_props_json(
             "RNChatHistoryPanel",
             &initial_props_json,
             cx,
@@ -602,7 +602,7 @@ impl Focusable for RNChatPanel {
 
 impl Render for RNChatPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let bundle_loaded = gpui_host::library_mode::is_bundle_loaded();
+        let bundle_loaded = rngpui::library_mode::is_bundle_loaded();
         let bundle_url = std::env::var("RN_METRO_URL").unwrap_or_else(|_| {
             "http://localhost:8082/index.bundle?platform=gpui&dev=true".to_string()
         });
@@ -778,7 +778,7 @@ impl Panel for RNChatPanel {
         } else if !active && was_active {
             // Unregister surface from compositor when panel becomes inactive
             if let Some(surface_id) = self.surface_id {
-                gpui_host::window::unregister_surface_from_compositor(surface_id, cx);
+                rngpui::window::unregister_surface_from_compositor(surface_id, cx);
             }
 
             // Close utility pane and remember its state
