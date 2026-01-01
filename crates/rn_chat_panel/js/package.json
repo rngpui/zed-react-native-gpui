@@ -6,8 +6,7 @@
     "start": "pnpm exec rngpui metro",
     "metro": "pnpm exec rngpui metro",
     "bundle": "pnpm exec rngpui bundle",
-    "craby:build": "cargo build -p craby_cli --release --manifest-path ../../../../craby/Cargo.toml",
-    "craby:codegen": "../../../../craby/target/release/craby_cli codegen --cwd ../craby-modules --overwrite"
+    "craby:codegen": "cd ../craby-modules && npx @rngpui/crabygen codegen"
   },
   "pnpm": {
     "overrides": {
@@ -19,7 +18,7 @@
       "@rngpui/metro-resolver": "file:../../../../react-native-gpui/packages/metro-resolver",
       "@rngpui/svg": "file:../../../../react-native-gpui/packages/svg",
       "@rngpui/window": "file:../../../../react-native-gpui/packages/window",
-      "craby-modules": "file:../../../../craby/packages/craby-modules"
+      "@rngpui/craby-modules": "0.2.0"
     }
   },
   "dependencies": {
@@ -32,7 +31,7 @@
     "@rngpui/window": "file:../../../../react-native-gpui/packages/window",
     "@zed/ui": "workspace:*",
     "buffer": "^6.0.3",
-    "craby-modules": "file:../../../../craby/packages/craby-modules",
+    "@rngpui/craby-modules": "0.2.0",
     "react": "19.2.0",
     "react-native": "0.83.0",
     "react-native-reanimated": "4.3.0-nightly-20251216-76b4795ca",

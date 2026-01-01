@@ -1,4 +1,4 @@
-use craby::prelude::*;
+use rngpui_craby::prelude::*;
 
 use crate::ffi::bridging::*;
 use crate::generated::*;

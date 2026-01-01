@@ -1,5 +1,5 @@
-import type { NativeModule } from 'craby-modules';
-import { NativeModuleRegistry } from 'craby-modules';
+import type { NativeModule } from '@rngpui/craby-modules';
+import { NativeModuleRegistry } from '@rngpui/craby-modules';
 
 // ============================================================================
 // Module Spec

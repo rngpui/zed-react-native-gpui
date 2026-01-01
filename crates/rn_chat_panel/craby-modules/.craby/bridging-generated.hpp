@@ -142,6 +142,31 @@ struct Bridging<craby::zedmodules::bridging::NullableString> {
 };
 
 template <>
+struct Bridging<craby::zedmodules::bridging::AcpThreadsChangedEvent> {
+  static craby::zedmodules::bridging::AcpThreadsChangedEvent fromJs(jsi::Runtime &rt, const jsi::Value& value, std::shared_ptr<CallInvoker> callInvoker) {
+    auto obj = value.asObject(rt);
+    auto obj$threads = obj.getProperty(rt, "threads");
+
+    auto _obj$threads = react::bridging::fromJs<rust::String>(rt, obj$threads, callInvoker);
+
+    craby::zedmodules::bridging::AcpThreadsChangedEvent ret = {
+      _obj$threads
+    };
+
+    return ret;
+  }
+
+  static jsi::Value toJs(jsi::Runtime &rt, craby::zedmodules::bridging::AcpThreadsChangedEvent value) {
+    jsi::Object obj = jsi::Object(rt);
+    auto _obj$threads = react::bridging::toJs(rt, value.threads);
+
+    obj.setProperty(rt, "threads", _obj$threads);
+
+    return jsi::Value(rt, obj);
+  }
+};
+
+template <>
 struct Bridging<craby::zedmodules::bridging::AgentConnectedEvent> {
   static craby::zedmodules::bridging::AgentConnectedEvent fromJs(jsi::Runtime &rt, const jsi::Value& value, std::shared_ptr<CallInvoker> callInvoker) {
     auto obj = value.asObject(rt);
@@ -281,6 +306,31 @@ struct Bridging<craby::zedmodules::bridging::LLMErrorEvent> {
 
     obj.setProperty(rt, "requestId", _obj$requestId);
     obj.setProperty(rt, "error", _obj$error);
+
+    return jsi::Value(rt, obj);
+  }
+};
+
+template <>
+struct Bridging<craby::zedmodules::bridging::ThreadSnapshotPayload> {
+  static craby::zedmodules::bridging::ThreadSnapshotPayload fromJs(jsi::Runtime &rt, const jsi::Value& value, std::shared_ptr<CallInvoker> callInvoker) {
+    auto obj = value.asObject(rt);
+    auto obj$snapshot = obj.getProperty(rt, "snapshot");
+
+    auto _obj$snapshot = react::bridging::fromJs<rust::String>(rt, obj$snapshot, callInvoker);
+
+    craby::zedmodules::bridging::ThreadSnapshotPayload ret = {
+      _obj$snapshot
+    };
+
+    return ret;
+  }
+
+  static jsi::Value toJs(jsi::Runtime &rt, craby::zedmodules::bridging::ThreadSnapshotPayload value) {
+    jsi::Object obj = jsi::Object(rt);
+    auto _obj$snapshot = react::bridging::toJs(rt, value.snapshot);
+
+    obj.setProperty(rt, "snapshot", _obj$snapshot);
 
     return jsi::Value(rt, obj);
   }
@@ -601,66 +651,6 @@ struct Bridging<craby::zedmodules::bridging::ThemeChangedEvent> {
     auto _obj$theme = react::bridging::toJs(rt, value.theme);
 
     obj.setProperty(rt, "theme", _obj$theme);
-
-    return jsi::Value(rt, obj);
-  }
-};
-
-template <>
-struct Bridging<craby::zedmodules::bridging::ThreadMetadata> {
-  static craby::zedmodules::bridging::ThreadMetadata fromJs(jsi::Runtime &rt, const jsi::Value& value, std::shared_ptr<CallInvoker> callInvoker) {
-    auto obj = value.asObject(rt);
-    auto obj$id = obj.getProperty(rt, "id");
-    auto obj$title = obj.getProperty(rt, "title");
-    auto obj$updatedAt = obj.getProperty(rt, "updatedAt");
-
-    auto _obj$id = react::bridging::fromJs<rust::String>(rt, obj$id, callInvoker);
-    auto _obj$title = react::bridging::fromJs<rust::String>(rt, obj$title, callInvoker);
-    auto _obj$updatedAt = react::bridging::fromJs<rust::String>(rt, obj$updatedAt, callInvoker);
-
-    craby::zedmodules::bridging::ThreadMetadata ret = {
-      _obj$id,
-      _obj$title,
-      _obj$updatedAt
-    };
-
-    return ret;
-  }
-
-  static jsi::Value toJs(jsi::Runtime &rt, craby::zedmodules::bridging::ThreadMetadata value) {
-    jsi::Object obj = jsi::Object(rt);
-    auto _obj$id = react::bridging::toJs(rt, value.id);
-    auto _obj$title = react::bridging::toJs(rt, value.title);
-    auto _obj$updatedAt = react::bridging::toJs(rt, value.updated_at);
-
-    obj.setProperty(rt, "id", _obj$id);
-    obj.setProperty(rt, "title", _obj$title);
-    obj.setProperty(rt, "updatedAt", _obj$updatedAt);
-
-    return jsi::Value(rt, obj);
-  }
-};
-
-template <>
-struct Bridging<craby::zedmodules::bridging::ThreadsChangedEvent> {
-  static craby::zedmodules::bridging::ThreadsChangedEvent fromJs(jsi::Runtime &rt, const jsi::Value& value, std::shared_ptr<CallInvoker> callInvoker) {
-    auto obj = value.asObject(rt);
-    auto obj$threads = obj.getProperty(rt, "threads");
-
-    auto _obj$threads = react::bridging::fromJs<rust::Vec<craby::zedmodules::bridging::ThreadMetadata>>(rt, obj$threads, callInvoker);
-
-    craby::zedmodules::bridging::ThreadsChangedEvent ret = {
-      _obj$threads
-    };
-
-    return ret;
-  }
-
-  static jsi::Value toJs(jsi::Runtime &rt, craby::zedmodules::bridging::ThreadsChangedEvent value) {
-    jsi::Object obj = jsi::Object(rt);
-    auto _obj$threads = react::bridging::toJs(rt, value.threads);
-
-    obj.setProperty(rt, "threads", _obj$threads);
 
     return jsi::Value(rt, obj);
   }

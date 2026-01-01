@@ -1,4 +1,4 @@
-use craby::prelude::*;
+use rngpui_craby::prelude::*;
 
 use crate::generated::*;
 use rn_chat_panel_types::{send_with_reply_blocking, ZedHostCommand};
