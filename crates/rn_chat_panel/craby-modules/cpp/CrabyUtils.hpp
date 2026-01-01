@@ -5,6 +5,7 @@
 #include "ffi.rs.h"
 #include <condition_variable>
 #include <functional>
+#include <jsi/jsi.h>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -84,6 +85,11 @@ public:
 inline std::string errorMessage(const std::exception &err) {
   const auto* rs_err = dynamic_cast<const rust::Error*>(&err);
   return std::string(rs_err ? rs_err->what() : err.what());
+}
+
+inline std::string jsonStringify(facebook::jsi::Runtime &rt, const facebook::jsi::Value &value) {
+  auto json = rt.global().getPropertyAsObject(rt, "JSON");
+  return json.getPropertyAsFunction(rt, "stringify").call(rt, value).asString(rt).utf8(rt);
 }
 
 } // namespace utils
