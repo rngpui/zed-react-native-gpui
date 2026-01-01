@@ -7338,6 +7338,7 @@ dependencies = [
  "gpui_rn_collections",
  "gpui_rn_http_client",
  "gpui_rn_macros",
+ "gpui_rn_media",
  "gpui_rn_refineable",
  "gpui_rn_sum_tree",
  "gpui_rn_util",
@@ -7349,7 +7350,6 @@ dependencies = [
  "log",
  "lyon",
  "mach2 0.5.0",
- "media",
  "metal",
  "naga",
  "num_cpus",
@@ -7456,6 +7456,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.111",
+]
+
+[[package]]
+name = "gpui_rn_media"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bindgen 0.71.1",
+ "core-foundation 0.10.0",
+ "core-video",
+ "ctor",
+ "foreign-types 0.5.0",
+ "metal",
+ "objc",
 ]
 
 [[package]]
@@ -9945,20 +9959,6 @@ dependencies = [
  "topological-sort",
  "walkdir",
  "warp",
-]
-
-[[package]]
-name = "media"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bindgen 0.71.1",
- "core-foundation 0.10.0",
- "core-video",
- "ctor",
- "foreign-types 0.5.0",
- "metal",
- "objc",
 ]
 
 [[package]]

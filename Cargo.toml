@@ -143,7 +143,9 @@ members = [
     "crates/remote_server",
     "crates/repl",
     "crates/reqwest_client",
-    # "crates/rn_chat_panel",  # Disabled for publishing - depends on react-native-gpui git deps
+    # "crates/rn_chat_panel",  # Disabled for publishing - depends on react-native-gpui
+    # "crates/rn_chat_panel/crates/types",
+    # "crates/rn_chat_panel/craby-modules/crates/lib",
     "crates/rich_text",
     "crates/rope",
     "crates/rpc",
@@ -341,7 +343,7 @@ lsp = { path = "crates/lsp" }
 markdown = { path = "crates/markdown" }
 markdown_preview = { path = "crates/markdown_preview" }
 svg_preview = { path = "crates/svg_preview" }
-media = { path = "crates/media" }
+media = { path = "crates/media" , version = "0.1.0", package = "gpui_rn_media" }
 menu = { path = "crates/menu" }
 migrator = { path = "crates/migrator" }
 mistral = { path = "crates/mistral" }
@@ -483,6 +485,7 @@ brotli = "8.0.2"
 bytes = "1.0"
 cargo_metadata = "0.19"
 cargo_toml = "0.21"
+cc = "1"
 cfg-if = "1.0.3"
 chardetng = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -492,6 +495,8 @@ clap = { version = "4.4", features = ["derive", "wrap_help"] }
 cocoa = "=0.26.0"
 cocoa-foundation = "=0.2.0"
 convert_case = "0.8.0"
+cxx = "1"
+cxx-build = "1"
 core-foundation = "=0.10.0"
 core-foundation-sys = "0.8.6"
 core-video = { version = "0.4.3", features = ["metal"] }
@@ -617,6 +622,8 @@ reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662
     "socks",
     "stream",
 ], package = "zed-reqwest", version = "0.12.15-zed" }
+rngpui-craby = "0.2"
+rn_chat_panel_types = { path = "crates/rn_chat_panel/crates/types" }
 rsa = "0.9.6"
 runtimelib = { version = "0.30.0", default-features = false, features = [
     "async-dispatcher-runtime", "aws-lc-rs"
