@@ -4023,7 +4023,7 @@ dependencies = [
 
 [[package]]
 name = "craby"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 dependencies = [
  "anyhow",
  "craby_macro",
@@ -4031,7 +4031,7 @@ dependencies = [
 
 [[package]]
 name = "craby_build"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 dependencies = [
  "cxx-build",
  "toml 0.9.8",
@@ -4039,7 +4039,7 @@ dependencies = [
 
 [[package]]
 name = "craby_macro"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 dependencies = [
  "proc-macro2",
  "quote",
