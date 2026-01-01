@@ -6,7 +6,7 @@
     "start": "pnpm exec rngpui metro",
     "metro": "pnpm exec rngpui metro",
     "bundle": "pnpm exec rngpui bundle",
-    "craby:codegen": "cd ../craby-modules && crabygen codegen --overwrite"
+    "craby:codegen": "cd ../craby-modules && crabygen codegen"
   },
   "pnpm": {
     "overrides": {
