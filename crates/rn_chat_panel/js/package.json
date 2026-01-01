@@ -6,7 +6,7 @@
     "start": "pnpm exec rngpui metro",
     "metro": "pnpm exec rngpui metro",
     "bundle": "pnpm exec rngpui bundle",
-    "craby:codegen": "cd ../craby-modules && crabygen codegen"
+    "craby:codegen": "cd ../craby-modules && crabygen codegen --overwrite"
   },
   "pnpm": {
     "overrides": {
@@ -29,7 +29,7 @@
       "react-native": "0.83.1",
       "react-native-reanimated": "4.3.0-nightly-20251224-45cf72265",
       "react-native-worklets": "0.8.0-nightly-20251224-45cf72265",
-      "@rngpui/craby-modules": "0.2.1"
+      "@rngpui/craby-modules": "0.2.2"
     }
   },
   "dependencies": {
@@ -42,7 +42,7 @@
     "@rngpui/window": "file:../../../../react-native-gpui/packages/window",
     "@zed/ui": "workspace:*",
     "buffer": "^6.0.3",
-    "@rngpui/craby-modules": "0.2.1",
+    "@rngpui/craby-modules": "0.2.2",
     "react": "19.2.3",
     "react-native": "0.83.1",
     "react-native-reanimated": "4.3.0-nightly-20251224-45cf72265",
@@ -50,7 +50,7 @@
     "react-native-worklets": "0.8.0-nightly-20251224-45cf72265"
   },
   "devDependencies": {
-    "@rngpui/crabygen": "0.2.1",
+    "@rngpui/crabygen": "0.2.2",
     "@react-native/babel-preset": "0.83.1",
     "@react-native/debugger-frontend": "0.83.1",
     "@react-native/dev-middleware": "0.83.1",

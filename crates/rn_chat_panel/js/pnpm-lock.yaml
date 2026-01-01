@@ -24,7 +24,7 @@ overrides:
   react-native: 0.83.1
   react-native-reanimated: 4.3.0-nightly-20251224-45cf72265
   react-native-worklets: 0.8.0-nightly-20251224-45cf72265
-  '@rngpui/craby-modules': 0.2.1
+  '@rngpui/craby-modules': 0.2.2
 
 importers:
 
@@ -40,8 +40,8 @@ importers:
         specifier: file:../../../../react-native-gpui/packages/blur
         version: file:../../../../react-native-gpui/packages/blur(react-native-reanimated@4.3.0-nightly-20251224-45cf72265(react-native-worklets@0.8.0-nightly-20251224-45cf72265(@babel/core@7.28.5)(react-native@0.83.1(@babel/core@7.28.5)(@react-native/metro-config@0.83.1(@babel/core@7.28.5))(@types/react@19.2.7)(react@19.2.3))(react@19.2.3))(react-native@0.83.1(@babel/core@7.28.5)(@react-native/metro-config@0.83.1(@babel/core@7.28.5))(@types/react@19.2.7)(react@19.2.3))(react@19.2.3))(react-native-worklets@0.8.0-nightly-20251224-45cf72265(@babel/core@7.28.5)(react-native@0.83.1(@babel/core@7.28.5)(@react-native/metro-config@0.83.1(@babel/core@7.28.5))(@types/react@19.2.7)(react@19.2.3))(react@19.2.3))(react-native@0.83.1(@babel/core@7.28.5)(@react-native/metro-config@0.83.1(@babel/core@7.28.5))(@types/react@19.2.7)(react@19.2.3))(react@19.2.3)
       '@rngpui/craby-modules':
-        specifier: 0.2.1
-        version: 0.2.1(react-native@0.83.1(@babel/core@7.28.5)(@react-native/metro-config@0.83.1(@babel/core@7.28.5))(@types/react@19.2.7)(react@19.2.3))
+        specifier: 0.2.2
+        version: 0.2.2(react-native@0.83.1(@babel/core@7.28.5)(@react-native/metro-config@0.83.1(@babel/core@7.28.5))(@types/react@19.2.7)(react@19.2.3))
       '@rngpui/example-ui':
         specifier: file:../../../../react-native-gpui/packages/example-ui
         version: file:../../../../react-native-gpui/packages/example-ui(react-native@0.83.1(@babel/core@7.28.5)(@react-native/metro-config@0.83.1(@babel/core@7.28.5))(@types/react@19.2.7)(react@19.2.3))(react@19.2.3)
@@ -92,8 +92,8 @@ importers:
         specifier: file:../../../../react-native-gpui/packages/cli
         version: file:../../../../react-native-gpui/packages/cli
       '@rngpui/crabygen':
-        specifier: 0.2.1
-        version: 0.2.1
+        specifier: 0.2.2
+        version: 0.2.2
       '@rngpui/metro-resolver':
         specifier: file:../../../../react-native-gpui/packages/metro-resolver
         version: file:../../../../react-native-gpui/packages/metro-resolver(metro-resolver@0.83.3)(react-native@0.83.1(@babel/core@7.28.5)(@react-native/metro-config@0.83.1(@babel/core@7.28.5))(@types/react@19.2.7)(react@19.2.3))
@@ -122,8 +122,8 @@ importers:
   packages/zed-ui:
     dependencies:
       '@rngpui/craby-modules':
-        specifier: 0.2.1
-        version: 0.2.1(react-native@0.83.1(@babel/core@7.28.5)(@react-native/metro-config@0.83.1(@babel/core@7.28.5))(@types/react@19.2.7)(react@19.2.3))
+        specifier: 0.2.2
+        version: 0.2.2(react-native@0.83.1(@babel/core@7.28.5)(@react-native/metro-config@0.83.1(@babel/core@7.28.5))(@types/react@19.2.7)(react@19.2.3))
       '@rngpui/svg':
         specifier: file:../../../../../../react-native-gpui/packages/svg
         version: file:../../../../react-native-gpui/packages/svg(react-native@0.83.1(@babel/core@7.28.5)(@react-native/metro-config@0.83.1(@babel/core@7.28.5))(@types/react@19.2.7)(react@19.2.3))(react@19.2.3)
@@ -778,77 +778,77 @@ packages:
     resolution: {directory: ../../../../react-native-gpui/packages/cli, type: directory}
     hasBin: true
 
-  '@rngpui/craby-cli-bindings-darwin-arm64@0.2.1':
-    resolution: {integrity: sha512-4CUzkOPcTV9jujlmkpaUchnkZUG1jJM+vUgtYxp/+cCAUbIQZAf4NfD0o7JIdi4zwa9LBrXrROdjiFpnmZVI/w==}
+  '@rngpui/craby-cli-bindings-darwin-arm64@0.2.2':
+    resolution: {integrity: sha512-ua5Oc4/9FL3PijHKycVuZbleWolr5+FhlMsl75XME7PBDtSTVkFeC7K/AjYhVvScE4K+hZu0DR/amlUElLl5Hw==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [darwin]
 
-  '@rngpui/craby-cli-bindings-darwin-x64@0.2.1':
-    resolution: {integrity: sha512-zTa12CfLCIAJVZ5KizNtUNSr1qXg5TSW0qJz++1ZWNvLWv0q98icG1o2zK/GhSeIxiSjvk2bOdCS3qI7tul+PQ==}
+  '@rngpui/craby-cli-bindings-darwin-x64@0.2.2':
+    resolution: {integrity: sha512-g5QGgQnBZsG5uIoX2qyR62QtXxz9V0/Ub+33oGpAHwphXdEM5W3vNzk5yP8nHTlKRv3Yxk710O1zWTIV6ekGzQ==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [darwin]
 
-  '@rngpui/craby-cli-bindings-linux-arm-gnueabihf@0.2.1':
-    resolution: {integrity: sha512-IFneWIqAz5DKlBSkxvx+JbQnqfGLgJGnkavAeJQHjnYdqsACKze927Q56/o3F5s1D8HglMjqzn98tHikQDx6Pw==}
+  '@rngpui/craby-cli-bindings-linux-arm-gnueabihf@0.2.2':
+    resolution: {integrity: sha512-dkMcWSE/NcAMpXbRVLvXyE7VeViNwtTrQv8h1xaQ3MpJUtyGxVTl9JRa/DBMdjxUuNprtwlL1ujb5x4EZoY/0g==}
     engines: {node: '>= 10'}
     cpu: [arm]
     os: [linux]
 
-  '@rngpui/craby-cli-bindings-linux-arm64-gnu@0.2.1':
-    resolution: {integrity: sha512-ZJuw3ARzHtehR4cAz02wUilz45typNzE3FgC/b98M2y08uVKWTan4RUmvctxjLpYXJ3nUV7zuXxv2ERLyFkk7A==}
+  '@rngpui/craby-cli-bindings-linux-arm64-gnu@0.2.2':
+    resolution: {integrity: sha512-inFKvxdDJ/tLqebGUpf63jkcYfns8hKeYmv9sbpAdU14R7Na5ntTXewZNaZ6Ulbysh9YI3wYn4+u2YSpqtuOrw==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
 
-  '@rngpui/craby-cli-bindings-linux-arm64-musl@0.2.1':
-    resolution: {integrity: sha512-c/FaqjXxoxrfLIyfUlVSeI9x7VZ6W5l5Q+rdVosO0V8R1zGmxQLBXKnu6ADZUUMrVconpTbIPdeWEQA86mbbyA==}
+  '@rngpui/craby-cli-bindings-linux-arm64-musl@0.2.2':
+    resolution: {integrity: sha512-unDTB9j1CmY2EgcAatqboSoG57yaN/IWt5TbPFA2tWeI4Z84XJGckQb26ZHxctxNlwSDi+N8yi6WFZvs5tnUyA==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
 
-  '@rngpui/craby-cli-bindings-linux-x64-gnu@0.2.1':
-    resolution: {integrity: sha512-NJTrhyiMSQtDr4MkH7fXBdoeDJA1IhaZ7vvmEY4ifnp1kO83mDuuQac6xoCsXE0O1+owyggTkEcX751Evhx0tA==}
+  '@rngpui/craby-cli-bindings-linux-x64-gnu@0.2.2':
+    resolution: {integrity: sha512-khyYxlS8VHB4ZttgQOzarjDMNClNpWIZEFULo7ETNVk494aTlMj8lJxmJZY0gVGkw8jBlrkYOPpJ1YYawOpNPg==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
 
-  '@rngpui/craby-cli-bindings-linux-x64-musl@0.2.1':
-    resolution: {integrity: sha512-/WKrQVB1qMf45OezrR4pSYYdyjbiI4s9abQjKkQNN0INfIIiq52UbL9b2+N8ovMsHsK8qZkvX1gGcw2YrOGVKg==}
+  '@rngpui/craby-cli-bindings-linux-x64-musl@0.2.2':
+    resolution: {integrity: sha512-u5Z7XD8/uWFJVBi8QeLSH5SLJbotrVySoM8EIEfZQDMMn8G1r1ZAdVbSYPFmxFH7w+gMcufpFXwpRdtTo2PtxA==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
 
-  '@rngpui/craby-cli-bindings-win32-arm64-msvc@0.2.1':
-    resolution: {integrity: sha512-YSYy18l34KO0563XisTzopFe60aBm9Z9hRy0oZwAEQDfKIOut1Cup35ubwr2NsrOMwYcR9VF8X9WFE00lQKNfg==}
+  '@rngpui/craby-cli-bindings-win32-arm64-msvc@0.2.2':
+    resolution: {integrity: sha512-eMVoL8QshXaCzovftgEmdlxK5oIyP7Or0eoYTRNcpiRDNXPEbUHG7I12L3YK6JJeLpvFz5CStIDzcwdWoYlmGQ==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [win32]
 
-  '@rngpui/craby-cli-bindings-win32-ia32-msvc@0.2.1':
-    resolution: {integrity: sha512-LNhD4PQ47RaiZdnU0Q/0/64R69gq84rEpm+j2ODMqNokDBnM7K+3JdblOomVog4JJ96rzFxNEjl+d0Dif+P3DA==}
+  '@rngpui/craby-cli-bindings-win32-ia32-msvc@0.2.2':
+    resolution: {integrity: sha512-E/LqYkc2n6F6O95vKOIWk9wnVDUCRaaTZIXhN/lMPqmD2qvqGW46ymYRRQpcLLKxkLxE5on5PicVUoaKDUBo7A==}
     engines: {node: '>= 10'}
     cpu: [ia32]
     os: [win32]
 
-  '@rngpui/craby-cli-bindings-win32-x64-msvc@0.2.1':
-    resolution: {integrity: sha512-cnO0d1kIJ3hUcHlqxq5o4E+9NaIUlO/9RCkgtSURHyHdz1uhwcP8SgrtcZp7rKT2ossUWxb8Q8bVkOX9xELeIw==}
+  '@rngpui/craby-cli-bindings-win32-x64-msvc@0.2.2':
+    resolution: {integrity: sha512-g55PKicVRm7AMZQqn7FhmiEJFiwB+tOyYEmQfM2GRh/aKftMQYGT3pHTcVeEldn2xU75+zAT2x2ic5MoOWStqA==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [win32]
 
-  '@rngpui/craby-cli-bindings@0.2.1':
-    resolution: {integrity: sha512-PF7P9ed6M9Wi5Fwjba01uZrHPO7CLyPANJRcHkM0pVhJp5OsPOfxD6Cd+qcEKDaRy9fi42aMaJZtmmb0SSwOQQ==}
+  '@rngpui/craby-cli-bindings@0.2.2':
+    resolution: {integrity: sha512-CVwZleYq57e8iYb6r3NcBLkZ5GPCH9ZwqVJHJ76OXHHjB9K+f2xpzRscOPvf81tzPUMP5Bbm1s+O4hBeua3+kA==}
     engines: {node: '>= 18'}
 
-  '@rngpui/craby-modules@0.2.1':
-    resolution: {integrity: sha512-FUq+e9kFzDozbHSDNjBPXZi2/0IUDMzi4huv2fNQKsc9aIEhJNncm9hmzxJuQI+Z6EF3mB7p9hB6ugG9yoWwXg==}
+  '@rngpui/craby-modules@0.2.2':
+    resolution: {integrity: sha512-3Ks0RzLl6u7tzKImK93Gf/ctdf2GGtU+FPgLFhL+Zjr41hbl0BKjRPArSVcoAyaHNhBxEGqvRmfyVcrM125IbQ==}
     peerDependencies:
       react-native: 0.83.1
 
-  '@rngpui/crabygen@0.2.1':
-    resolution: {integrity: sha512-JNn9a0ABs1JgvtfG0A9fYDxpqFuNIGoSDquTALfn6g8qshAzGP31nq++/GQVqR7vjpTdDNnfgzBfpjCwHFFDOA==}
+  '@rngpui/crabygen@0.2.2':
+    resolution: {integrity: sha512-UmH//arDfta0H2PyjYo1+SaV4JzsdsBhyekzrwnfkpzqUXUFw4VxnLDXMkfSoQyhAeXr2H9EqmVFfwnZ9XI1lQ==}
     hasBin: true
 
   '@rngpui/example-ui@file:../../../../react-native-gpui/packages/example-ui':
@@ -2957,57 +2957,57 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@rngpui/craby-cli-bindings-darwin-arm64@0.2.1':
+  '@rngpui/craby-cli-bindings-darwin-arm64@0.2.2':
     optional: true
 
-  '@rngpui/craby-cli-bindings-darwin-x64@0.2.1':
+  '@rngpui/craby-cli-bindings-darwin-x64@0.2.2':
     optional: true
 
-  '@rngpui/craby-cli-bindings-linux-arm-gnueabihf@0.2.1':
+  '@rngpui/craby-cli-bindings-linux-arm-gnueabihf@0.2.2':
     optional: true
 
-  '@rngpui/craby-cli-bindings-linux-arm64-gnu@0.2.1':
+  '@rngpui/craby-cli-bindings-linux-arm64-gnu@0.2.2':
     optional: true
 
-  '@rngpui/craby-cli-bindings-linux-arm64-musl@0.2.1':
+  '@rngpui/craby-cli-bindings-linux-arm64-musl@0.2.2':
     optional: true
 
-  '@rngpui/craby-cli-bindings-linux-x64-gnu@0.2.1':
+  '@rngpui/craby-cli-bindings-linux-x64-gnu@0.2.2':
     optional: true
 
-  '@rngpui/craby-cli-bindings-linux-x64-musl@0.2.1':
+  '@rngpui/craby-cli-bindings-linux-x64-musl@0.2.2':
     optional: true
 
-  '@rngpui/craby-cli-bindings-win32-arm64-msvc@0.2.1':
+  '@rngpui/craby-cli-bindings-win32-arm64-msvc@0.2.2':
     optional: true
 
-  '@rngpui/craby-cli-bindings-win32-ia32-msvc@0.2.1':
+  '@rngpui/craby-cli-bindings-win32-ia32-msvc@0.2.2':
     optional: true
 
-  '@rngpui/craby-cli-bindings-win32-x64-msvc@0.2.1':
+  '@rngpui/craby-cli-bindings-win32-x64-msvc@0.2.2':
     optional: true
 
-  '@rngpui/craby-cli-bindings@0.2.1':
+  '@rngpui/craby-cli-bindings@0.2.2':
     optionalDependencies:
-      '@rngpui/craby-cli-bindings-darwin-arm64': 0.2.1
-      '@rngpui/craby-cli-bindings-darwin-x64': 0.2.1
-      '@rngpui/craby-cli-bindings-linux-arm-gnueabihf': 0.2.1
-      '@rngpui/craby-cli-bindings-linux-arm64-gnu': 0.2.1
-      '@rngpui/craby-cli-bindings-linux-arm64-musl': 0.2.1
-      '@rngpui/craby-cli-bindings-linux-x64-gnu': 0.2.1
-      '@rngpui/craby-cli-bindings-linux-x64-musl': 0.2.1
-      '@rngpui/craby-cli-bindings-win32-arm64-msvc': 0.2.1
-      '@rngpui/craby-cli-bindings-win32-ia32-msvc': 0.2.1
-      '@rngpui/craby-cli-bindings-win32-x64-msvc': 0.2.1
+      '@rngpui/craby-cli-bindings-darwin-arm64': 0.2.2
+      '@rngpui/craby-cli-bindings-darwin-x64': 0.2.2
+      '@rngpui/craby-cli-bindings-linux-arm-gnueabihf': 0.2.2
+      '@rngpui/craby-cli-bindings-linux-arm64-gnu': 0.2.2
+      '@rngpui/craby-cli-bindings-linux-arm64-musl': 0.2.2
+      '@rngpui/craby-cli-bindings-linux-x64-gnu': 0.2.2
+      '@rngpui/craby-cli-bindings-linux-x64-musl': 0.2.2
+      '@rngpui/craby-cli-bindings-win32-arm64-msvc': 0.2.2
+      '@rngpui/craby-cli-bindings-win32-ia32-msvc': 0.2.2
+      '@rngpui/craby-cli-bindings-win32-x64-msvc': 0.2.2
 
-  '@rngpui/craby-modules@0.2.1(react-native@0.83.1(@babel/core@7.28.5)(@react-native/metro-config@0.83.1(@babel/core@7.28.5))(@types/react@19.2.7)(react@19.2.3))':
+  '@rngpui/craby-modules@0.2.2(react-native@0.83.1(@babel/core@7.28.5)(@react-native/metro-config@0.83.1(@babel/core@7.28.5))(@types/react@19.2.7)(react@19.2.3))':
     dependencies:
       react-native: 0.83.1(@babel/core@7.28.5)(@react-native/metro-config@0.83.1(@babel/core@7.28.5))(@types/react@19.2.7)(react@19.2.3)
 
-  '@rngpui/crabygen@0.2.1':
+  '@rngpui/crabygen@0.2.2':
     dependencies:
       '@commander-js/extra-typings': 14.0.0(commander@14.0.2)
-      '@rngpui/craby-cli-bindings': 0.2.1
+      '@rngpui/craby-cli-bindings': 0.2.2
       commander: 14.0.2
       es-toolkit: 1.43.0
 
