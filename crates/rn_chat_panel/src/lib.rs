@@ -30,9 +30,9 @@ pub use zed_host_command::{
 };
 
 // Force link the FFI crate to provide symbols required by the C++ runtime
-extern crate gpui_host_ffi;
+extern crate rngpui_ffi;
 
-use std::collections::HashMap;
+use collections::HashMap;
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
@@ -51,8 +51,8 @@ unsafe extern "C" {
 }
 
 use gpui::App;
-use gpui_host::font_resolver::{set_default_font_family, set_family_aliases};
-use gpui_host::library_mode::{BundleSource, LibraryConfig, LibraryModeHandle};
+use rngpui::font_resolver::{set_default_font_family, set_family_aliases};
+use rngpui::library_mode::{BundleSource, LibraryConfig, LibraryModeHandle};
 use settings::Settings;
 use theme::ThemeSettings;
 
@@ -75,12 +75,12 @@ pub fn init(cx: &mut App) {
     // Configure Zed's fonts as defaults for React Native
     configure_fonts(cx);
 
-    // Register extensions before calling `gpui_host::init()`.
-    // `gpui_host::init()` initializes the extension registry; registering after
+    // Register extensions before calling `rngpui::init()`.
+    // `rngpui::init()` initializes the extension registry; registering after
     // that point is ignored.
     rngpui_ext_rnsvg::init();
     native_components::init();
-    gpui_host::init();
+    rngpui::init();
 
     // Initialize signal emitters (connects craby signals to the command bus)
     ::zedmodules::init_signal_emitters();
@@ -100,7 +100,7 @@ pub fn init(cx: &mut App) {
         module_name: Some("RNChatPanel".to_string()),
     };
 
-    let handle = gpui_host::library_mode::initialize_library_mode(config, cx)
+    let handle = rngpui::library_mode::initialize_library_mode(config, cx)
         .expect("Failed to initialize RNGPUI library mode");
 
     LIBRARY_HANDLE
@@ -127,12 +127,14 @@ fn configure_fonts(cx: &App) {
 
     // Map generic font families to Zed's fonts
     let buffer_font_family = settings.buffer_font.family.to_string();
-    let aliases = HashMap::from([
+    let aliases: HashMap<String, String> = [
         ("sans-serif".to_string(), ui_font_family.clone()),
         ("monospace".to_string(), buffer_font_family.clone()),
         ("ui-sans-serif".to_string(), ui_font_family),
         ("ui-monospace".to_string(), buffer_font_family),
-    ]);
+    ]
+    .into_iter()
+    .collect();
     log::info!("rn_chat_panel: Setting font family aliases: {:?}", aliases);
     set_family_aliases(aliases);
 }

@@ -7,7 +7,7 @@
 mod native_diff_view;
 mod native_terminal_view;
 
-use gpui_host::extensions::{register_component, register_extension, Extension};
+use rngpui::extensions::{register_component, register_extension, Extension};
 
 pub use native_diff_view::NativeDiffView;
 pub use native_terminal_view::NativeTerminalView;
@@ -28,7 +28,7 @@ impl Extension for RnChatPanelExtension {
 
 /// Initialize the rn_chat_panel native components.
 ///
-/// Call this before `gpui_host::app_bootstrap::run_with_supervisor()` in the
+/// Call this before `rngpui::app_bootstrap::run_with_supervisor()` in the
 /// app's main function to register the components with the RNGPUI runtime.
 pub fn init() {
     register_extension(Box::new(RnChatPanelExtension));

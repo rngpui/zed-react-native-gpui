@@ -6,7 +6,7 @@
     "start": "pnpm exec rngpui metro",
     "metro": "pnpm exec rngpui metro",
     "bundle": "pnpm exec rngpui bundle",
-    "craby:codegen": "cd ../craby-modules && npx @rngpui/crabygen codegen"
+    "craby:codegen": "cd ../craby-modules && crabygen codegen"
   },
   "pnpm": {
     "overrides": {
@@ -18,7 +18,18 @@
       "@rngpui/metro-resolver": "file:../../../../react-native-gpui/packages/metro-resolver",
       "@rngpui/svg": "file:../../../../react-native-gpui/packages/svg",
       "@rngpui/window": "file:../../../../react-native-gpui/packages/window",
-      "@rngpui/craby-modules": "0.2.0"
+      "@rngpui/ext-blur": "file:../../../../react-native-gpui/extensions/blur/js",
+      "@rngpui/ext-gradient": "file:../../../../react-native-gpui/extensions/gradient/js",
+      "@rngpui/cli-bindings": "file:../../../../react-native-gpui/packages/cli-bindings",
+      "@rngpui/host": "file:../../../../react-native-gpui/packages/host",
+      "@rngpui/native": "file:../../../../react-native-gpui/packages/native",
+      "ws": "^8.18.3",
+      "react-native-svg": "15.15.1",
+      "react": "19.2.3",
+      "react-native": "0.83.1",
+      "react-native-reanimated": "4.3.0-nightly-20251224-45cf72265",
+      "react-native-worklets": "0.8.0-nightly-20251224-45cf72265",
+      "@rngpui/craby-modules": "0.2.1"
     }
   },
   "dependencies": {
@@ -31,24 +42,24 @@
     "@rngpui/window": "file:../../../../react-native-gpui/packages/window",
     "@zed/ui": "workspace:*",
     "buffer": "^6.0.3",
-    "@rngpui/craby-modules": "0.2.0",
-    "react": "19.2.0",
-    "react-native": "0.83.0",
-    "react-native-reanimated": "4.3.0-nightly-20251216-76b4795ca",
+    "@rngpui/craby-modules": "0.2.1",
+    "react": "19.2.3",
+    "react-native": "0.83.1",
+    "react-native-reanimated": "4.3.0-nightly-20251224-45cf72265",
     "react-native-svg": "15.15.1",
-    "react-native-worklets": "0.8.0-nightly-20251217-76b4795ca"
+    "react-native-worklets": "0.8.0-nightly-20251224-45cf72265"
   },
   "devDependencies": {
-    "@react-native/babel-preset": "0.83.0",
-    "@react-native/debugger-frontend": "0.83.0",
-    "@react-native/dev-middleware": "0.83.0",
-    "@react-native/metro-config": "0.83.0",
+    "@rngpui/crabygen": "0.2.1",
+    "@react-native/babel-preset": "0.83.1",
+    "@react-native/debugger-frontend": "0.83.1",
+    "@react-native/dev-middleware": "0.83.1",
+    "@react-native/metro-config": "0.83.1",
     "@rngpui/cli": "file:../../../../react-native-gpui/packages/cli",
     "@rngpui/metro-resolver": "file:../../../../react-native-gpui/packages/metro-resolver",
     "@rnx-kit/metro-config": "2.1.2",
     "@rnx-kit/metro-resolver-symlinks": "0.2.6",
     "@types/react": "^19.2.7",
-    "@types/react-native": "^0.73.0",
     "babel-plugin-react-compiler": "^1.0.0",
     "metro": "0.83.3",
     "metro-core": "0.83.3",

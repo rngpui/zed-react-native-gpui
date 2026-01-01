@@ -8,7 +8,7 @@
 
 use editor::Editor;
 use gpui::{AnyElement, AppContext, Entity, IntoElement, ParentElement, Styled, div};
-use gpui_host::{
+use rngpui::{
     IslandContext, NativeComponent, NativePaintContext, NoEvents,
 };
 use theme::ActiveTheme;
@@ -104,7 +104,7 @@ impl NativeComponent for NativeDiffView {
         state: &mut Self::State,
         _old_props: Option<&Self::Props>,
         props: &Self::Props,
-        ctx: &mut gpui_host::UpdateContext<'_>,
+        ctx: &mut rngpui::UpdateContext<'_>,
     ) {
         // Check if props changed - if so, we need to recreate everything
         let props_changed = state.cached_tool_call_id != props.tool_call_id
@@ -121,7 +121,7 @@ impl NativeComponent for NativeDiffView {
         &self,
         state: &mut Self::State,
         props: &Self::Props,
-        ctx: &mut gpui_host::NativeFrameContext<'_, '_>,
+        ctx: &mut rngpui::NativeFrameContext<'_, '_>,
     ) {
         self.try_create_editor(state, props, ctx.window, ctx.cx);
     }
