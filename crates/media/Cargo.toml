@@ -1,9 +1,9 @@
 [package]
-name = "media"
+name = "gpui_rn_media"
 version = "0.1.0"
 edition.workspace = true
 authors = ["Nathan Sobo <nathan@zed.dev>", "Madeline Lane <maddythewisp@gmail.com>"]
-publish = false
+publish = true
 license = "Apache-2.0"
 repository = "https://github.com/rngpui/zed-react-native-gpui"
 description = "macOS media handling bindings (fork for React Native GPUI)"
