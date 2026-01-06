@@ -287,45 +287,31 @@ pub(crate) fn get_sources() -> oneshot::Receiver<Result<Vec<Rc<dyn ScreenCapture
 
 #[ctor]
 unsafe fn build_classes() {
+    let mut decl = ClassDecl::new("GPUIStreamDelegate", class!(NSObject)).unwrap();
     unsafe {
-        // `ClassDecl::new` returns `None` if the class already exists (e.g. when
-        // the library is loaded more than once in the same process). Avoid
-        // panicking and reuse the existing class.
-        DELEGATE_CLASS = if let Some(existing) = Class::get("GPUIStreamDelegate") {
-            existing
-        } else if let Some(mut decl) = ClassDecl::new("GPUIStreamDelegate", class!(NSObject)) {
-            decl.add_method(
-                sel!(outputVideoEffectDidStartForStream:),
-                output_video_effect_did_start_for_stream as extern "C" fn(&Object, Sel, id),
-            );
-            decl.add_method(
-                sel!(outputVideoEffectDidStopForStream:),
-                output_video_effect_did_stop_for_stream as extern "C" fn(&Object, Sel, id),
-            );
-            decl.add_method(
-                sel!(stream:didStopWithError:),
-                stream_did_stop_with_error as extern "C" fn(&Object, Sel, id, id),
-            );
-            decl.register()
-        } else {
-            // If class allocation failed but the class got registered elsewhere concurrently,
-            // fall back to lookup.
-            Class::get("GPUIStreamDelegate").expect("GPUIStreamDelegate class unavailable")
-        };
+        decl.add_method(
+            sel!(outputVideoEffectDidStartForStream:),
+            output_video_effect_did_start_for_stream as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(outputVideoEffectDidStopForStream:),
+            output_video_effect_did_stop_for_stream as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(stream:didStopWithError:),
+            stream_did_stop_with_error as extern "C" fn(&Object, Sel, id, id),
+        );
+        DELEGATE_CLASS = decl.register();
 
-        OUTPUT_CLASS = if let Some(existing) = Class::get("GPUIStreamOutput") {
-            existing
-        } else if let Some(mut decl) = ClassDecl::new("GPUIStreamOutput", class!(NSObject)) {
-            decl.add_method(
-                sel!(stream:didOutputSampleBuffer:ofType:),
-                stream_did_output_sample_buffer_of_type
-                    as extern "C" fn(&Object, Sel, id, id, NSInteger),
-            );
-            decl.add_ivar::<*mut c_void>(FRAME_CALLBACK_IVAR);
-            decl.register()
-        } else {
-            Class::get("GPUIStreamOutput").expect("GPUIStreamOutput class unavailable")
-        };
+        let mut decl = ClassDecl::new("GPUIStreamOutput", class!(NSObject)).unwrap();
+        decl.add_method(
+            sel!(stream:didOutputSampleBuffer:ofType:),
+            stream_did_output_sample_buffer_of_type
+                as extern "C" fn(&Object, Sel, id, id, NSInteger),
+        );
+        decl.add_ivar::<*mut c_void>(FRAME_CALLBACK_IVAR);
+
+        OUTPUT_CLASS = decl.register();
     }
 }
 
