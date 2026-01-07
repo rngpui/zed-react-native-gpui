@@ -192,6 +192,9 @@ impl Scene {
                 Primitive::PolychromeSprite(sprite, transform) => {
                     apply_transform(&sprite.bounds, transform)
                 }
+                Primitive::SubpixelSprite(sprite) => {
+                    apply_transform(&sprite.bounds, &sprite.transformation)
+                }
                 Primitive::Path(path) => path.bounds,
                 Primitive::Surface(surface) => surface.bounds,
             }
