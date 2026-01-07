@@ -275,7 +275,7 @@ cloud_api_client = { path = "crates/cloud_api_client" }
 cloud_api_types = { path = "crates/cloud_api_types" }
 cloud_llm_client = { path = "crates/cloud_llm_client" }
 collab_ui = { path = "crates/collab_ui" }
-collections = { path = "crates/collections", version = "0.1.0", package = "gpui_rn_collections" }
+collections = { path = "crates/collections", version = "0.1.1", package = "gpui_rn_collections" }
 command_palette = { path = "crates/command_palette" }
 command_palette_hooks = { path = "crates/command_palette_hooks" }
 component = { path = "crates/component" }
@@ -292,7 +292,7 @@ debug_adapter_extension = { path = "crates/debug_adapter_extension" }
 debugger_tools = { path = "crates/debugger_tools" }
 debugger_ui = { path = "crates/debugger_ui" }
 deepseek = { path = "crates/deepseek" }
-derive_refineable = { path = "crates/refineable/derive_refineable" , version = "0.1.0", package = "gpui_rn_derive_refineable" }
+derive_refineable = { path = "crates/refineable/derive_refineable" , version = "0.1.1", package = "gpui_rn_derive_refineable" }
 diagnostics = { path = "crates/diagnostics" }
 editor = { path = "crates/editor" }
 eval_utils = { path = "crates/eval_utils" }
@@ -312,10 +312,10 @@ git_ui = { path = "crates/git_ui" }
 go_to_line = { path = "crates/go_to_line" }
 google_ai = { path = "crates/google_ai" }
 gpui = { path = "crates/gpui", package = "gpui_rn", default-features = false }
-gpui_macros = { path = "crates/gpui_macros" , version = "0.1.0", package = "gpui_rn_macros" }
+gpui_macros = { path = "crates/gpui_macros" , version = "0.1.1", package = "gpui_rn_macros" }
 gpui_tokio = { path = "crates/gpui_tokio" }
 html_to_markdown = { path = "crates/html_to_markdown" }
-http_client = { path = "crates/http_client" , version = "0.1.0", package = "gpui_rn_http_client" }
+http_client = { path = "crates/http_client" , version = "0.1.1", package = "gpui_rn_http_client" }
 http_client_tls = { path = "crates/http_client_tls" }
 icons = { path = "crates/icons" }
 image_viewer = { path = "crates/image_viewer" }
@@ -343,7 +343,7 @@ lsp = { path = "crates/lsp" }
 markdown = { path = "crates/markdown" }
 markdown_preview = { path = "crates/markdown_preview" }
 svg_preview = { path = "crates/svg_preview" }
-media = { path = "crates/media" , version = "0.1.0", package = "gpui_rn_media" }
+media = { path = "crates/media" , version = "0.1.1", package = "gpui_rn_media" }
 menu = { path = "crates/menu" }
 migrator = { path = "crates/migrator" }
 mistral = { path = "crates/mistral" }
@@ -361,7 +361,7 @@ outline = { path = "crates/outline" }
 outline_panel = { path = "crates/outline_panel" }
 panel = { path = "crates/panel" }
 paths = { path = "crates/paths" }
-perf = { path = "tooling/perf" , version = "0.1.0", package = "gpui_rn_perf" }
+perf = { path = "tooling/perf" , version = "0.1.1", package = "gpui_rn_perf" }
 picker = { path = "crates/picker" }
 prettier = { path = "crates/prettier" }
 settings_profile_selector = { path = "crates/settings_profile_selector" }
@@ -371,7 +371,7 @@ project_symbols = { path = "crates/project_symbols" }
 prompt_store = { path = "crates/prompt_store" }
 proto = { path = "crates/proto" }
 recent_projects = { path = "crates/recent_projects" }
-refineable = { path = "crates/refineable" , version = "0.1.0", package = "gpui_rn_refineable" }
+refineable = { path = "crates/refineable" , version = "0.1.1", package = "gpui_rn_refineable" }
 release_channel = { path = "crates/release_channel" }
 remote = { path = "crates/remote" }
 remote_server = { path = "crates/remote_server" }
@@ -402,7 +402,7 @@ sqlez = { path = "crates/sqlez" }
 sqlez_macros = { path = "crates/sqlez_macros" }
 story = { path = "crates/story" }
 streaming_diff = { path = "crates/streaming_diff" }
-sum_tree = { path = "crates/sum_tree" , version = "0.1.0", package = "gpui_rn_sum_tree" }
+sum_tree = { path = "crates/sum_tree" , version = "0.1.1", package = "gpui_rn_sum_tree" }
 supermaven = { path = "crates/supermaven" }
 supermaven_api = { path = "crates/supermaven_api" }
 codestral = { path = "crates/codestral" }
@@ -425,8 +425,8 @@ ui = { path = "crates/ui" }
 ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }
 ui_prompt = { path = "crates/ui_prompt" }
-util = { path = "crates/util" , version = "0.1.0", package = "gpui_rn_util" }
-util_macros = { path = "crates/util_macros" , version = "0.1.0", package = "gpui_rn_util_macros" }
+util = { path = "crates/util" , version = "0.1.1", package = "gpui_rn_util" }
+util_macros = { path = "crates/util_macros" , version = "0.1.1", package = "gpui_rn_util_macros" }
 vercel = { path = "crates/vercel" }
 vim = { path = "crates/vim" }
 vim_mode_setting = { path = "crates/vim_mode_setting" }
@@ -485,9 +485,9 @@ backtrace = "0.3"
 base64 = "0.22"
 bincode = "1.2.1"
 bitflags = "2.6.0"
-blade-graphics = { git = "https://github.com/kvark/blade", rev = "e3cf011ca18a6dfd907d1dedd93e85e21f005fe3" }
-blade-macros = { git = "https://github.com/kvark/blade", rev = "e3cf011ca18a6dfd907d1dedd93e85e21f005fe3" }
-blade-util = { git = "https://github.com/kvark/blade", rev = "e3cf011ca18a6dfd907d1dedd93e85e21f005fe3" }
+blade-graphics = { git = "https://github.com/kvark/blade", rev = "e3cf011ca18a6dfd907d1dedd93e85e21f005fe3", version = "0.7" }
+blade-macros = { git = "https://github.com/kvark/blade", rev = "e3cf011ca18a6dfd907d1dedd93e85e21f005fe3", version = "0.7" }
+blade-util = { git = "https://github.com/kvark/blade", rev = "e3cf011ca18a6dfd907d1dedd93e85e21f005fe3", version = "0.7" }
 brotli = "8.0.2"
 bytes = "1.0"
 cargo_metadata = "0.19"
