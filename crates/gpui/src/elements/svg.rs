@@ -248,13 +248,23 @@ impl Transformation {
         self
     }
 
-    fn into_matrix(self, center: Point<Pixels>, _scale_factor: f32) -> TransformationMatrix {
+    fn into_matrix(self, center: Point<Pixels>, scale_factor: f32) -> TransformationMatrix {
+        // MonochromeSprite bounds are in device (ScaledPixels) space, so the transform
+        // must also be in device space. Scale the translation values accordingly.
         //Note: if you read this as a sequence of matrix multiplications, start from the bottom
+        let scaled_center = point(
+            px(center.x.0 * scale_factor),
+            px(center.y.0 * scale_factor),
+        );
+        let scaled_translate = point(
+            px(self.translate.x.0 * scale_factor),
+            px(self.translate.y.0 * scale_factor),
+        );
         TransformationMatrix::unit()
-            .translate(center + self.translate)
+            .translate(scaled_center + scaled_translate)
             .rotate(self.rotate)
             .scale(self.scale)
-            .translate(center.negate())
+            .translate(point(px(-scaled_center.x.0), px(-scaled_center.y.0)))
     }
 }
 
