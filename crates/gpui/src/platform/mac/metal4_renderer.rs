@@ -10,9 +10,10 @@
 use super::metal_atlas::MetalAtlas;
 use super::metal_renderer::InstanceBufferPool;
 use crate::{
-    Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point, PrimitiveBatch,
-    ScaledPixels, Scene, Size, size,
+    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
+    PrimitiveBatch, ScaledPixels, Scene, Size, size,
 };
+use collections::FxHashSet;
 #[cfg(any(test, feature = "test-support"))]
 use anyhow::Result;
 use cocoa::foundation::NSSize;
@@ -189,6 +190,10 @@ pub struct Metal4Renderer {
     // Track the last committed instance buffer to avoid redundant commit() calls
     // commit() is expensive - only call when we have a new buffer
     last_committed_buffer_addr: Cell<u64>,
+
+    // Track which atlas textures have been added to the residency set
+    // This avoids redundant addAllocation calls across frames
+    committed_atlas_textures: std::cell::RefCell<FxHashSet<AtlasTextureId>>,
 }
 
 /// Error type for Metal 4 renderer initialization failures.
@@ -464,6 +469,7 @@ impl Metal4Renderer {
             backdrop_texture: None,
             in_flight_instance_buffers: [None, None, None],
             last_committed_buffer_addr: Cell::new(0),
+            committed_atlas_textures: std::cell::RefCell::new(FxHashSet::default()),
         })
     }
 
@@ -777,10 +783,10 @@ impl Metal4Renderer {
         let mut instance_buffer = self.instance_buffer_pool.lock().acquire(&self.device);
         let mut instance_offset: usize = 0;
 
-        // 6. Add resources to residency set and commit only if instance buffer changed
-        // This avoids expensive commit() calls when using the same buffer
+        // 6. Add resources to residency set and commit only if something changed
+        // This avoids expensive commit() calls when nothing new was allocated
         let buffer_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
-        let needs_commit = buffer_addr != self.last_committed_buffer_addr.get();
+        let mut needs_commit = buffer_addr != self.last_committed_buffer_addr.get();
 
         if needs_commit {
             self.residency_set
@@ -789,6 +795,7 @@ impl Metal4Renderer {
         }
 
         // Add intermediate textures (reused every frame, addAllocation is idempotent)
+        // These don't trigger commit since they're created once at viewport resize
         if let Some(tex) = &self.path_intermediate_texture {
             self.residency_set.addAllocation(tex.as_allocation());
         }
@@ -799,20 +806,28 @@ impl Metal4Renderer {
             self.residency_set.addAllocation(tex.as_allocation());
         }
 
-        // Pre-scan batches to add atlas textures
+        // Pre-scan batches to add only NEW atlas textures to residency
+        // Track which textures we've already committed to avoid redundant operations
         let batches: Vec<_> = scene.batches().collect();
+        let mut committed_textures = self.committed_atlas_textures.borrow_mut();
         for batch in &batches {
             match batch {
                 PrimitiveBatch::MonochromeSprites { texture_id, .. } |
                 PrimitiveBatch::PolychromeSprites { texture_id, .. } => {
-                    let atlas_texture = self.sprite_atlas.metal_texture(*texture_id);
-                    self.residency_set.addAllocation(atlas_texture.as_allocation());
+                    // Only add if we haven't seen this texture before
+                    if !committed_textures.contains(texture_id) {
+                        let atlas_texture = self.sprite_atlas.metal_texture(*texture_id);
+                        self.residency_set.addAllocation(atlas_texture.as_allocation());
+                        committed_textures.insert(*texture_id);
+                        needs_commit = true;
+                    }
                 }
                 _ => {}
             }
         }
+        drop(committed_textures); // Release borrow before commit
 
-        // Only commit if we added a new buffer (commit is expensive)
+        // Only commit if we added new allocations (commit is expensive)
         if needs_commit {
             self.residency_set.commit();
         }
