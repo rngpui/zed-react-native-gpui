@@ -181,37 +181,132 @@ mod macos {
     #[cfg(feature = "runtime_shaders")]
     fn emit_stitched_shaders(header_path: &Path) {
         use std::str::FromStr;
-        fn stitch_header(header: &Path, shader_path: &Path) -> std::io::Result<PathBuf> {
+        fn stitch_header(header: &Path, shader_path: &Path, output_name: &str) -> std::io::Result<PathBuf> {
             let header_contents = std::fs::read_to_string(header)?;
             let shader_contents = std::fs::read_to_string(shader_path)?;
             let stitched_contents = format!("{header_contents}\n{shader_contents}");
             let out_path =
-                PathBuf::from(env::var("OUT_DIR").unwrap()).join("stitched_shaders.metal");
+                PathBuf::from(env::var("OUT_DIR").unwrap()).join(output_name);
             std::fs::write(&out_path, stitched_contents)?;
             Ok(out_path)
         }
+
+        // Classic Metal shaders
         let shader_source_path = "./src/platform/mac/shaders.metal";
         let shader_path = PathBuf::from_str(shader_source_path).unwrap();
-        stitch_header(header_path, &shader_path).unwrap();
+        stitch_header(header_path, &shader_path, "stitched_shaders.metal").unwrap();
         println!("cargo:rerun-if-changed={}", &shader_source_path);
+
+        // Metal 4 shaders
+        let shader_source_path_mtl4 = "./src/platform/mac/shaders_mtl4.metal";
+        let shader_path_mtl4 = PathBuf::from_str(shader_source_path_mtl4).unwrap();
+        stitch_header(header_path, &shader_path_mtl4, "stitched_shaders_mtl4.metal").unwrap();
+        println!("cargo:rerun-if-changed={}", &shader_source_path_mtl4);
     }
 
     #[cfg(not(feature = "runtime_shaders"))]
     fn compile_metal_shaders(header_path: &Path) {
-        use std::process::{self, Command};
-        let shader_path = "./src/platform/mac/shaders.metal";
-        let air_output_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("shaders.air");
-        let metallib_output_path =
-            PathBuf::from(env::var("OUT_DIR").unwrap()).join("shaders.metallib");
+        // Compile classic Metal shaders
+        compile_single_metal_shader(
+            header_path,
+            "./src/platform/mac/shaders.metal",
+            "shaders.air",
+            "shaders.metallib",
+            "10.15.7",
+        );
+
+        // Compile Metal 4 shaders (requires macOS 15.0+ and MSL 4.0)
+        compile_metal4_shader(
+            header_path,
+            "./src/platform/mac/shaders_mtl4.metal",
+            "shaders_mtl4.air",
+            "shaders_mtl4.metallib",
+        );
+    }
+
+    #[cfg(not(feature = "runtime_shaders"))]
+    fn compile_metal4_shader(
+        header_path: &Path,
+        shader_path: &str,
+        air_output: &str,
+        metallib_output: &str,
+    ) {
+        use std::process::Command;
+
+        let air_output_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join(air_output);
+        let metallib_output_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join(metallib_output);
         println!("cargo:rerun-if-changed={}", shader_path);
 
+        // Metal 4 / MSL 4.0 requires macOS 26
         let output = Command::new("xcrun")
             .args([
                 "-sdk",
                 "macosx",
                 "metal",
                 "-gline-tables-only",
-                "-mmacosx-version-min=10.15.7",
+                "-mmacosx-version-min=26.0",
+                "-std=metal4.0",
+                "-MO",
+                "-c",
+                shader_path,
+                "-include",
+                (header_path.to_str().unwrap()),
+                "-o",
+            ])
+            .arg(&air_output_path)
+            .output()
+            .unwrap();
+
+        if !output.status.success() {
+            eprintln!(
+                "Metal 4 shader compilation failed (this is expected on older SDKs):\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            // Create an empty metallib so the build doesn't fail on older systems
+            // The renderer will fall back to classic Metal at runtime
+            std::fs::write(&metallib_output_path, &[]).ok();
+            return;
+        }
+
+        let output = Command::new("xcrun")
+            .args(["-sdk", "macosx", "metallib"])
+            .arg(air_output_path)
+            .arg("-o")
+            .arg(&metallib_output_path)
+            .output()
+            .unwrap();
+
+        if !output.status.success() {
+            eprintln!(
+                "Metal 4 metallib compilation failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            std::fs::write(&metallib_output_path, &[]).ok();
+        }
+    }
+
+    #[cfg(not(feature = "runtime_shaders"))]
+    fn compile_single_metal_shader(
+        header_path: &Path,
+        shader_path: &str,
+        air_output: &str,
+        metallib_output: &str,
+        min_macos_version: &str,
+    ) {
+        use std::process::{self, Command};
+
+        let air_output_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join(air_output);
+        let metallib_output_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join(metallib_output);
+        println!("cargo:rerun-if-changed={}", shader_path);
+
+        let min_version_arg = format!("-mmacosx-version-min={}", min_macos_version);
+        let output = Command::new("xcrun")
+            .args([
+                "-sdk",
+                "macosx",
+                "metal",
+                "-gline-tables-only",
+                &min_version_arg,
                 "-MO",
                 "-c",
                 shader_path,
@@ -225,7 +320,8 @@ mod macos {
 
         if !output.status.success() {
             println!(
-                "cargo::error=metal shader compilation failed:\n{}",
+                "cargo::error=metal shader compilation failed for {}:\n{}",
+                shader_path,
                 String::from_utf8_lossy(&output.stderr)
             );
             process::exit(1);
@@ -241,7 +337,8 @@ mod macos {
 
         if !output.status.success() {
             println!(
-                "cargo::error=metallib compilation failed:\n{}",
+                "cargo::error=metallib compilation failed for {}:\n{}",
+                shader_path,
                 String::from_utf8_lossy(&output.stderr)
             );
             process::exit(1);

@@ -72,6 +72,18 @@ pub(crate) struct InstanceBuffer {
     size: usize,
 }
 
+impl InstanceBuffer {
+    /// Returns the size of the buffer in bytes.
+    pub(crate) fn size(&self) -> usize {
+        self.size
+    }
+
+    /// Returns a reference to the underlying Metal buffer.
+    pub(crate) fn metal_buffer(&self) -> &metal::Buffer {
+        &self.metal_buffer
+    }
+}
+
 impl InstanceBufferPool {
     pub(crate) fn reset(&mut self, buffer_size: usize) {
         self.buffer_size = buffer_size;

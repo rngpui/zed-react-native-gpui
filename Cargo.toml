@@ -566,7 +566,36 @@ nbformat = "0.15.0"
 nix = "0.29"
 num-format = "0.4.4"
 objc = "0.2"
-objc2-foundation = { version = "=0.3.1", default-features = false, features = [
+objc2 = "0.6"
+objc2-metal = { version = "0.3.2", features = [
+    "std",
+    "MTLDevice",
+    "MTLCommandQueue",
+    "MTLCommandBuffer",
+    "MTLRenderCommandEncoder",
+    "MTLRenderPipeline",
+    "MTLRenderPass",
+    "MTLBuffer",
+    "MTLTexture",
+    "MTLResource",
+    "MTLGPUAddress",
+    "MTLDrawable",
+    "MTLEvent",
+    "MTLResidencySet",
+    "MTL4CommandQueue",
+    "MTL4CommandBuffer",
+    "MTL4CommandAllocator",
+    "MTL4CommandEncoder",
+    "MTL4RenderCommandEncoder",
+    "MTL4RenderPipeline",
+    "MTL4RenderPass",
+    "MTL4ComputePipeline",
+    "MTL4ComputeCommandEncoder",
+    "MTL4ArgumentTable",
+    "MTL4Compiler",
+    "MTL4PipelineState",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSArray",
     "NSAttributedString",
     "NSBundle",
