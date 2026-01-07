@@ -862,7 +862,6 @@ pub struct Window {
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
     next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>>,
-    frame_seq: u64,
     render_layers: FxHashMap<ElementId, RenderLayerRegistration>,
     next_render_layer_seq: usize,
     pub(crate) dirty_views: FxHashSet<EntityId>,
@@ -1344,7 +1343,6 @@ impl Window {
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
             tooltip_bounds: None,
-            frame_seq: 0,
             render_layers: FxHashMap::default(),
             next_render_layer_seq: 0,
             dirty_views: FxHashSet::default(),
@@ -2141,8 +2139,6 @@ impl Window {
     /// the contents of the new [`Scene`], use [`Self::present`].
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
-        self.frame_seq = self.frame_seq.wrapping_add(1);
-
         self.invalidate_entities();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
@@ -2211,11 +2207,6 @@ impl Window {
         self.needs_present.set(true);
 
         ArenaClearNeeded
-    }
-
-    /// A monotonically increasing value that changes once per `draw()` call.
-    pub fn frame_seq(&self) -> u64 {
-        self.frame_seq
     }
 
     fn record_entities_accessed(&mut self, cx: &mut App) {

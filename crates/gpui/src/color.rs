@@ -22,14 +22,6 @@ pub fn rgba(hex: u32) -> Rgba {
     Rgba { r, g, b, a }
 }
 
-/// Convert an ARGB hex color code number to [`Rgba`]
-///
-/// This format is used by Android and React Native's processColor().
-pub fn argb(hex: u32) -> Rgba {
-    let [a, r, g, b] = hex.to_be_bytes().map(|b| (b as f32) / 255.0);
-    Rgba { r, g, b, a }
-}
-
 /// Swap from RGBA with premultiplied alpha to BGRA
 pub(crate) fn swap_rgba_pa_to_bgra(color: &mut [u8]) {
     color.swap(0, 2);
