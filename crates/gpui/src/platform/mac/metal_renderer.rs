@@ -85,6 +85,11 @@ impl InstanceBuffer {
 }
 
 impl InstanceBufferPool {
+    /// Returns the current buffer size.
+    pub(crate) fn buffer_size(&self) -> usize {
+        self.buffer_size
+    }
+
     pub(crate) fn reset(&mut self, buffer_size: usize) {
         self.buffer_size = buffer_size;
         self.buffers.clear();

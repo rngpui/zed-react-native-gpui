@@ -28,6 +28,7 @@ use metal::{CAMetalLayer, MTLPixelFormat};
 use objc::{msg_send, sel, sel_impl};
 use objc2::ffi::NSUInteger;
 use parking_lot::Mutex;
+use std::cell::Cell;
 use std::sync::Arc;
 use std::{mem, ptr};
 
@@ -69,6 +70,18 @@ enum TextureBindingIndex {
     Intermediate = 2,
     SurfaceY = 3,
     SurfaceCbCr = 4,
+}
+
+/// Barrier type for inter-pass synchronization in Metal 4.
+/// Different render passes require different barrier configurations.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BarrierType {
+    /// No barrier needed
+    None,
+    /// Barrier after blit operation (for backdrop blur)
+    AfterBlit,
+    /// Barrier after render pass (for path rasterization)
+    AfterRender,
 }
 
 /// MSAA sample count for path rasterization (4x MSAA is universally supported)
@@ -130,7 +143,7 @@ pub struct Metal4Renderer {
 
     // CPU-GPU synchronization
     shared_event: Retained<ProtocolObject<dyn MTLSharedEvent>>,
-    frame_number: u64,
+    frame_number: Cell<u64>,
 
     // Argument table for resource binding
     // All buffers and textures are bound here instead of per-encoder calls
@@ -335,11 +348,12 @@ impl Metal4Renderer {
             "polychrome_sprite_vertex_mtl4",
             "polychrome_sprite_fragment_mtl4",
         )?;
-        let path_rasterization_pipeline = Self::create_pipeline(
+        let path_rasterization_pipeline = Self::create_path_rasterization_pipeline(
             &device,
             &library,
             "path_rasterization_vertex_mtl4",
             "path_rasterization_fragment_mtl4",
+            PATH_SAMPLE_COUNT,
         )?;
         let path_sprite_pipeline = Self::create_pipeline(
             &device,
@@ -422,7 +436,7 @@ impl Metal4Renderer {
             command_buffer,
             command_allocators,
             shared_event,
-            frame_number: 0,
+            frame_number: Cell::new(0),
             argument_table,
             residency_set,
             quad_pipeline,
@@ -500,6 +514,60 @@ impl Metal4Renderer {
         device.new_render_pipeline_state(&descriptor).map_err(|e| {
             Metal4RendererError::PipelineCreationFailed(format!(
                 "Pipeline {}/{}: {}",
+                vertex_fn, fragment_fn, e
+            ))
+        })
+    }
+
+    /// Creates a render pipeline state for path rasterization with MSAA support.
+    /// Path rasterization uses different blend factors than regular primitives.
+    fn create_path_rasterization_pipeline(
+        device: &metal::Device,
+        library: &metal::Library,
+        vertex_fn: &str,
+        fragment_fn: &str,
+        sample_count: u32,
+    ) -> Result<metal::RenderPipelineState, Metal4RendererError> {
+        let vertex_function = library.get_function(vertex_fn, None).map_err(|e| {
+            Metal4RendererError::PipelineCreationFailed(format!(
+                "Vertex function '{}': {}",
+                vertex_fn, e
+            ))
+        })?;
+
+        let fragment_function = library.get_function(fragment_fn, None).map_err(|e| {
+            Metal4RendererError::PipelineCreationFailed(format!(
+                "Fragment function '{}': {}",
+                fragment_fn, e
+            ))
+        })?;
+
+        let descriptor = metal::RenderPipelineDescriptor::new();
+        descriptor.set_vertex_function(Some(&vertex_function));
+        descriptor.set_fragment_function(Some(&fragment_function));
+
+        // Set MSAA sample count for path rasterization (4x MSAA)
+        if sample_count > 1 {
+            descriptor.set_raster_sample_count(sample_count as u64);
+        }
+
+        // Configure color attachment with blend settings for path rasterization
+        // Path rasterization uses One/OneMinusSourceAlpha blend factors
+        // This allows proper alpha compositing for overlapping path geometry
+        let attachment = descriptor.color_attachments().object_at(0).unwrap();
+        attachment.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+        attachment.set_blending_enabled(true);
+        attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
+        attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
+        // Use One for source (premultiplied alpha output from shader)
+        attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::One);
+        attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
+        attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
+        attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
+
+        device.new_render_pipeline_state(&descriptor).map_err(|e| {
+            Metal4RendererError::PipelineCreationFailed(format!(
+                "Path rasterization pipeline {}/{}: {}",
                 vertex_fn, fragment_fn, e
             ))
         })
@@ -611,6 +679,9 @@ impl Metal4Renderer {
     /// 6. End encoding and command buffer
     /// 7. Commit to queue and present
     /// 8. Signal completion for CPU synchronization
+    ///
+    /// If the instance buffer is too small, this method will automatically
+    /// retry with a larger buffer (up to 256 MB).
     pub fn draw(&mut self, scene: &Scene) {
         // 1. Get drawable
         let Some(drawable) = self.layer.next_drawable() else {
@@ -626,9 +697,10 @@ impl Metal4Renderer {
         };
 
         // 2. Wait for GPU to finish with this frame's resources (triple buffering)
-        let frame_index = (self.frame_number % MAX_FRAMES_IN_FLIGHT as u64) as usize;
-        if self.frame_number >= MAX_FRAMES_IN_FLIGHT as u64 {
-            let wait_value = self.frame_number - MAX_FRAMES_IN_FLIGHT as u64;
+        let frame_num = self.frame_number.get();
+        let frame_index = (frame_num % MAX_FRAMES_IN_FLIGHT as u64) as usize;
+        if frame_num >= MAX_FRAMES_IN_FLIGHT as u64 {
+            let wait_value = frame_num - MAX_FRAMES_IN_FLIGHT as u64;
             // Wait up to 1 second for GPU to catch up
             let _success = self
                 .shared_event
@@ -639,6 +711,54 @@ impl Metal4Renderer {
         if let Some(old_buffer) = self.in_flight_instance_buffers[frame_index].take() {
             self.instance_buffer_pool.lock().release(old_buffer);
         }
+
+        // Retry loop - if buffer is too small, we'll retry with a larger one
+        let mut retry_count = 0;
+        loop {
+            log::debug!("Metal 4: draw attempt {} with buffer size {}", retry_count, self.instance_buffer_pool.lock().buffer_size());
+            retry_count += 1;
+            let result = self.draw_scene_inner(scene, &drawable, viewport_size, frame_index);
+
+            match result {
+                Ok(instance_buffer) => {
+                    // Success - store buffer and return
+                    self.in_flight_instance_buffers[frame_index] = Some(instance_buffer);
+                    return;
+                }
+                Err(instance_buffer) => {
+                    // Buffer overflow - release the too-small buffer and try with a larger one
+                    let mut pool = self.instance_buffer_pool.lock();
+                    pool.release(instance_buffer);
+
+                    let buffer_size = pool.buffer_size();
+                    if buffer_size >= 256 * 1024 * 1024 {
+                        log::error!(
+                            "Metal 4: instance buffer size grew too large: {}",
+                            buffer_size
+                        );
+                        return;
+                    }
+
+                    pool.reset(buffer_size * 2);
+                    log::info!(
+                        "Metal 4: increased instance buffer size to {}",
+                        pool.buffer_size()
+                    );
+                    // Continue loop to retry with larger buffer
+                }
+            }
+        }
+    }
+
+    /// Inner draw method that returns the instance buffer on success,
+    /// or returns the buffer as an error if it was too small.
+    fn draw_scene_inner(
+        &self,
+        scene: &Scene,
+        drawable: &metal::MetalDrawableRef,
+        viewport_size: Size<DevicePixels>,
+        frame_index: usize,
+    ) -> Result<super::metal_renderer::InstanceBuffer, super::metal_renderer::InstanceBuffer> {
 
         // 3. Reset allocator for this frame
         let allocator = &self.command_allocators[frame_index];
@@ -691,7 +811,8 @@ impl Metal4Renderer {
         let Some(encoder) = self.command_buffer.renderCommandEncoderWithDescriptor(&render_pass_desc) else {
             log::error!("Metal 4: Failed to create render encoder");
             self.command_buffer.endCommandBuffer();
-            return;
+            // Return Ok because this isn't a buffer overflow issue
+            return Ok(instance_buffer);
         };
 
         // Set viewport (required for rendering to work correctly)
@@ -806,7 +927,7 @@ impl Metal4Renderer {
                         &drawable,
                         viewport_size,
                         MTLLoadAction::Load,
-                        true, // needs_blit_barrier
+                        BarrierType::AfterBlit,
                     );
 
                     if did_copy {
@@ -832,6 +953,7 @@ impl Metal4Renderer {
                     // 2. Render paths to intermediate texture (with MSAA)
                     // 3. Create new encoder with LoadAction::Load
                     // 4. Draw path sprites from intermediate
+                    log::debug!("Metal 4: drawing {} paths", paths.len());
 
                     // End current encoder
                     if let Some(enc) = current_encoder.take() {
@@ -845,14 +967,15 @@ impl Metal4Renderer {
                         &mut instance_offset,
                         viewport_size,
                     );
+                    log::debug!("Metal 4: draw_paths_to_intermediate_mtl4 returned {}", did_draw);
 
                     // Create new encoder with LoadAction::Load (preserve existing content)
-                    // No blit barrier needed here since the intermediate render is a separate pass
+                    // Barrier after render ensures path rasterization completes before reading
                     current_encoder = self.create_render_encoder_mtl4(
                         &drawable,
                         viewport_size,
                         MTLLoadAction::Load,
-                        false, // no blit barrier needed
+                        BarrierType::AfterRender,
                     );
 
                     if did_draw {
@@ -867,8 +990,8 @@ impl Metal4Renderer {
                             false
                         }
                     } else {
-                        // Skip if intermediate draw failed, but continue with other batches
-                        true
+                        // Intermediate draw failed (likely buffer overflow) - return false to trigger retry
+                        false
                     }
                 }
                 PrimitiveBatch::Surfaces(surfaces) => {
@@ -892,8 +1015,19 @@ impl Metal4Renderer {
             };
 
             if !success {
-                log::warn!("Metal 4: Failed to render batch, instance buffer may be full");
-                break;
+                log::warn!("Metal 4: Failed to render batch, instance buffer may be full - retrying with larger buffer");
+
+                // End encoding (if we still have an encoder)
+                if let Some(encoder) = current_encoder {
+                    encoder.endEncoding();
+                }
+
+                // End command buffer without committing - this closes the command buffer
+                // so the allocator can be reset for the retry
+                self.command_buffer.endCommandBuffer();
+
+                // Return error to trigger retry with larger buffer
+                return Err(instance_buffer);
             }
         }
 
@@ -906,7 +1040,7 @@ impl Metal4Renderer {
         self.command_buffer.endCommandBuffer();
 
         // 10. Submit to GPU
-        self.command_queue.waitForDrawable(AsObjc2Drawable::as_objc2(&*drawable));
+        self.command_queue.waitForDrawable(AsObjc2Drawable::as_objc2(drawable));
 
         // Commit the command buffer
         unsafe {
@@ -920,20 +1054,19 @@ impl Metal4Renderer {
                 .commit_count(NonNull::new_unchecked(&mut cmd_buf_nn), 1);
         }
 
-        self.command_queue.signalDrawable(AsObjc2Drawable::as_objc2(&*drawable));
+        self.command_queue.signalDrawable(AsObjc2Drawable::as_objc2(drawable));
 
         // 11. Present
         drawable.present();
 
         // 12. Signal completion for CPU synchronization
-        self.frame_number += 1;
+        let new_frame_number = self.frame_number.get() + 1;
+        self.frame_number.set(new_frame_number);
         self.command_queue
-            .signalEvent_value(self.shared_event.as_event_ref(), self.frame_number);
+            .signalEvent_value(self.shared_event.as_event_ref(), new_frame_number);
 
-        // Store instance buffer in flight slot instead of releasing immediately.
-        // This ensures the GPU can finish using it before another window reuses it.
-        // It will be released when we wrap around to this frame_index again (after GPU sync).
-        self.in_flight_instance_buffers[frame_index] = Some(instance_buffer);
+        // Return success with the instance buffer
+        Ok(instance_buffer)
     }
 
     // ========================================================================
@@ -1342,13 +1475,13 @@ impl Metal4Renderer {
     // ========================================================================
 
     /// Creates a new MTL4 render encoder with specified load action.
-    /// Used when we need to break the render pass (e.g., for backdrop blur).
+    /// Used when we need to break the render pass (e.g., for backdrop blur, paths).
     fn create_render_encoder_mtl4(
         &self,
         drawable: &metal::MetalDrawableRef,
         viewport_size: Size<DevicePixels>,
         load_action: MTLLoadAction,
-        needs_blit_barrier: bool,
+        barrier_type: BarrierType,
     ) -> Option<Retained<ProtocolObject<dyn MTL4RenderCommandEncoder>>> {
         let render_pass_desc = MTL4RenderPassDescriptor::new();
         unsafe {
@@ -1388,14 +1521,27 @@ impl Metal4Renderer {
             MTLRenderStages::Vertex | MTLRenderStages::Fragment,
         );
 
-        // If we're continuing after a blit operation, add consumer barrier
-        // This ensures the blit completes before we start rendering
-        if needs_blit_barrier {
-            encoder.barrierAfterQueueStages_beforeStages_visibilityOptions(
-                MTLStages::Blit,
-                MTLStages::Fragment,
-                MTL4VisibilityOptions::Device,
-            );
+        // Add consumer barrier based on barrier type
+        // This ensures the previous pass completes before we start rendering
+        match barrier_type {
+            BarrierType::None => {}
+            BarrierType::AfterBlit => {
+                // Wait for blit operation to complete before fragment stage reads
+                encoder.barrierAfterQueueStages_beforeStages_visibilityOptions(
+                    MTLStages::Blit,
+                    MTLStages::Fragment,
+                    MTL4VisibilityOptions::Device,
+                );
+            }
+            BarrierType::AfterRender => {
+                // Wait for previous render pass (path rasterization) to complete
+                // before fragment stage reads from the intermediate texture
+                encoder.barrierAfterQueueStages_beforeStages_visibilityOptions(
+                    MTLStages::Fragment,
+                    MTLStages::Fragment,
+                    MTL4VisibilityOptions::Device,
+                );
+            }
         }
 
         // Bind common resources
@@ -1587,6 +1733,8 @@ impl Metal4Renderer {
         let next_offset = *instance_offset + vertices_bytes;
 
         if next_offset > instance_buffer.size() {
+            log::warn!("Metal 4: path vertices ({} bytes at offset {}) exceed buffer size {}",
+                vertices_bytes, *instance_offset, instance_buffer.size());
             return false;
         }
 
@@ -1655,15 +1803,18 @@ impl Metal4Renderer {
         encoder.setRenderPipelineState(self.path_rasterization_pipeline.as_objc2());
 
         // Bind vertex data
+        // Note: The shader expects BufferBindingIndexAtlasSize for the intermediate texture size,
+        // which is the same as viewport size. The naming is historical from the classic renderer.
         let buffer_gpu_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
         unsafe {
             self.argument_table.setAddress_atIndex(
                 buffer_gpu_addr + *instance_offset as u64,
                 BufferBindingIndex::PathVertices as NSUInteger,
             );
+            // Path rasterization uses AtlasSize (not ViewportSize) for the intermediate texture dimensions
             self.argument_table.setAddress_atIndex(
                 self.viewport_size_buffer.as_objc2().gpuAddress(),
-                BufferBindingIndex::ViewportSize as NSUInteger,
+                BufferBindingIndex::AtlasSize as NSUInteger,
             );
         }
 
@@ -1675,6 +1826,15 @@ impl Metal4Renderer {
                 vertices.len() as NSUInteger,
             );
         }
+
+        // Add producer barrier: ensure path rasterization writes are visible to subsequent
+        // encoders that will read from the intermediate texture. This is critical in Metal 4
+        // because resources are untracked and require explicit synchronization.
+        encoder.barrierAfterStages_beforeQueueStages_visibilityOptions(
+            MTLStages::Fragment, // Path rasterization writes via fragment shader
+            MTLStages::Fragment, // Path sprite reads in subsequent encoder
+            MTL4VisibilityOptions::Device,
+        );
 
         encoder.endEncoding();
 

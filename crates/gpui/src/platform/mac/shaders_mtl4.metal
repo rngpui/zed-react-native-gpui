@@ -726,7 +726,7 @@ vertex PathRasterizationVertexOutput path_rasterization_vertex_mtl4(
 
 fragment float4 path_rasterization_fragment_mtl4(
     PathRasterizationFragmentInput input [[stage_in]],
-    device PathRasterizationVertex* vertices [[buffer(BufferBindingIndexPathVertices)]]
+    constant PathRasterizationVertex* vertices [[buffer(BufferBindingIndexPathVertices)]]
 ) {
     float2 dx = dfdx(input.st_position);
     float2 dy = dfdy(input.st_position);
