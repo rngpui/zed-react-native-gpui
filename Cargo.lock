@@ -2737,7 +2737,7 @@ dependencies = [
  "cap-primitives",
  "cap-std",
  "io-lifetimes",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2766,7 +2766,7 @@ dependencies = [
  "maybe-owned",
  "rustix 1.1.3",
  "rustix-linux-procfs",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
  "winx",
 ]
 
@@ -5824,7 +5824,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6204,7 +6204,7 @@ checksum = "0ce92ff622d6dadf7349484f42c93271a0d49b7cc4d466a936405bacbe10aa78"
 dependencies = [
  "cfg-if",
  "rustix 1.1.3",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6573,7 +6573,7 @@ checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
 dependencies = [
  "io-lifetimes",
  "rustix 1.1.3",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7057,7 +7057,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
+ "windows-link 0.1.3",
  "windows-result 0.4.1",
 ]
 
@@ -7560,7 +7560,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_rn_collections"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "indexmap",
  "rustc-hash 2.1.1",
@@ -7568,7 +7568,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_rn_derive_refineable"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7577,7 +7577,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_rn_http_client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -7601,7 +7601,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_rn_macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gpui_rn",
  "heck 0.5.0",
@@ -7612,7 +7612,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_rn_media"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bindgen 0.71.1",
@@ -7626,7 +7626,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_rn_perf"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gpui_rn_collections",
  "serde",
@@ -7635,14 +7635,14 @@ dependencies = [
 
 [[package]]
 name = "gpui_rn_refineable"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gpui_rn_derive_refineable",
 ]
 
 [[package]]
 name = "gpui_rn_sum_tree"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrayvec",
  "log",
@@ -7652,7 +7652,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_rn_util"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-fs",
@@ -7692,7 +7692,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_rn_util_macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gpui_rn_perf",
  "quote",
@@ -8656,7 +8656,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2285ddfe3054097ef4b2fe909ef8c3bcd1ea52a8f0d274416caebeef39f04a65"
 dependencies = [
  "io-lifetimes",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8738,7 +8738,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -13320,7 +13320,7 @@ dependencies = [
  "once_cell",
  "socket2 0.5.10",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -14674,7 +14674,7 @@ dependencies = [
  "errno 0.3.14",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -14687,7 +14687,7 @@ dependencies = [
  "errno 0.3.14",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -14809,7 +14809,7 @@ dependencies = [
  "security-framework 3.5.1",
  "security-framework-sys",
  "webpki-root-certs 0.26.11",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -15638,7 +15638,7 @@ version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
- "errno 0.2.8",
+ "errno 0.3.14",
  "libc",
 ]
 
@@ -16202,6 +16202,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
+ "windows-sys 0.52.0",
  "windows-sys 0.59.0",
 ]
 
@@ -16883,7 +16884,7 @@ dependencies = [
  "fd-lock",
  "io-lifetimes",
  "rustix 0.38.44",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
  "winx",
 ]
 
@@ -17054,7 +17055,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.3",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -17988,7 +17989,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fb391ac70462b3097a755618fbf9c8f95ecc1eb379a414f7b46f202ed10db1f"
 dependencies = [
  "cc",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -19844,7 +19845,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -20527,7 +20528,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
 dependencies = [
  "bitflags 2.10.0",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
