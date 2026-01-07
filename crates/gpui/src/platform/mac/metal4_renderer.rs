@@ -185,6 +185,10 @@ pub struct Metal4Renderer {
     // In-flight instance buffers - keep them alive until GPU is done
     // This prevents multi-window flickering when buffers are reused too early
     in_flight_instance_buffers: [Option<super::metal_renderer::InstanceBuffer>; MAX_FRAMES_IN_FLIGHT],
+
+    // Track the last committed instance buffer to avoid redundant commit() calls
+    // commit() is expensive - only call when we have a new buffer
+    last_committed_buffer_addr: Cell<u64>,
 }
 
 /// Error type for Metal 4 renderer initialization failures.
@@ -459,6 +463,7 @@ impl Metal4Renderer {
             path_intermediate_msaa_texture: None,
             backdrop_texture: None,
             in_flight_instance_buffers: [None, None, None],
+            last_committed_buffer_addr: Cell::new(0),
         })
     }
 
@@ -713,10 +718,7 @@ impl Metal4Renderer {
         }
 
         // Retry loop - if buffer is too small, we'll retry with a larger one
-        let mut retry_count = 0;
         loop {
-            log::debug!("Metal 4: draw attempt {} with buffer size {}", retry_count, self.instance_buffer_pool.lock().buffer_size());
-            retry_count += 1;
             let result = self.draw_scene_inner(scene, &drawable, viewport_size, frame_index);
 
             match result {
@@ -775,12 +777,45 @@ impl Metal4Renderer {
         let mut instance_buffer = self.instance_buffer_pool.lock().acquire(&self.device);
         let mut instance_offset: usize = 0;
 
-        // Add instance buffer to residency set for this frame
-        // This is necessary because instance buffers are pooled and may not have been
-        // added to the residency set before
-        self.residency_set
-            .addAllocation(instance_buffer.metal_buffer().as_allocation());
-        self.residency_set.commit();
+        // 6. Add resources to residency set and commit only if instance buffer changed
+        // This avoids expensive commit() calls when using the same buffer
+        let buffer_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
+        let needs_commit = buffer_addr != self.last_committed_buffer_addr.get();
+
+        if needs_commit {
+            self.residency_set
+                .addAllocation(instance_buffer.metal_buffer().as_allocation());
+            self.last_committed_buffer_addr.set(buffer_addr);
+        }
+
+        // Add intermediate textures (reused every frame, addAllocation is idempotent)
+        if let Some(tex) = &self.path_intermediate_texture {
+            self.residency_set.addAllocation(tex.as_allocation());
+        }
+        if let Some(tex) = &self.path_intermediate_msaa_texture {
+            self.residency_set.addAllocation(tex.as_allocation());
+        }
+        if let Some(tex) = &self.backdrop_texture {
+            self.residency_set.addAllocation(tex.as_allocation());
+        }
+
+        // Pre-scan batches to add atlas textures
+        let batches: Vec<_> = scene.batches().collect();
+        for batch in &batches {
+            match batch {
+                PrimitiveBatch::MonochromeSprites { texture_id, .. } |
+                PrimitiveBatch::PolychromeSprites { texture_id, .. } => {
+                    let atlas_texture = self.sprite_atlas.metal_texture(*texture_id);
+                    self.residency_set.addAllocation(atlas_texture.as_allocation());
+                }
+                _ => {}
+            }
+        }
+
+        // Only commit if we added a new buffer (commit is expensive)
+        if needs_commit {
+            self.residency_set.commit();
+        }
 
         // Update viewport size buffer
         let viewport_data: [i32; 2] = [viewport_size.width.0, viewport_size.height.0];
@@ -852,7 +887,7 @@ impl Metal4Renderer {
         // We use Option<encoder> because backdrop blur and paths require breaking the render pass
         let mut current_encoder: Option<Retained<ProtocolObject<dyn MTL4RenderCommandEncoder>>> = Some(encoder);
 
-        let batches: Vec<_> = scene.batches().collect();
+        // Note: batches were already collected during the residency pre-scan above
         for batch in batches {
             // If we don't have an encoder, something went wrong (shouldn't happen)
             let Some(ref encoder) = current_encoder else {
@@ -953,7 +988,6 @@ impl Metal4Renderer {
                     // 2. Render paths to intermediate texture (with MSAA)
                     // 3. Create new encoder with LoadAction::Load
                     // 4. Draw path sprites from intermediate
-                    log::debug!("Metal 4: drawing {} paths", paths.len());
 
                     // End current encoder
                     if let Some(enc) = current_encoder.take() {
@@ -967,7 +1001,6 @@ impl Metal4Renderer {
                         &mut instance_offset,
                         viewport_size,
                     );
-                    log::debug!("Metal 4: draw_paths_to_intermediate_mtl4 returned {}", did_draw);
 
                     // Create new encoder with LoadAction::Load (preserve existing content)
                     // Barrier after render ensures path rasterization completes before reading
@@ -1313,15 +1346,12 @@ impl Metal4Renderer {
         }
 
         // Get atlas texture and its size
+        // Note: Texture was already added to residency set during batch pre-scan
         let atlas_texture: metal::Texture = self.sprite_atlas.metal_texture(texture_id);
         let atlas_size: [i32; 2] = [
             atlas_texture.width() as i32,
             atlas_texture.height() as i32,
         ];
-
-        // Add atlas texture to residency set (needed for GPU to access it)
-        self.residency_set.addAllocation(atlas_texture.as_allocation());
-        self.residency_set.commit();
 
         // Update atlas size buffer
         unsafe {
@@ -1408,15 +1438,12 @@ impl Metal4Renderer {
         }
 
         // Get atlas texture and its size
+        // Note: Texture was already added to residency set during batch pre-scan
         let atlas_texture: metal::Texture = self.sprite_atlas.metal_texture(texture_id);
         let atlas_size: [i32; 2] = [
             atlas_texture.width() as i32,
             atlas_texture.height() as i32,
         ];
-
-        // Add atlas texture to residency set (needed for GPU to access it)
-        self.residency_set.addAllocation(atlas_texture.as_allocation());
-        self.residency_set.commit();
 
         // Update atlas size buffer
         unsafe {
@@ -1657,9 +1684,7 @@ impl Metal4Renderer {
             );
         }
 
-        // Add backdrop texture to residency set
-        self.residency_set.addAllocation(backdrop_texture.as_allocation());
-        self.residency_set.commit();
+        // Note: Backdrop texture was already added to residency set during batch pre-scan
 
         // Set backdrop blur pipeline
         encoder.setRenderPipelineState(self.backdrop_blur_pipeline.as_objc2());
@@ -1733,8 +1758,6 @@ impl Metal4Renderer {
         let next_offset = *instance_offset + vertices_bytes;
 
         if next_offset > instance_buffer.size() {
-            log::warn!("Metal 4: path vertices ({} bytes at offset {}) exceed buffer size {}",
-                vertices_bytes, *instance_offset, instance_buffer.size());
             return false;
         }
 
@@ -1792,12 +1815,7 @@ impl Metal4Renderer {
             MTLRenderStages::Vertex | MTLRenderStages::Fragment,
         );
 
-        // Add intermediate texture to residency set
-        self.residency_set.addAllocation(intermediate_texture.as_allocation());
-        if let Some(msaa_texture) = &self.path_intermediate_msaa_texture {
-            self.residency_set.addAllocation(msaa_texture.as_allocation());
-        }
-        self.residency_set.commit();
+        // Note: Intermediate textures were already added to residency set during batch pre-scan
 
         // Set path rasterization pipeline
         encoder.setRenderPipelineState(self.path_rasterization_pipeline.as_objc2());

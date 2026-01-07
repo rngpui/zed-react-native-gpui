@@ -70,6 +70,7 @@ impl Default for InstanceBufferPool {
 pub(crate) struct InstanceBuffer {
     metal_buffer: metal::Buffer,
     size: usize,
+    in_residency_set: bool,
 }
 
 impl InstanceBuffer {
@@ -81,6 +82,16 @@ impl InstanceBuffer {
     /// Returns a reference to the underlying Metal buffer.
     pub(crate) fn metal_buffer(&self) -> &metal::Buffer {
         &self.metal_buffer
+    }
+
+    /// Returns whether this buffer has been added to a residency set.
+    pub(crate) fn in_residency_set(&self) -> bool {
+        self.in_residency_set
+    }
+
+    /// Marks this buffer as having been added to a residency set.
+    pub(crate) fn mark_in_residency_set(&mut self) {
+        self.in_residency_set = true;
     }
 }
 
@@ -105,6 +116,7 @@ impl InstanceBufferPool {
         InstanceBuffer {
             metal_buffer: buffer,
             size: self.buffer_size,
+            in_residency_set: false,
         }
     }
 
