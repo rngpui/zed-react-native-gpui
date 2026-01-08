@@ -195,6 +195,15 @@ pub struct Metal4Renderer {
     // Track which atlas textures have been added to the residency set
     // This avoids redundant addAllocation calls across frames
     committed_atlas_textures: std::cell::RefCell<FxHashSet<AtlasTextureId>>,
+
+    // Track whether intermediate textures have been committed to residency set
+    // This is set to true after recreate_intermediate_textures adds them
+    intermediate_textures_committed: Cell<bool>,
+
+    // Cached render pass descriptors to avoid allocation overhead each frame
+    // Only the texture attachment needs to be updated per-frame
+    main_render_pass_desc: Retained<MTL4RenderPassDescriptor>,
+    intermediate_render_pass_desc: Retained<MTL4RenderPassDescriptor>,
 }
 
 /// Error type for Metal 4 renderer initialization failures.
@@ -471,6 +480,9 @@ impl Metal4Renderer {
             in_flight_instance_buffers: [None, None, None],
             last_committed_buffer_addr: Cell::new(0),
             committed_atlas_textures: std::cell::RefCell::new(FxHashSet::default()),
+            intermediate_textures_committed: Cell::new(false),
+            main_render_pass_desc: MTL4RenderPassDescriptor::new(),
+            intermediate_render_pass_desc: MTL4RenderPassDescriptor::new(),
         })
     }
 
@@ -667,6 +679,10 @@ impl Metal4Renderer {
         );
         backdrop_desc.set_storage_mode(metal::MTLStorageMode::Private);
         self.backdrop_texture = Some(self.device.new_texture(&backdrop_desc));
+
+        // Mark intermediate textures as needing to be added to residency set
+        // They will be added on the next draw call
+        self.intermediate_textures_committed.set(false);
     }
 
     /// Updates transparency setting.
@@ -826,8 +842,8 @@ impl Metal4Renderer {
         self.command_buffer
             .beginCommandBufferWithAllocator(allocator);
 
-        // Mark residency set for this command buffer
-        self.command_buffer.useResidencySet(&self.residency_set);
+        // Note: Residency is managed at the queue level (addResidencySet in setup),
+        // so per-command-buffer useResidencySet is not needed.
 
         // 5. Acquire instance buffer for this frame's data (or reuse when clean)
         let mut instance_buffer = match instance_buffer {
@@ -847,16 +863,20 @@ impl Metal4Renderer {
             self.last_committed_buffer_addr.set(buffer_addr);
         }
 
-        // Add intermediate textures (reused every frame, addAllocation is idempotent)
-        // These don't trigger commit since they're created once at viewport resize
-        if let Some(tex) = &self.path_intermediate_texture {
-            self.residency_set.addAllocation(tex.as_allocation());
-        }
-        if let Some(tex) = &self.path_intermediate_msaa_texture {
-            self.residency_set.addAllocation(tex.as_allocation());
-        }
-        if let Some(tex) = &self.backdrop_texture {
-            self.residency_set.addAllocation(tex.as_allocation());
+        // Add intermediate textures only when they've been recreated (viewport resize)
+        // Skip on subsequent frames to avoid redundant addAllocation calls
+        if !self.intermediate_textures_committed.get() {
+            if let Some(tex) = &self.path_intermediate_texture {
+                self.residency_set.addAllocation(tex.as_allocation());
+            }
+            if let Some(tex) = &self.path_intermediate_msaa_texture {
+                self.residency_set.addAllocation(tex.as_allocation());
+            }
+            if let Some(tex) = &self.backdrop_texture {
+                self.residency_set.addAllocation(tex.as_allocation());
+            }
+            self.intermediate_textures_committed.set(true);
+            needs_commit = true;
         }
 
         // Pre-scan batches to add only NEW atlas textures to residency
@@ -892,10 +912,10 @@ impl Metal4Renderer {
             *ptr = viewport_data;
         }
 
-        // 6. Create MTL4 render pass descriptor and encoder
-        let render_pass_desc = MTL4RenderPassDescriptor::new();
+        // 6. Configure cached render pass descriptor and create encoder
+        // Reusing the descriptor avoids allocation overhead each frame
         unsafe {
-            let color_attachments = render_pass_desc.colorAttachments();
+            let color_attachments = self.main_render_pass_desc.colorAttachments();
             let color_attachment = color_attachments.objectAtIndexedSubscript(0);
             color_attachment.setTexture(Some(AsObjc2Texture::as_objc2(drawable.texture())));
             color_attachment.setLoadAction(MTLLoadAction::Clear);
@@ -911,7 +931,7 @@ impl Metal4Renderer {
             });
         }
 
-        let Some(encoder) = self.command_buffer.renderCommandEncoderWithDescriptor(&render_pass_desc) else {
+        let Some(encoder) = self.command_buffer.renderCommandEncoderWithDescriptor(&self.main_render_pass_desc) else {
             log::error!("Metal 4: Failed to create render encoder");
             self.command_buffer.endCommandBuffer();
             // Return Ok because this isn't a buffer overflow issue
@@ -1602,9 +1622,9 @@ impl Metal4Renderer {
         load_action: MTLLoadAction,
         barrier_type: BarrierType,
     ) -> Option<Retained<ProtocolObject<dyn MTL4RenderCommandEncoder>>> {
-        let render_pass_desc = MTL4RenderPassDescriptor::new();
+        // Reuse cached descriptor - only update texture and load action
         unsafe {
-            let color_attachments = render_pass_desc.colorAttachments();
+            let color_attachments = self.main_render_pass_desc.colorAttachments();
             let color_attachment = color_attachments.objectAtIndexedSubscript(0);
             color_attachment.setTexture(Some(AsObjc2Texture::as_objc2(drawable.texture())));
             color_attachment.setLoadAction(load_action);
@@ -1622,7 +1642,7 @@ impl Metal4Renderer {
             }
         }
 
-        let encoder = self.command_buffer.renderCommandEncoderWithDescriptor(&render_pass_desc)?;
+        let encoder = self.command_buffer.renderCommandEncoderWithDescriptor(&self.main_render_pass_desc)?;
 
         // Set viewport
         encoder.setViewport(MTLViewport {
@@ -1719,12 +1739,8 @@ impl Metal4Renderer {
             );
         }
 
-        // Add producer barrier: ensure blit completes before subsequent render passes read
-        compute_encoder.barrierAfterStages_beforeQueueStages_visibilityOptions(
-            MTLStages::Blit,
-            MTLStages::Fragment,
-            MTL4VisibilityOptions::Device,
-        );
+        // Note: Consumer barrier (AfterBlit) in create_render_encoder_mtl4 handles synchronization.
+        // Producer barriers are redundant when consumer barriers are in place.
 
         compute_encoder.endEncoding();
         true
@@ -1868,10 +1884,10 @@ impl Metal4Renderer {
             }
         }
 
-        // Create render pass descriptor for intermediate texture
-        let render_pass_desc = MTL4RenderPassDescriptor::new();
+        // Configure cached intermediate render pass descriptor
+        // Reusing the descriptor avoids allocation overhead each frame
         unsafe {
-            let color_attachments = render_pass_desc.colorAttachments();
+            let color_attachments = self.intermediate_render_pass_desc.colorAttachments();
             let color_attachment = color_attachments.objectAtIndexedSubscript(0);
             color_attachment.setLoadAction(MTLLoadAction::Clear);
             color_attachment.setClearColor(objc2_metal::MTLClearColor {
@@ -1892,7 +1908,7 @@ impl Metal4Renderer {
             }
         }
 
-        let Some(encoder) = self.command_buffer.renderCommandEncoderWithDescriptor(&render_pass_desc) else {
+        let Some(encoder) = self.command_buffer.renderCommandEncoderWithDescriptor(&self.intermediate_render_pass_desc) else {
             return false;
         };
 
@@ -1942,14 +1958,8 @@ impl Metal4Renderer {
             );
         }
 
-        // Add producer barrier: ensure path rasterization writes are visible to subsequent
-        // encoders that will read from the intermediate texture. This is critical in Metal 4
-        // because resources are untracked and require explicit synchronization.
-        encoder.barrierAfterStages_beforeQueueStages_visibilityOptions(
-            MTLStages::Fragment, // Path rasterization writes via fragment shader
-            MTLStages::Fragment, // Path sprite reads in subsequent encoder
-            MTL4VisibilityOptions::Device,
-        );
+        // Note: Consumer barrier (AfterRender) in create_render_encoder_mtl4 handles synchronization.
+        // Producer barriers are redundant when consumer barriers are in place.
 
         encoder.endEncoding();
 
