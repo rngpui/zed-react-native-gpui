@@ -63,6 +63,7 @@ pub use prompts::*;
 
 pub(crate) const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(864.));
 const DEFAULT_PRIMITIVE_CACHE_ENTRIES: usize = 10_000;
+const DEFAULT_TEXT_SHAPE_CACHE_ENTRIES: usize = 5_000;
 
 /// A 6:5 aspect ratio minimum window size to be used for functional,
 /// additional-to-main-Zed windows, like the settings and rules library windows.
@@ -943,6 +944,7 @@ pub struct Window {
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
     primitive_cache: PrimitiveCache,
+    text_shape_cache: crate::text_shape_cache::TextShapeCache,
     /// True if the last frame was completely stable (all cache hits at same positions).
     /// When true, we can potentially skip drawing if nothing has changed.
     last_frame_was_stable: bool,
@@ -1429,6 +1431,7 @@ impl Window {
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             primitive_cache: PrimitiveCache::new(DEFAULT_PRIMITIVE_CACHE_ENTRIES),
+            text_shape_cache: crate::text_shape_cache::TextShapeCache::new(DEFAULT_TEXT_SHAPE_CACHE_ENTRIES),
             last_frame_was_stable: false,
             paint_scopes: Vec::new(),
             next_frame_callbacks,
@@ -2752,6 +2755,30 @@ impl Window {
             self.scale_factor(),
             operations,
         );
+    }
+
+    /// Look up shaped text from the cache.
+    pub(crate) fn lookup_text_shape(
+        &mut self,
+        content_hash: u64,
+        wrap_width: Option<Pixels>,
+    ) -> Option<crate::text_shape_cache::ShapedText> {
+        self.text_shape_cache.get(content_hash, wrap_width).cloned()
+    }
+
+    /// Insert shaped text into the cache.
+    pub(crate) fn insert_text_shape(
+        &mut self,
+        content_hash: u64,
+        wrap_width: Option<Pixels>,
+        shaped: crate::text_shape_cache::ShapedText,
+    ) {
+        self.text_shape_cache.insert(content_hash, wrap_width, shaped);
+    }
+
+    /// Returns the current text shape cache stats and resets the counters.
+    pub fn take_text_shape_cache_stats(&mut self) -> crate::text_shape_cache::TextShapeCacheStats {
+        self.text_shape_cache.take_stats()
     }
 
     fn log_primitive_cache_stats(&mut self) {

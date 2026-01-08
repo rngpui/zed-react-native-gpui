@@ -9,8 +9,8 @@
 use std::time::Instant;
 
 use gpui::{
-    Application, Bounds, Context, PrimitiveCacheStats, Render, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+    Application, Bounds, Context, PrimitiveCacheStats, Render, TextShapeCacheStats, TitlebarOptions,
+    Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
 
 const WINDOW_WIDTH: f32 = 1200.0;
@@ -26,6 +26,7 @@ struct CacheBench {
     frame_times: Vec<f32>,
     last_frame: Instant,
     cache_stats: PrimitiveCacheStats,
+    text_cache_stats: TextShapeCacheStats,
     frame_count: u64,
 }
 
@@ -35,6 +36,7 @@ impl CacheBench {
             frame_times: Vec::with_capacity(120),
             last_frame: Instant::now(),
             cache_stats: PrimitiveCacheStats::default(),
+            text_cache_stats: TextShapeCacheStats::default(),
             frame_count: 0,
         }
     }
@@ -56,6 +58,7 @@ impl CacheBench {
 
         // Get cache stats from the previous frame
         self.cache_stats = window.take_primitive_cache_stats();
+        self.text_cache_stats = window.take_text_shape_cache_stats();
         self.frame_count += 1;
 
         (fps, avg_frame_time)
@@ -69,12 +72,20 @@ impl Render for CacheBench {
 
         let (fps, frame_time) = self.update_stats(window);
         let stats = self.cache_stats;
+        let text_stats = self.text_cache_stats;
         let frame_count = self.frame_count;
 
-        // Calculate hit rate
+        // Calculate hit rates
         let total = stats.hits + stats.misses;
         let hit_rate = if total > 0 {
             (stats.hits as f32 / total as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        let text_total = text_stats.hits + text_stats.misses;
+        let text_hit_rate = if text_total > 0 {
+            (text_stats.hits as f32 / text_total as f32) * 100.0
         } else {
             0.0
         };
@@ -98,7 +109,7 @@ impl Render for CacheBench {
                         div()
                             .text_color(rgb(0xcdd6f4))
                             .text_xl()
-                            .child("Primitive Cache Benchmark"),
+                            .child("Cache Benchmark"),
                     )
                     .child(
                         div()
@@ -110,12 +121,35 @@ impl Render for CacheBench {
                     )
                     .child(
                         div()
+                            .text_color(rgb(0x9399b2))
+                            .text_sm()
+                            .mt_2()
+                            .child("Primitive Cache"),
+                    )
+                    .child(
+                        div()
                             .flex()
                             .gap_4()
                             .child(stat_box("Hits", format!("{}", stats.hits), rgb(0xa6e3a1)))
                             .child(stat_box("Misses", format!("{}", stats.misses), rgb(0xf38ba8)))
                             .child(stat_box("Hit Rate", format!("{:.1}%", hit_rate), rgb(0xf9e2af)))
                             .child(stat_box("Inserts", format!("{}", stats.inserts), rgb(0x89dceb))),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(0x9399b2))
+                            .text_sm()
+                            .mt_2()
+                            .child("Text Shape Cache"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_4()
+                            .child(stat_box("Hits", format!("{}", text_stats.hits), rgb(0xa6e3a1)))
+                            .child(stat_box("Misses", format!("{}", text_stats.misses), rgb(0xf38ba8)))
+                            .child(stat_box("Hit Rate", format!("{:.1}%", text_hit_rate), rgb(0xf9e2af)))
+                            .child(stat_box("Inserts", format!("{}", text_stats.inserts), rgb(0x89dceb))),
                     ),
             )
             .child(

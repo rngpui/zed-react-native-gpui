@@ -9,6 +9,7 @@ use crate::{
 use anyhow::Context as _;
 use itertools::Itertools;
 use smallvec::SmallVec;
+use crate::text_shape_cache::ShapedText;
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
@@ -91,10 +92,10 @@ impl Element for &'static str {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         text_layout: &mut Self::RequestLayoutState,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut App,
     ) {
-        text_layout.prepaint(bounds, self)
+        text_layout.prepaint(bounds, self, window)
     }
 
     fn paint(
@@ -168,10 +169,10 @@ impl Element for SharedString {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         text_layout: &mut Self::RequestLayoutState,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut App,
     ) {
-        text_layout.prepaint(bounds, self.as_ref())
+        text_layout.prepaint(bounds, self.as_ref(), window)
     }
 
     fn paint(
@@ -353,10 +354,10 @@ impl Element for StyledText {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut App,
     ) {
-        self.layout.prepaint(bounds, &self.text)
+        self.layout.prepaint(bounds, &self.text, window)
     }
 
     fn paint(
@@ -391,8 +392,21 @@ impl IntoElement for StyledText {
 }
 
 /// The Layout for TextElement. This can be used to map indices to pixels and vice versa.
-#[derive(Default, Clone)]
-pub struct TextLayout(Rc<RefCell<Option<TextLayoutInner>>>);
+#[derive(Clone)]
+pub struct TextLayout {
+    inner: Rc<RefCell<Option<TextLayoutInner>>>,
+    /// Content hash for cache lookup, set during layout
+    content_hash: Rc<Cell<u64>>,
+}
+
+impl Default for TextLayout {
+    fn default() -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(None)),
+            content_hash: Rc::new(Cell::new(0)),
+        }
+    }
+}
 
 struct TextLayoutInner {
     len: usize,
@@ -417,13 +431,17 @@ impl TextLayout {
             .line_height
             .to_pixels(font_size.into(), window.rem_size());
 
+        // Compute content hash for global cache lookup
+        let content_hash = text_content_hash(&text, runs.as_deref(), &text_style, window.rem_size());
+        self.content_hash.set(content_hash);
+
         let runs = if let Some(runs) = runs {
             runs
         } else {
             vec![text_style.to_run(text.len())]
         };
         window.request_measured_layout(Default::default(), {
-            let element_state = self.clone();
+            let element_state = self.inner.clone();
 
             move |known_dimensions, available_space, window, cx| {
                 let wrap_width = if text_style.white_space == WhiteSpace::Normal {
@@ -458,12 +476,28 @@ impl TextLayout {
                 // 2. wrap_width matches (or both are None)
                 // 3. truncate_width is None (if truncate_width is Some, we need to re-layout
                 //    because the previous layout may have been computed without truncation)
-                if let Some(text_layout) = element_state.0.borrow().as_ref()
+                if let Some(text_layout) = element_state.borrow().as_ref()
                     && let Some(size) = text_layout.size
                     && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
                     && truncate_width.is_none()
                 {
                     return size;
+                }
+
+                // Check global text shape cache (for cross-frame caching)
+                if truncate_width.is_none() {
+                    if let Some(shaped) = window.lookup_text_shape(content_hash, wrap_width) {
+                        let size = shaped.size;
+                        element_state.borrow_mut().replace(TextLayoutInner {
+                            lines: shaped.lines,
+                            len: shaped.len,
+                            line_height: shaped.line_height,
+                            wrap_width,
+                            size: Some(size),
+                            bounds: None,
+                        });
+                        return size;
+                    }
                 }
 
                 let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
@@ -491,7 +525,7 @@ impl TextLayout {
                     )
                     .log_err()
                 else {
-                    element_state.0.borrow_mut().replace(TextLayoutInner {
+                    element_state.borrow_mut().replace(TextLayoutInner {
                         lines: Default::default(),
                         len: 0,
                         line_height,
@@ -509,7 +543,21 @@ impl TextLayout {
                     size.width = size.width.max(line_size.width).ceil();
                 }
 
-                element_state.0.borrow_mut().replace(TextLayoutInner {
+                // Store in global cache for future frames (skip truncated text)
+                if truncate_width.is_none() {
+                    window.insert_text_shape(
+                        content_hash,
+                        wrap_width,
+                        ShapedText {
+                            lines: lines.clone(),
+                            len,
+                            line_height,
+                            size,
+                        },
+                    );
+                }
+
+                element_state.borrow_mut().replace(TextLayoutInner {
                     lines,
                     len,
                     line_height,
@@ -523,8 +571,29 @@ impl TextLayout {
         })
     }
 
-    fn prepaint(&self, bounds: Bounds<Pixels>, text: &str) {
-        let mut element_state = self.0.borrow_mut();
+    fn prepaint(&self, bounds: Bounds<Pixels>, text: &str, window: &mut Window) {
+        // If inner is empty (e.g., measure was skipped due to layout caching),
+        // try to restore from global text shape cache
+        if self.inner.borrow().is_none() {
+            let content_hash = self.content_hash.get();
+            // We don't know the exact wrap_width here, but we can try common cases
+            // First try None (unwrapped text), then try with bounds width
+            let shaped = window.lookup_text_shape(content_hash, None)
+                .or_else(|| window.lookup_text_shape(content_hash, Some(bounds.size.width)));
+            if let Some(shaped) = shaped {
+                self.inner.borrow_mut().replace(TextLayoutInner {
+                    lines: shaped.lines,
+                    len: shaped.len,
+                    line_height: shaped.line_height,
+                    wrap_width: None, // We don't know for sure
+                    size: Some(shaped.size),
+                    bounds: Some(bounds),
+                });
+                return;
+            }
+        }
+
+        let mut element_state = self.inner.borrow_mut();
         let element_state = element_state
             .as_mut()
             .with_context(|| format!("measurement has not been performed on {text}"))
@@ -533,7 +602,7 @@ impl TextLayout {
     }
 
     fn paint(&self, text: &str, window: &mut Window, cx: &mut App) {
-        let element_state = self.0.borrow();
+        let element_state = self.inner.borrow();
         let element_state = element_state
             .as_ref()
             .with_context(|| format!("measurement has not been performed on {text}"))
@@ -571,7 +640,7 @@ impl TextLayout {
 
     /// Get the byte index into the input of the pixel position.
     pub fn index_for_position(&self, mut position: Point<Pixels>) -> Result<usize, usize> {
-        let element_state = self.0.borrow();
+        let element_state = self.inner.borrow();
         let element_state = element_state
             .as_ref()
             .expect("measurement has not been performed");
@@ -605,7 +674,7 @@ impl TextLayout {
 
     /// Get the pixel position for the given byte index.
     pub fn position_for_index(&self, index: usize) -> Option<Point<Pixels>> {
-        let element_state = self.0.borrow();
+        let element_state = self.inner.borrow();
         let element_state = element_state
             .as_ref()
             .expect("measurement has not been performed");
@@ -636,7 +705,7 @@ impl TextLayout {
 
     /// Retrieve the layout for the line containing the given byte index.
     pub fn line_layout_for_index(&self, index: usize) -> Option<Arc<WrappedLineLayout>> {
-        let element_state = self.0.borrow();
+        let element_state = self.inner.borrow();
         let element_state = element_state
             .as_ref()
             .expect("measurement has not been performed");
@@ -666,22 +735,22 @@ impl TextLayout {
 
     /// The bounds of this layout.
     pub fn bounds(&self) -> Bounds<Pixels> {
-        self.0.borrow().as_ref().unwrap().bounds.unwrap()
+        self.inner.borrow().as_ref().unwrap().bounds.unwrap()
     }
 
     /// The line height for this layout.
     pub fn line_height(&self) -> Pixels {
-        self.0.borrow().as_ref().unwrap().line_height
+        self.inner.borrow().as_ref().unwrap().line_height
     }
 
     /// The UTF-8 length of the underlying text.
     pub fn len(&self) -> usize {
-        self.0.borrow().as_ref().unwrap().len
+        self.inner.borrow().as_ref().unwrap().len
     }
 
     /// The text for this layout.
     pub fn text(&self) -> String {
-        self.0
+        self.inner
             .borrow()
             .as_ref()
             .unwrap()
@@ -695,7 +764,7 @@ impl TextLayout {
     pub fn wrapped_text(&self) -> String {
         let mut accumulator = String::new();
 
-        for wrapped in self.0.borrow().as_ref().unwrap().lines.iter() {
+        for wrapped in self.inner.borrow().as_ref().unwrap().lines.iter() {
             let mut seen = 0;
             for boundary in wrapped.layout.wrap_boundaries.iter() {
                 let index = wrapped.layout.unwrapped_layout.runs[boundary.run_ix].glyphs

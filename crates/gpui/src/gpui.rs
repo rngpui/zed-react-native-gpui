@@ -47,6 +47,8 @@ mod tab_stop;
 mod taffy;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
+mod text_shape_cache;
+pub use text_shape_cache::TextShapeCacheStats;
 mod text_system;
 mod util;
 mod view;
