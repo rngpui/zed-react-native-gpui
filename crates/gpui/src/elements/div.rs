@@ -3174,6 +3174,20 @@ where
             cx,
         );
     }
+
+    fn content_hash(
+        &self,
+        id: Option<&GlobalElementId>,
+        bounds: Bounds<Pixels>,
+        window: &Window,
+        cx: &App,
+    ) -> Option<u64> {
+        self.element.content_hash(id, bounds, window, cx)
+    }
+
+    fn cache_policy(&self) -> crate::CachePolicy {
+        self.element.cache_policy()
+    }
 }
 
 impl<E> IntoElement for Stateful<E>

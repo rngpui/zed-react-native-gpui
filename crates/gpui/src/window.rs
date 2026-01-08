@@ -18,7 +18,7 @@ use crate::{
     TextStyleRefinement, TransformationMatrix, Underline, UnderlineStyle, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
     WindowParams, WindowTextSystem, point, prelude::*,
-    primitive_cache::{CacheReplay, CachedPaintOperation, PrimitiveCache}, px, rems, scene::Primitive,
+    primitive_cache::{CacheReplay, CachedPaintOperation, PrimitiveCache, PrimitiveCacheStats}, px, rems, scene::Primitive,
     size, transparent_black,
 };
 use anyhow::{Context as _, Result, anyhow};
@@ -2758,6 +2758,14 @@ impl Window {
             stats.inserts,
             stats.evictions
         );
+    }
+
+    /// Returns the primitive cache statistics for the current frame and resets the counters.
+    ///
+    /// This is useful for benchmarking and debugging the primitive cache effectiveness.
+    /// Call this after the draw phase to get stats for the completed frame.
+    pub fn take_primitive_cache_stats(&mut self) -> PrimitiveCacheStats {
+        self.primitive_cache.take_stats()
     }
 
     fn replay_next_primitive(&mut self) -> bool {

@@ -3,11 +3,16 @@ use collections::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
 
+/// Statistics about primitive cache performance for the current frame.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PrimitiveCacheStats {
+    /// Number of cache hits (element paint was replayed from cache)
     pub hits: u64,
+    /// Number of cache misses (element had to be repainted)
     pub misses: u64,
+    /// Number of new entries inserted into the cache
     pub inserts: u64,
+    /// Number of entries evicted due to LRU policy
     pub evictions: u64,
 }
 

@@ -1,0 +1,226 @@
+//! A benchmark that demonstrates the primitive cache effectiveness.
+//!
+//! Renders a grid of styled elements that remain static across frames.
+//! After the first frame, all elements should hit the cache, showing
+//! significant reduction in paint work.
+//!
+//! Displays FPS and cache hit/miss statistics in real-time.
+
+use std::time::Instant;
+
+use gpui::{
+    Application, Bounds, Context, PrimitiveCacheStats, Render, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+};
+
+const WINDOW_WIDTH: f32 = 1200.0;
+const WINDOW_HEIGHT: f32 = 900.0;
+
+// Grid configuration - adjust to test different element counts
+const GRID_COLS: usize = 20;
+const GRID_ROWS: usize = 15;
+const CELL_SIZE: f32 = 50.0;
+const CELL_GAP: f32 = 5.0;
+
+struct CacheBench {
+    frame_times: Vec<f32>,
+    last_frame: Instant,
+    cache_stats: PrimitiveCacheStats,
+    frame_count: u64,
+}
+
+impl CacheBench {
+    fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+        Self {
+            frame_times: Vec::with_capacity(120),
+            last_frame: Instant::now(),
+            cache_stats: PrimitiveCacheStats::default(),
+            frame_count: 0,
+        }
+    }
+
+    fn update_stats(&mut self, window: &mut Window) -> (f32, f32) {
+        // Update frame timing
+        let now = Instant::now();
+        let frame_time = now.duration_since(self.last_frame).as_secs_f32() * 1000.0;
+        self.last_frame = now;
+
+        self.frame_times.push(frame_time);
+        if self.frame_times.len() > 60 {
+            self.frame_times.remove(0);
+        }
+
+        let avg_frame_time: f32 =
+            self.frame_times.iter().sum::<f32>() / self.frame_times.len() as f32;
+        let fps = 1000.0 / avg_frame_time;
+
+        // Get cache stats from the previous frame
+        self.cache_stats = window.take_primitive_cache_stats();
+        self.frame_count += 1;
+
+        (fps, avg_frame_time)
+    }
+}
+
+impl Render for CacheBench {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        // Request continuous redraw
+        window.request_animation_frame();
+
+        let (fps, frame_time) = self.update_stats(window);
+        let stats = self.cache_stats;
+        let frame_count = self.frame_count;
+
+        // Calculate hit rate
+        let total = stats.hits + stats.misses;
+        let hit_rate = if total > 0 {
+            (stats.hits as f32 / total as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        div()
+            .size_full()
+            .bg(rgb(0x1e1e2e))
+            .flex()
+            .flex_col()
+            .child(
+                // Stats overlay
+                div()
+                    .p_4()
+                    .bg(rgb(0x313244))
+                    .m_4()
+                    .rounded_lg()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_color(rgb(0xcdd6f4))
+                            .text_xl()
+                            .child("Primitive Cache Benchmark"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_4()
+                            .child(stat_box("FPS", format!("{:.1}", fps), rgb(0xa6e3a1)))
+                            .child(stat_box("Frame", format!("{:.2}ms", frame_time), rgb(0x89b4fa)))
+                            .child(stat_box("Frame #", format!("{}", frame_count), rgb(0xf5c2e7))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_4()
+                            .child(stat_box("Hits", format!("{}", stats.hits), rgb(0xa6e3a1)))
+                            .child(stat_box("Misses", format!("{}", stats.misses), rgb(0xf38ba8)))
+                            .child(stat_box("Hit Rate", format!("{:.1}%", hit_rate), rgb(0xf9e2af)))
+                            .child(stat_box("Inserts", format!("{}", stats.inserts), rgb(0x89dceb))),
+                    ),
+            )
+            .child(
+                // Grid of styled elements - these should all cache after frame 1
+                div()
+                    .flex_1()
+                    .p_4()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(CELL_GAP))
+                            .children((0..GRID_ROWS * GRID_COLS).map(|i| {
+                                let row = i / GRID_COLS;
+                                let col = i % GRID_COLS;
+
+                                // Create varied styles to exercise different code paths
+                                let hue = ((row * GRID_COLS + col) as f32 / (GRID_ROWS * GRID_COLS) as f32) * 360.0;
+                                let bg_color = hsl_to_rgb(hue, 0.6, 0.3);
+                                let border_color = hsl_to_rgb(hue, 0.8, 0.5);
+
+                                div()
+                                    .id(("cell", i))
+                                    .w(px(CELL_SIZE))
+                                    .h(px(CELL_SIZE))
+                                    .bg(bg_color)
+                                    .border_2()
+                                    .border_color(border_color)
+                                    .rounded_md()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        div()
+                                            .text_color(rgb(0xffffff))
+                                            .text_xs()
+                                            .child(format!("{}", i)),
+                                    )
+                            })),
+                    ),
+            )
+    }
+}
+
+fn stat_box(label: &str, value: String, color: gpui::Rgba) -> impl IntoElement {
+    div()
+        .bg(rgb(0x45475a))
+        .rounded_md()
+        .px_3()
+        .py_2()
+        .flex()
+        .flex_col()
+        .items_center()
+        .child(
+            div()
+                .text_color(rgb(0x9399b2))
+                .text_xs()
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .text_color(color)
+                .text_lg()
+                .font_weight(gpui::FontWeight::BOLD)
+                .child(value),
+        )
+}
+
+// Simple HSL to RGB conversion
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> gpui::Rgba {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+
+    let (r, g, b) = match (h / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+
+    gpui::rgba((((r + m) * 255.0) as u32) << 24 | (((g + m) * 255.0) as u32) << 16 | (((b + m) * 255.0) as u32) << 8 | 0xFF)
+}
+
+fn main() {
+    Application::new().run(|cx| {
+        cx.open_window(
+            WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Primitive Cache Benchmark".into()),
+                    ..Default::default()
+                }),
+                focus: true,
+                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                    None,
+                    size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)),
+                    cx,
+                ))),
+                ..Default::default()
+            },
+            |window, cx| cx.new(|cx| CacheBench::new(window, cx)),
+        )
+        .unwrap();
+        cx.activate(true);
+    });
+}

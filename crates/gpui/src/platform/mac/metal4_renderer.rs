@@ -396,6 +396,80 @@ impl PrepackedPrimitives {
         })
     }
 
+    /// Compute buffer layout without writing instance data.
+    fn layout(batches: &[PrimitiveBatch], buffer_size: usize) -> Option<Self> {
+        // Phase 1: Count totals by type
+        let mut quad_count = 0usize;
+        let mut shadow_count = 0usize;
+        let mut underline_count = 0usize;
+        let mut mono_sprite_count = 0usize;
+        let mut poly_sprite_count = 0usize;
+        let mut backdrop_blur_count = 0usize;
+
+        for batch in batches {
+            match batch {
+                PrimitiveBatch::Quads(quads, _) => quad_count += quads.len(),
+                PrimitiveBatch::Shadows(shadows, _) => shadow_count += shadows.len(),
+                PrimitiveBatch::Underlines(underlines, _) => underline_count += underlines.len(),
+                PrimitiveBatch::MonochromeSprites { sprites, .. } => {
+                    mono_sprite_count += sprites.len()
+                }
+                PrimitiveBatch::PolychromeSprites { sprites, .. } => {
+                    poly_sprite_count += sprites.len()
+                }
+                PrimitiveBatch::BackdropBlurs(blurs, _) => backdrop_blur_count += blurs.len(),
+                PrimitiveBatch::Paths(_)
+                | PrimitiveBatch::Surfaces(_)
+                | PrimitiveBatch::SubpixelSprites { .. } => {}
+            }
+        }
+
+        // Phase 2: Calculate offsets (with alignment)
+        let mut offset = 0usize;
+
+        let quads_offset = aligned_offset(offset);
+        offset = quads_offset + quad_count * mem::size_of::<QuadWithTransform>();
+
+        let shadows_offset = aligned_offset(offset);
+        offset = shadows_offset + shadow_count * mem::size_of::<ShadowWithTransform>();
+
+        let underlines_offset = aligned_offset(offset);
+        offset = underlines_offset + underline_count * mem::size_of::<UnderlineWithTransform>();
+
+        let mono_sprites_offset = aligned_offset(offset);
+        offset = mono_sprites_offset + mono_sprite_count * mem::size_of::<crate::MonochromeSprite>();
+
+        let poly_sprites_offset = aligned_offset(offset);
+        offset = poly_sprites_offset
+            + poly_sprite_count * mem::size_of::<PolychromeSpriteWithTransform>();
+
+        let backdrop_blurs_offset = aligned_offset(offset);
+        offset = backdrop_blurs_offset
+            + backdrop_blur_count * mem::size_of::<BackdropBlurWithTransform>();
+
+        let total_bytes = offset;
+
+        if total_bytes > buffer_size {
+            return None;
+        }
+
+        Some(PrepackedPrimitives {
+            quads_offset,
+            shadows_offset,
+            underlines_offset,
+            mono_sprites_offset,
+            poly_sprites_offset,
+            backdrop_blurs_offset,
+            quads_next_index: 0,
+            shadows_next_index: 0,
+            underlines_next_index: 0,
+            mono_sprites_next_index: 0,
+            poly_sprites_next_index: 0,
+            backdrop_blurs_next_index: 0,
+            total_bytes,
+        })
+    }
+
     /// Bind all type buffers to the argument table (call once per render pass)
     fn bind_type_buffers(
         &self,
@@ -1231,9 +1305,14 @@ impl Metal4Renderer {
                 }
             }
         } else {
-            // Reusing previous frame's data - create empty prepacked struct
-            // The running indices will still be used for baseInstance calculation
-            PrepackedPrimitives::default()
+            // Reusing previous frame's data - compute offsets without rewriting the buffer.
+            match PrepackedPrimitives::layout(&batches, instance_buffer.size()) {
+                Some(p) => p,
+                None => {
+                    self.command_buffer.endCommandBuffer();
+                    return Err(instance_buffer);
+                }
+            }
         };
 
         let buffer_gpu_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();

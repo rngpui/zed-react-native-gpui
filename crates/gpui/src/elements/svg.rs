@@ -86,7 +86,6 @@ impl Element for Svg {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Hitbox> {
-        let base_hash = self.interactivity.content_hash;
         let path_hash = self.path.content_hash();
         let external_path_hash = self.external_path.content_hash();
         let transform_hash = self.transformation.content_hash();
@@ -98,11 +97,9 @@ impl Element for Svg {
             bounds.size,
             window,
             cx,
-            |style, _, hitbox, _window, _cx| {
+            |style, _, hitbox, window, _cx| {
                 let mut hasher = ContentHasher::default();
-                if let Some(base) = base_hash {
-                    hasher.write_u64(base);
-                }
+                hasher.write_u64(crate::style_content_hash(style, window.rem_size()));
                 hasher.write_u64(path_hash);
                 hasher.write_u64(external_path_hash);
                 hasher.write_u64(style.text.color.content_hash());
