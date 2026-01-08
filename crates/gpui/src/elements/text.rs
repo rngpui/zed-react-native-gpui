@@ -485,6 +485,8 @@ impl TextLayout {
                 }
 
                 // Check measure cache first (fast size-only lookup)
+                // Only use this if we can also get the shaped text from TextShapeCache,
+                // otherwise prepaint won't have the data it needs.
                 if truncate_width.is_none() {
                     if let Some(size) = window.lookup_measure(content_hash, known_dimensions, available_space) {
                         // We have the size but still need the shaped text for rendering
@@ -498,8 +500,10 @@ impl TextLayout {
                                 size: Some(size),
                                 bounds: None,
                             });
+                            return size;
                         }
-                        return size;
+                        // If TextShapeCache missed, don't use the MeasureCache hit -
+                        // we need to re-shape the text to populate element_state
                     }
                 }
 
