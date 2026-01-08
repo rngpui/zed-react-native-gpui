@@ -21,11 +21,18 @@ using namespace metal;
 typedef enum BufferBindingIndex : uint32_t {
     BufferBindingIndexUnitVertices = 0,
     BufferBindingIndexViewportSize = 1,
-    BufferBindingIndexPrimitives = 2,
-    BufferBindingIndexTransforms = 3,
-    BufferBindingIndexAtlasSize = 4,
-    BufferBindingIndexTextureSize = 5,
-    BufferBindingIndexPathVertices = 6,
+    // Per-primitive-type slots for bind-once pattern with baseInstance
+    BufferBindingIndexQuads = 2,
+    BufferBindingIndexShadows = 3,
+    BufferBindingIndexUnderlines = 4,
+    BufferBindingIndexMonochromeSprites = 5,
+    BufferBindingIndexPolychromeSprites = 6,
+    BufferBindingIndexBackdropBlurs = 7,
+    BufferBindingIndexPathSprites = 8,
+    BufferBindingIndexSurfaces = 9,
+    BufferBindingIndexPathVertices = 10,
+    BufferBindingIndexAtlasSize = 11,
+    BufferBindingIndexTextureSize = 12,
 } BufferBindingIndex;
 
 typedef enum TextureBindingIndex : uint32_t {
@@ -208,6 +215,40 @@ struct SurfaceFragmentInput {
 };
 
 // ============================================================================
+// Interleaved Primitive+Transform Structures for baseInstance optimization
+// ============================================================================
+
+// Interleaved quad + transform for bind-once pattern
+struct QuadWithTransform {
+    Quad quad;
+    TransformationMatrix transform;
+};
+
+// Interleaved shadow + transform for bind-once pattern
+struct ShadowWithTransform {
+    Shadow shadow;
+    TransformationMatrix transform;
+};
+
+// Interleaved underline + transform for bind-once pattern
+struct UnderlineWithTransform {
+    Underline underline;
+    TransformationMatrix transform;
+};
+
+// Interleaved polychrome sprite + transform for bind-once pattern
+struct PolychromeSpriteWithTransform {
+    PolychromeSprite sprite;
+    TransformationMatrix transform;
+};
+
+// Interleaved backdrop blur + transform for bind-once pattern
+struct BackdropBlurWithTransform {
+    BackdropBlur blur;
+    TransformationMatrix transform;
+};
+
+// ============================================================================
 // Quad Shaders
 // ============================================================================
 
@@ -216,12 +257,11 @@ vertex QuadVertexOutput quad_vertex_mtl4(
     uint quad_id [[instance_id]],
     constant float2* unit_vertices [[buffer(BufferBindingIndexUnitVertices)]],
     constant Size_DevicePixels* viewport_size [[buffer(BufferBindingIndexViewportSize)]],
-    constant Quad* quads [[buffer(BufferBindingIndexPrimitives)]],
-    constant TransformationMatrix* transforms [[buffer(BufferBindingIndexTransforms)]]
+    constant QuadWithTransform* quads_with_transforms [[buffer(BufferBindingIndexQuads)]]
 ) {
     float2 unit_vertex = unit_vertices[unit_vertex_id];
-    Quad quad = quads[quad_id];
-    TransformationMatrix transform = transforms[quad_id];
+    Quad quad = quads_with_transforms[quad_id].quad;
+    TransformationMatrix transform = quads_with_transforms[quad_id].transform;
     float4 device_position =
         to_device_position_transformed(unit_vertex, quad.bounds, transform, viewport_size);
     float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, quad.bounds,
@@ -248,11 +288,10 @@ vertex QuadVertexOutput quad_vertex_mtl4(
 
 fragment float4 quad_fragment_mtl4(
     QuadFragmentInput input [[stage_in]],
-    device Quad* quads [[buffer(BufferBindingIndexPrimitives)]],
-    device TransformationMatrix* transforms [[buffer(BufferBindingIndexTransforms)]]
+    device QuadWithTransform* quads_with_transforms [[buffer(BufferBindingIndexQuads)]]
 ) {
-    Quad quad = quads[input.quad_id];
-    TransformationMatrix transform = transforms[input.quad_id];
+    Quad quad = quads_with_transforms[input.quad_id].quad;
+    TransformationMatrix transform = quads_with_transforms[input.quad_id].transform;
     float2 local_position = to_local_position(input.position.xy, transform);
 
     float4 background_color = fill_color(quad.background, local_position, quad.bounds,
@@ -349,12 +388,11 @@ vertex ShadowVertexOutput shadow_vertex_mtl4(
     uint shadow_id [[instance_id]],
     constant float2* unit_vertices [[buffer(BufferBindingIndexUnitVertices)]],
     constant Size_DevicePixels* viewport_size [[buffer(BufferBindingIndexViewportSize)]],
-    constant Shadow* shadows [[buffer(BufferBindingIndexPrimitives)]],
-    constant TransformationMatrix* transforms [[buffer(BufferBindingIndexTransforms)]]
+    constant ShadowWithTransform* shadows_with_transforms [[buffer(BufferBindingIndexShadows)]]
 ) {
     float2 unit_vertex = unit_vertices[unit_vertex_id];
-    Shadow shadow = shadows[shadow_id];
-    TransformationMatrix transform = transforms[shadow_id];
+    Shadow shadow = shadows_with_transforms[shadow_id].shadow;
+    TransformationMatrix transform = shadows_with_transforms[shadow_id].transform;
 
     float margin = 3. * shadow.blur_radius;
     Bounds_ScaledPixels bounds = shadow.bounds;
@@ -378,11 +416,10 @@ vertex ShadowVertexOutput shadow_vertex_mtl4(
 
 fragment float4 shadow_fragment_mtl4(
     ShadowFragmentInput input [[stage_in]],
-    device Shadow* shadows [[buffer(BufferBindingIndexPrimitives)]],
-    device TransformationMatrix* transforms [[buffer(BufferBindingIndexTransforms)]]
+    device ShadowWithTransform* shadows_with_transforms [[buffer(BufferBindingIndexShadows)]]
 ) {
-    Shadow shadow = shadows[input.shadow_id];
-    TransformationMatrix transform = transforms[input.shadow_id];
+    Shadow shadow = shadows_with_transforms[input.shadow_id].shadow;
+    TransformationMatrix transform = shadows_with_transforms[input.shadow_id].transform;
 
     float2 local_position = to_local_position(input.position.xy, transform);
     float2 origin = float2(shadow.bounds.origin.x, shadow.bounds.origin.y);
@@ -438,12 +475,11 @@ vertex UnderlineVertexOutput underline_vertex_mtl4(
     uint underline_id [[instance_id]],
     constant float2* unit_vertices [[buffer(BufferBindingIndexUnitVertices)]],
     constant Size_DevicePixels* viewport_size [[buffer(BufferBindingIndexViewportSize)]],
-    constant Underline* underlines [[buffer(BufferBindingIndexPrimitives)]],
-    constant TransformationMatrix* transforms [[buffer(BufferBindingIndexTransforms)]]
+    constant UnderlineWithTransform* underlines_with_transforms [[buffer(BufferBindingIndexUnderlines)]]
 ) {
     float2 unit_vertex = unit_vertices[unit_vertex_id];
-    Underline underline = underlines[underline_id];
-    TransformationMatrix transform = transforms[underline_id];
+    Underline underline = underlines_with_transforms[underline_id].underline;
+    TransformationMatrix transform = underlines_with_transforms[underline_id].transform;
     float4 device_position =
         to_device_position_transformed(unit_vertex, underline.bounds, transform, viewport_size);
     float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, underline.bounds,
@@ -458,14 +494,13 @@ vertex UnderlineVertexOutput underline_vertex_mtl4(
 
 fragment float4 underline_fragment_mtl4(
     UnderlineFragmentInput input [[stage_in]],
-    device Underline* underlines [[buffer(BufferBindingIndexPrimitives)]],
-    device TransformationMatrix* transforms [[buffer(BufferBindingIndexTransforms)]]
+    device UnderlineWithTransform* underlines_with_transforms [[buffer(BufferBindingIndexUnderlines)]]
 ) {
     const float WAVE_FREQUENCY = 2.0;
     const float WAVE_HEIGHT_RATIO = 0.8;
 
-    Underline underline = underlines[input.underline_id];
-    TransformationMatrix transform = transforms[input.underline_id];
+    Underline underline = underlines_with_transforms[input.underline_id].underline;
+    TransformationMatrix transform = underlines_with_transforms[input.underline_id].transform;
     if (underline.wavy) {
         float half_thickness = underline.thickness * 0.5;
         float2 origin =
@@ -500,12 +535,11 @@ vertex BackdropBlurVertexOutput backdrop_blur_vertex_mtl4(
     uint blur_id [[instance_id]],
     constant float2* unit_vertices [[buffer(BufferBindingIndexUnitVertices)]],
     constant Size_DevicePixels* viewport_size [[buffer(BufferBindingIndexViewportSize)]],
-    constant BackdropBlur* blurs [[buffer(BufferBindingIndexPrimitives)]],
-    constant TransformationMatrix* transforms [[buffer(BufferBindingIndexTransforms)]]
+    constant BackdropBlurWithTransform* blurs_with_transforms [[buffer(BufferBindingIndexBackdropBlurs)]]
 ) {
     float2 unit_vertex = unit_vertices[unit_vertex_id];
-    BackdropBlur blur = blurs[blur_id];
-    TransformationMatrix transform = transforms[blur_id];
+    BackdropBlur blur = blurs_with_transforms[blur_id].blur;
+    TransformationMatrix transform = blurs_with_transforms[blur_id].transform;
 
     float4 device_position =
         to_device_position_transformed(unit_vertex, blur.bounds, transform, viewport_size);
@@ -521,12 +555,11 @@ vertex BackdropBlurVertexOutput backdrop_blur_vertex_mtl4(
 fragment float4 backdrop_blur_fragment_mtl4(
     BackdropBlurFragmentInput input [[stage_in]],
     constant Size_DevicePixels* viewport_size [[buffer(BufferBindingIndexViewportSize)]],
-    device BackdropBlur* blurs [[buffer(BufferBindingIndexPrimitives)]],
-    device TransformationMatrix* transforms [[buffer(BufferBindingIndexTransforms)]],
+    device BackdropBlurWithTransform* blurs_with_transforms [[buffer(BufferBindingIndexBackdropBlurs)]],
     texture2d<float> backdrop_texture [[texture(TextureBindingIndexBackdrop)]]
 ) {
-    BackdropBlur blur = blurs[input.blur_id];
-    TransformationMatrix transform = transforms[input.blur_id];
+    BackdropBlur blur = blurs_with_transforms[input.blur_id].blur;
+    TransformationMatrix transform = blurs_with_transforms[input.blur_id].transform;
 
     float2 local_position = to_local_position(input.position.xy, transform);
     float mask = saturate(0.5 - quad_sdf(local_position, blur.bounds, blur.corner_radii));
@@ -610,7 +643,7 @@ vertex MonochromeSpriteVertexOutput monochrome_sprite_vertex_mtl4(
     uint sprite_id [[instance_id]],
     constant float2* unit_vertices [[buffer(BufferBindingIndexUnitVertices)]],
     constant Size_DevicePixels* viewport_size [[buffer(BufferBindingIndexViewportSize)]],
-    constant MonochromeSprite* sprites [[buffer(BufferBindingIndexPrimitives)]],
+    constant MonochromeSprite* sprites [[buffer(BufferBindingIndexMonochromeSprites)]],
     constant Size_DevicePixels* atlas_size [[buffer(BufferBindingIndexAtlasSize)]]
 ) {
     float2 unit_vertex = unit_vertices[unit_vertex_id];
@@ -652,13 +685,12 @@ vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex_mtl4(
     uint sprite_id [[instance_id]],
     constant float2* unit_vertices [[buffer(BufferBindingIndexUnitVertices)]],
     constant Size_DevicePixels* viewport_size [[buffer(BufferBindingIndexViewportSize)]],
-    constant PolychromeSprite* sprites [[buffer(BufferBindingIndexPrimitives)]],
-    constant TransformationMatrix* transforms [[buffer(BufferBindingIndexTransforms)]],
+    constant PolychromeSpriteWithTransform* sprites_with_transforms [[buffer(BufferBindingIndexPolychromeSprites)]],
     constant Size_DevicePixels* atlas_size [[buffer(BufferBindingIndexAtlasSize)]]
 ) {
     float2 unit_vertex = unit_vertices[unit_vertex_id];
-    PolychromeSprite sprite = sprites[sprite_id];
-    TransformationMatrix transform = transforms[sprite_id];
+    PolychromeSprite sprite = sprites_with_transforms[sprite_id].sprite;
+    TransformationMatrix transform = sprites_with_transforms[sprite_id].transform;
     float4 device_position =
         to_device_position_transformed(unit_vertex, sprite.bounds, transform, viewport_size);
     float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds,
@@ -673,12 +705,11 @@ vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex_mtl4(
 
 fragment float4 polychrome_sprite_fragment_mtl4(
     PolychromeSpriteFragmentInput input [[stage_in]],
-    device PolychromeSprite* sprites [[buffer(BufferBindingIndexPrimitives)]],
-    device TransformationMatrix* transforms [[buffer(BufferBindingIndexTransforms)]],
+    device PolychromeSpriteWithTransform* sprites_with_transforms [[buffer(BufferBindingIndexPolychromeSprites)]],
     texture2d<float> atlas_texture [[texture(TextureBindingIndexAtlas)]]
 ) {
-    PolychromeSprite sprite = sprites[input.sprite_id];
-    TransformationMatrix transform = transforms[input.sprite_id];
+    PolychromeSprite sprite = sprites_with_transforms[input.sprite_id].sprite;
+    TransformationMatrix transform = sprites_with_transforms[input.sprite_id].transform;
     constexpr sampler atlas_texture_sampler(mag_filter::linear, min_filter::linear);
     float4 sample = atlas_texture.sample(atlas_texture_sampler, input.tile_position);
     float2 local_position = to_local_position(input.position.xy, transform);
@@ -775,7 +806,7 @@ vertex PathSpriteVertexOutput path_sprite_vertex_mtl4(
     uint sprite_id [[instance_id]],
     constant float2* unit_vertices [[buffer(BufferBindingIndexUnitVertices)]],
     constant Size_DevicePixels* viewport_size [[buffer(BufferBindingIndexViewportSize)]],
-    constant PathSprite* sprites [[buffer(BufferBindingIndexPrimitives)]]
+    constant PathSprite* sprites [[buffer(BufferBindingIndexPathSprites)]]
 ) {
     float2 unit_vertex = unit_vertices[unit_vertex_id];
     PathSprite sprite = sprites[sprite_id];
@@ -808,7 +839,7 @@ vertex SurfaceVertexOutput surface_vertex_mtl4(
     uint surface_id [[instance_id]],
     constant float2* unit_vertices [[buffer(BufferBindingIndexUnitVertices)]],
     constant Size_DevicePixels* viewport_size [[buffer(BufferBindingIndexViewportSize)]],
-    constant SurfaceBounds* surfaces [[buffer(BufferBindingIndexPrimitives)]]
+    constant SurfaceBounds* surfaces [[buffer(BufferBindingIndexSurfaces)]]
 ) {
     float2 unit_vertex = unit_vertices[unit_vertex_id];
     SurfaceBounds surface = surfaces[surface_id];

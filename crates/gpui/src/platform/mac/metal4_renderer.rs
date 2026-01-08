@@ -10,8 +10,9 @@
 use super::metal_atlas::MetalAtlas;
 use super::metal_renderer::InstanceBufferPool;
 use crate::{
-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
-    PrimitiveBatch, ScaledPixels, Scene, Size, size,
+    AtlasTextureId, Background, BackdropBlur, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
+    PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, TransformationMatrix,
+    Underline, size,
 };
 use collections::FxHashSet;
 #[cfg(any(test, feature = "test-support"))]
@@ -50,16 +51,24 @@ use objc2_metal::{
 const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
 /// Buffer binding indices matching shaders_mtl4.metal
+/// Per-primitive-type slots enable bind-once pattern with baseInstance
 #[repr(u64)]
 #[derive(Clone, Copy)]
 enum BufferBindingIndex {
     UnitVertices = 0,
     ViewportSize = 1,
-    Primitives = 2,
-    Transforms = 3,
-    AtlasSize = 4,
-    TextureSize = 5,
-    PathVertices = 6,
+    // Per-primitive-type slots for bind-once pattern
+    Quads = 2,
+    Shadows = 3,
+    Underlines = 4,
+    MonochromeSprites = 5,
+    PolychromeSprites = 6,
+    BackdropBlurs = 7,
+    PathSprites = 8,
+    Surfaces = 9,
+    PathVertices = 10,
+    AtlasSize = 11,
+    TextureSize = 12,
 }
 
 /// Texture binding indices matching shaders_mtl4.metal
@@ -111,10 +120,315 @@ struct SurfaceBounds {
     content_mask: ContentMask<ScaledPixels>,
 }
 
+// ============================================================================
+// Interleaved Primitive+Transform Structures (matches shaders_mtl4.metal)
+// These enable the bind-once pattern with baseInstance draws.
+// ============================================================================
+
+/// Quad with transform for baseInstance optimization
+#[repr(C)]
+#[derive(Clone, Debug)]
+struct QuadWithTransform {
+    quad: Quad,
+    transform: TransformationMatrix,
+}
+
+/// Shadow with transform for baseInstance optimization
+#[repr(C)]
+#[derive(Clone, Debug)]
+struct ShadowWithTransform {
+    shadow: Shadow,
+    transform: TransformationMatrix,
+}
+
+/// Underline with transform for baseInstance optimization
+#[repr(C)]
+#[derive(Clone, Debug)]
+struct UnderlineWithTransform {
+    underline: Underline,
+    transform: TransformationMatrix,
+}
+
+/// Polychrome sprite with transform for baseInstance optimization
+#[repr(C)]
+#[derive(Clone, Debug)]
+struct PolychromeSpriteWithTransform {
+    sprite: PolychromeSprite,
+    transform: TransformationMatrix,
+}
+
+/// Backdrop blur with transform for baseInstance optimization
+#[repr(C)]
+#[derive(Clone, Debug)]
+struct BackdropBlurWithTransform {
+    blur: BackdropBlur,
+    transform: TransformationMatrix,
+}
+
 /// Align offset to 256-byte boundary (Metal buffer offset alignment requirement)
 fn align_offset(offset: &mut usize) {
     const ALIGNMENT: usize = 256;
     *offset = (*offset + ALIGNMENT - 1) & !(ALIGNMENT - 1);
+}
+
+/// Return aligned offset without mutating
+fn aligned_offset(offset: usize) -> usize {
+    const ALIGNMENT: usize = 256;
+    (offset + ALIGNMENT - 1) & !(ALIGNMENT - 1)
+}
+
+// ============================================================================
+// Pre-packed Primitives for Bind-Once Pattern
+// ============================================================================
+
+/// Tracks pre-packed primitive data for bind-once optimization.
+/// All primitives of each type are packed contiguously, allowing:
+/// 1. Single setAddress_atIndex per type per render pass
+/// 2. baseInstance to select the correct slice for each batch
+#[derive(Default)]
+struct PrepackedPrimitives {
+    /// Offset into instance buffer where quads data starts
+    quads_offset: usize,
+    /// Offset into instance buffer where shadows data starts
+    shadows_offset: usize,
+    /// Offset into instance buffer where underlines data starts
+    underlines_offset: usize,
+    /// Offset into instance buffer where monochrome sprites data starts
+    mono_sprites_offset: usize,
+    /// Offset into instance buffer where polychrome sprites data starts
+    poly_sprites_offset: usize,
+    /// Offset into instance buffer where backdrop blurs data starts
+    backdrop_blurs_offset: usize,
+
+    /// Running index for next quad batch (for baseInstance)
+    quads_next_index: usize,
+    /// Running index for next shadow batch
+    shadows_next_index: usize,
+    /// Running index for next underline batch
+    underlines_next_index: usize,
+    /// Running index for next monochrome sprite batch
+    mono_sprites_next_index: usize,
+    /// Running index for next polychrome sprite batch
+    poly_sprites_next_index: usize,
+    /// Running index for next backdrop blur batch
+    backdrop_blurs_next_index: usize,
+
+    /// Total bytes used in instance buffer
+    total_bytes: usize,
+}
+
+impl PrepackedPrimitives {
+    /// Pre-pack all primitive data from batches into the instance buffer.
+    /// Returns None if the buffer is too small.
+    fn prepack(
+        batches: &[PrimitiveBatch],
+        instance_buffer: &mut super::metal_renderer::InstanceBuffer,
+    ) -> Option<Self> {
+        // Phase 1: Count totals by type
+        let mut quad_count = 0usize;
+        let mut shadow_count = 0usize;
+        let mut underline_count = 0usize;
+        let mut mono_sprite_count = 0usize;
+        let mut poly_sprite_count = 0usize;
+        let mut backdrop_blur_count = 0usize;
+
+        for batch in batches {
+            match batch {
+                PrimitiveBatch::Quads(quads, _) => quad_count += quads.len(),
+                PrimitiveBatch::Shadows(shadows, _) => shadow_count += shadows.len(),
+                PrimitiveBatch::Underlines(underlines, _) => underline_count += underlines.len(),
+                PrimitiveBatch::MonochromeSprites { sprites, .. } => {
+                    mono_sprite_count += sprites.len()
+                }
+                PrimitiveBatch::PolychromeSprites { sprites, .. } => {
+                    poly_sprite_count += sprites.len()
+                }
+                PrimitiveBatch::BackdropBlurs(blurs, _) => backdrop_blur_count += blurs.len(),
+                PrimitiveBatch::Paths(_) | PrimitiveBatch::Surfaces(_) | PrimitiveBatch::SubpixelSprites { .. } => {}
+            }
+        }
+
+        // Phase 2: Calculate offsets (with alignment)
+        let mut offset = 0usize;
+
+        let quads_offset = aligned_offset(offset);
+        offset = quads_offset + quad_count * mem::size_of::<QuadWithTransform>();
+
+        let shadows_offset = aligned_offset(offset);
+        offset = shadows_offset + shadow_count * mem::size_of::<ShadowWithTransform>();
+
+        let underlines_offset = aligned_offset(offset);
+        offset = underlines_offset + underline_count * mem::size_of::<UnderlineWithTransform>();
+
+        let mono_sprites_offset = aligned_offset(offset);
+        offset = mono_sprites_offset + mono_sprite_count * mem::size_of::<crate::MonochromeSprite>();
+
+        let poly_sprites_offset = aligned_offset(offset);
+        offset = poly_sprites_offset + poly_sprite_count * mem::size_of::<PolychromeSpriteWithTransform>();
+
+        let backdrop_blurs_offset = aligned_offset(offset);
+        offset = backdrop_blurs_offset + backdrop_blur_count * mem::size_of::<BackdropBlurWithTransform>();
+
+        let total_bytes = offset;
+
+        // Check buffer size
+        if total_bytes > instance_buffer.size() {
+            return None;
+        }
+
+        // Phase 3: Copy data into contiguous regions
+        let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
+
+        // Running write positions within each type's region
+        let mut quad_write_idx = 0usize;
+        let mut shadow_write_idx = 0usize;
+        let mut underline_write_idx = 0usize;
+        let mut mono_sprite_write_idx = 0usize;
+        let mut poly_sprite_write_idx = 0usize;
+        let mut backdrop_blur_write_idx = 0usize;
+
+        unsafe {
+            for batch in batches {
+                match batch {
+                    PrimitiveBatch::Quads(quads, transforms) => {
+                        let dest = buffer_ptr.add(quads_offset) as *mut QuadWithTransform;
+                        for (i, (quad, transform)) in
+                            quads.iter().zip(transforms.iter()).enumerate()
+                        {
+                            ptr::write(
+                                dest.add(quad_write_idx + i),
+                                QuadWithTransform {
+                                    quad: quad.clone(),
+                                    transform: transform.clone(),
+                                },
+                            );
+                        }
+                        quad_write_idx += quads.len();
+                    }
+                    PrimitiveBatch::Shadows(shadows, transforms) => {
+                        let dest = buffer_ptr.add(shadows_offset) as *mut ShadowWithTransform;
+                        for (i, (shadow, transform)) in
+                            shadows.iter().zip(transforms.iter()).enumerate()
+                        {
+                            ptr::write(
+                                dest.add(shadow_write_idx + i),
+                                ShadowWithTransform {
+                                    shadow: shadow.clone(),
+                                    transform: transform.clone(),
+                                },
+                            );
+                        }
+                        shadow_write_idx += shadows.len();
+                    }
+                    PrimitiveBatch::Underlines(underlines, transforms) => {
+                        let dest = buffer_ptr.add(underlines_offset) as *mut UnderlineWithTransform;
+                        for (i, (underline, transform)) in
+                            underlines.iter().zip(transforms.iter()).enumerate()
+                        {
+                            ptr::write(
+                                dest.add(underline_write_idx + i),
+                                UnderlineWithTransform {
+                                    underline: underline.clone(),
+                                    transform: transform.clone(),
+                                },
+                            );
+                        }
+                        underline_write_idx += underlines.len();
+                    }
+                    PrimitiveBatch::MonochromeSprites { sprites, .. } => {
+                        let dest = buffer_ptr.add(mono_sprites_offset) as *mut crate::MonochromeSprite;
+                        ptr::copy_nonoverlapping(
+                            sprites.as_ptr(),
+                            dest.add(mono_sprite_write_idx),
+                            sprites.len(),
+                        );
+                        mono_sprite_write_idx += sprites.len();
+                    }
+                    PrimitiveBatch::PolychromeSprites { sprites, transforms, .. } => {
+                        let dest = buffer_ptr.add(poly_sprites_offset) as *mut PolychromeSpriteWithTransform;
+                        for (i, (sprite, transform)) in
+                            sprites.iter().zip(transforms.iter()).enumerate()
+                        {
+                            ptr::write(
+                                dest.add(poly_sprite_write_idx + i),
+                                PolychromeSpriteWithTransform {
+                                    sprite: sprite.clone(),
+                                    transform: transform.clone(),
+                                },
+                            );
+                        }
+                        poly_sprite_write_idx += sprites.len();
+                    }
+                    PrimitiveBatch::BackdropBlurs(blurs, transforms) => {
+                        let dest = buffer_ptr.add(backdrop_blurs_offset) as *mut BackdropBlurWithTransform;
+                        for (i, (blur, transform)) in
+                            blurs.iter().zip(transforms.iter()).enumerate()
+                        {
+                            ptr::write(
+                                dest.add(backdrop_blur_write_idx + i),
+                                BackdropBlurWithTransform {
+                                    blur: blur.clone(),
+                                    transform: transform.clone(),
+                                },
+                            );
+                        }
+                        backdrop_blur_write_idx += blurs.len();
+                    }
+                    PrimitiveBatch::Paths(_) | PrimitiveBatch::Surfaces(_) | PrimitiveBatch::SubpixelSprites { .. } => {}
+                }
+            }
+        }
+
+        Some(PrepackedPrimitives {
+            quads_offset,
+            shadows_offset,
+            underlines_offset,
+            mono_sprites_offset,
+            poly_sprites_offset,
+            backdrop_blurs_offset,
+            quads_next_index: 0,
+            shadows_next_index: 0,
+            underlines_next_index: 0,
+            mono_sprites_next_index: 0,
+            poly_sprites_next_index: 0,
+            backdrop_blurs_next_index: 0,
+            total_bytes,
+        })
+    }
+
+    /// Bind all type buffers to the argument table (call once per render pass)
+    fn bind_type_buffers(
+        &self,
+        argument_table: &ProtocolObject<dyn MTL4ArgumentTable>,
+        buffer_gpu_addr: u64,
+    ) {
+        unsafe {
+            argument_table.setAddress_atIndex(
+                buffer_gpu_addr + self.quads_offset as u64,
+                BufferBindingIndex::Quads as NSUInteger,
+            );
+            argument_table.setAddress_atIndex(
+                buffer_gpu_addr + self.shadows_offset as u64,
+                BufferBindingIndex::Shadows as NSUInteger,
+            );
+            argument_table.setAddress_atIndex(
+                buffer_gpu_addr + self.underlines_offset as u64,
+                BufferBindingIndex::Underlines as NSUInteger,
+            );
+            argument_table.setAddress_atIndex(
+                buffer_gpu_addr + self.mono_sprites_offset as u64,
+                BufferBindingIndex::MonochromeSprites as NSUInteger,
+            );
+            argument_table.setAddress_atIndex(
+                buffer_gpu_addr + self.poly_sprites_offset as u64,
+                BufferBindingIndex::PolychromeSprites as NSUInteger,
+            );
+            argument_table.setAddress_atIndex(
+                buffer_gpu_addr + self.backdrop_blurs_offset as u64,
+                BufferBindingIndex::BackdropBlurs as NSUInteger,
+            );
+        }
+    }
 }
 
 /// Metal 4 renderer that uses the new Metal 4 APIs for improved performance.
@@ -299,8 +613,9 @@ impl Metal4Renderer {
             .ok_or(Metal4RendererError::SharedEventCreationFailed)?;
 
         // 7. Create argument table descriptor
+        // Per-primitive-type slots (0-12) for bind-once pattern with baseInstance
         let arg_table_desc = MTL4ArgumentTableDescriptor::new();
-        arg_table_desc.setMaxBufferBindCount(8); // buffers 0-7
+        arg_table_desc.setMaxBufferBindCount(14); // buffers 0-13 (per-type slots + aux)
         arg_table_desc.setMaxTextureBindCount(8); // textures 0-7
         arg_table_desc.setMaxSamplerStateBindCount(2); // samplers 0-1
         arg_table_desc.setInitializeBindings(true);
@@ -850,7 +1165,6 @@ impl Metal4Renderer {
             Some(buffer) => buffer,
             None => self.instance_buffer_pool.lock().acquire(&self.device),
         };
-        let mut instance_offset: usize = 0;
 
         // 6. Add resources to residency set and commit only if something changed
         // This avoids expensive commit() calls when nothing new was allocated
@@ -904,6 +1218,25 @@ impl Metal4Renderer {
         if needs_commit {
             self.residency_set.commit();
         }
+
+        // Pre-pack all primitives by type for bind-once optimization
+        // This copies all primitive data into contiguous type-specific regions
+        let mut prepacked = if write_instances {
+            match PrepackedPrimitives::prepack(&batches, &mut instance_buffer) {
+                Some(p) => p,
+                None => {
+                    // Buffer too small - return error to trigger retry with larger buffer
+                    self.command_buffer.endCommandBuffer();
+                    return Err(instance_buffer);
+                }
+            }
+        } else {
+            // Reusing previous frame's data - create empty prepacked struct
+            // The running indices will still be used for baseInstance calculation
+            PrepackedPrimitives::default()
+        };
+
+        let buffer_gpu_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
 
         // Update viewport size buffer
         let viewport_data: [i32; 2] = [viewport_size.width.0, viewport_size.height.0];
@@ -971,12 +1304,18 @@ impl Metal4Renderer {
             );
         }
 
+        // Bind all type buffers ONCE for the entire render pass (bind-once pattern)
+        // Individual draw calls use baseInstance to select their data slice
+        prepacked.bind_type_buffers(&self.argument_table, buffer_gpu_addr);
+
         // 7. Render each batch in the scene
         // We use Option<encoder> because backdrop blur and paths require breaking the render pass
         let mut current_encoder: Option<Retained<ProtocolObject<dyn MTL4RenderCommandEncoder>>> = Some(encoder);
 
         // Note: batches were already collected during the residency pre-scan above
         // Use index-based iteration to allow skipping consecutive path batches after batching
+        // instance_offset is only used for non-prepacked types (Paths, Surfaces)
+        let mut instance_offset = prepacked.total_bytes;
         let mut batch_index = 0;
         while batch_index < batches.len() {
             let batch = &batches[batch_index];
@@ -987,58 +1326,32 @@ impl Metal4Renderer {
             };
 
             let success = match batch {
-                PrimitiveBatch::Quads(quads, transforms) => {
-                    self.draw_quads_mtl4(
-                        quads,
-                        transforms,
-                        &mut instance_buffer,
-                        &mut instance_offset,
-                        encoder,
-                        write_instances,
-                    )
+                PrimitiveBatch::Quads(quads, _) => {
+                    self.draw_quads_prepacked(quads.len(), &mut prepacked, encoder)
                 }
-                PrimitiveBatch::Shadows(shadows, transforms) => {
-                    self.draw_shadows_mtl4(
-                        shadows,
-                        transforms,
-                        &mut instance_buffer,
-                        &mut instance_offset,
-                        encoder,
-                        write_instances,
-                    )
+                PrimitiveBatch::Shadows(shadows, _) => {
+                    self.draw_shadows_prepacked(shadows.len(), &mut prepacked, encoder)
                 }
-                PrimitiveBatch::Underlines(underlines, transforms) => {
-                    self.draw_underlines_mtl4(
-                        underlines,
-                        transforms,
-                        &mut instance_buffer,
-                        &mut instance_offset,
-                        encoder,
-                        write_instances,
-                    )
+                PrimitiveBatch::Underlines(underlines, _) => {
+                    self.draw_underlines_prepacked(underlines.len(), &mut prepacked, encoder)
                 }
                 PrimitiveBatch::MonochromeSprites { texture_id, sprites } => {
-                    self.draw_monochrome_sprites_mtl4(
+                    self.draw_monochrome_sprites_prepacked(
                         *texture_id,
-                        sprites,
-                        &mut instance_buffer,
-                        &mut instance_offset,
+                        sprites.len(),
+                        &mut prepacked,
                         encoder,
-                        write_instances,
                     )
                 }
-                PrimitiveBatch::PolychromeSprites { texture_id, sprites, transforms } => {
-                    self.draw_polychrome_sprites_mtl4(
+                PrimitiveBatch::PolychromeSprites { texture_id, sprites, .. } => {
+                    self.draw_polychrome_sprites_prepacked(
                         *texture_id,
-                        sprites,
-                        transforms,
-                        &mut instance_buffer,
-                        &mut instance_offset,
+                        sprites.len(),
+                        &mut prepacked,
                         encoder,
-                        write_instances,
                     )
                 }
-                PrimitiveBatch::BackdropBlurs(blurs, transforms) => {
+                PrimitiveBatch::BackdropBlurs(blurs, _) => {
                     // Backdrop blur requires:
                     // 1. End current render encoder
                     // 2. Copy drawable to backdrop texture (via compute encoder)
@@ -1061,16 +1374,14 @@ impl Metal4Renderer {
                         BarrierType::AfterBlit,
                     );
 
+                    // Re-bind type buffers for new encoder (bind-once per render pass)
+                    if let Some(ref _enc) = current_encoder {
+                        prepacked.bind_type_buffers(&self.argument_table, buffer_gpu_addr);
+                    }
+
                     if did_copy {
                         if let Some(ref enc) = current_encoder {
-                            self.draw_backdrop_blurs_mtl4(
-                                blurs,
-                                transforms,
-                                &mut instance_buffer,
-                                &mut instance_offset,
-                                enc,
-                                write_instances,
-                            )
+                            self.draw_backdrop_blurs_prepacked(blurs.len(), &mut prepacked, enc)
                         } else {
                             false
                         }
@@ -1123,6 +1434,11 @@ impl Metal4Renderer {
                         MTLLoadAction::Load,
                         BarrierType::AfterRender,
                     );
+
+                    // Re-bind type buffers for new encoder (bind-once per render pass)
+                    if let Some(ref _enc) = current_encoder {
+                        prepacked.bind_type_buffers(&self.argument_table, buffer_gpu_addr);
+                    }
 
                     let success = if did_draw {
                         if let Some(ref enc) = current_encoder {
@@ -1228,262 +1544,114 @@ impl Metal4Renderer {
     }
 
     // ========================================================================
-    // Metal 4 Draw Methods for Each Primitive Type
+    // Metal 4 Draw Methods for Each Primitive Type (Prepacked with baseInstance)
     // ========================================================================
 
-    fn draw_quads_mtl4(
+    /// Draw quads using prepacked data with baseInstance optimization.
+    /// Buffer is already bound; uses baseInstance to select the correct slice.
+    fn draw_quads_prepacked(
         &self,
-        quads: &[crate::Quad],
-        transforms: &[crate::TransformationMatrix],
-        instance_buffer: &mut super::metal_renderer::InstanceBuffer,
-        instance_offset: &mut usize,
+        count: usize,
+        prepacked: &mut PrepackedPrimitives,
         encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
-        write_instances: bool,
     ) -> bool {
-        if quads.is_empty() {
+        if count == 0 {
             return true;
         }
 
-        align_offset(instance_offset);
-        let quads_offset = *instance_offset;
+        let base_instance = prepacked.quads_next_index;
+        prepacked.quads_next_index += count;
 
-        // Calculate sizes
-        let quads_bytes = mem::size_of_val(quads);
-        let mut transforms_offset = quads_offset + quads_bytes;
-        align_offset(&mut transforms_offset);
-        let transforms_bytes = mem::size_of_val(transforms);
-        let next_offset = transforms_offset + transforms_bytes;
-
-        if next_offset > instance_buffer.size() {
-            return false;
-        }
-
-        // Copy data to instance buffer
-        if write_instances {
-            unsafe {
-                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-                ptr::copy_nonoverlapping(
-                    quads.as_ptr() as *const u8,
-                    buffer_ptr.add(quads_offset),
-                    quads_bytes,
-                );
-                ptr::copy_nonoverlapping(
-                    transforms.as_ptr() as *const u8,
-                    buffer_ptr.add(transforms_offset),
-                    transforms_bytes,
-                );
-            }
-        }
-
-        // Set pipeline (argument table is already bound for the render pass)
         encoder.setRenderPipelineState(self.quad_pipeline.as_objc2());
 
-        // Bind batch-specific resources to argument table
-        let buffer_gpu_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
         unsafe {
-            self.argument_table.setAddress_atIndex(
-                buffer_gpu_addr + quads_offset as u64,
-                BufferBindingIndex::Primitives as NSUInteger,
-            );
-            self.argument_table.setAddress_atIndex(
-                buffer_gpu_addr + transforms_offset as u64,
-                BufferBindingIndex::Transforms as NSUInteger,
-            );
-        }
-
-        // Draw
-        unsafe {
-            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
                 MTLPrimitiveType::Triangle,
                 0,
                 6,
-                quads.len() as NSUInteger,
+                count as NSUInteger,
+                base_instance as NSUInteger,
             );
         }
 
-        *instance_offset = next_offset;
         true
     }
 
-    fn draw_shadows_mtl4(
+    /// Draw shadows using prepacked data with baseInstance optimization.
+    fn draw_shadows_prepacked(
         &self,
-        shadows: &[crate::Shadow],
-        transforms: &[crate::TransformationMatrix],
-        instance_buffer: &mut super::metal_renderer::InstanceBuffer,
-        instance_offset: &mut usize,
+        count: usize,
+        prepacked: &mut PrepackedPrimitives,
         encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
-        write_instances: bool,
     ) -> bool {
-        if shadows.is_empty() {
+        if count == 0 {
             return true;
         }
 
-        align_offset(instance_offset);
-        let shadows_offset = *instance_offset;
+        let base_instance = prepacked.shadows_next_index;
+        prepacked.shadows_next_index += count;
 
-        let shadows_bytes = mem::size_of_val(shadows);
-        let mut transforms_offset = shadows_offset + shadows_bytes;
-        align_offset(&mut transforms_offset);
-        let transforms_bytes = mem::size_of_val(transforms);
-        let next_offset = transforms_offset + transforms_bytes;
-
-        if next_offset > instance_buffer.size() {
-            return false;
-        }
-
-        if write_instances {
-            unsafe {
-                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-                ptr::copy_nonoverlapping(
-                    shadows.as_ptr() as *const u8,
-                    buffer_ptr.add(shadows_offset),
-                    shadows_bytes,
-                );
-                ptr::copy_nonoverlapping(
-                    transforms.as_ptr() as *const u8,
-                    buffer_ptr.add(transforms_offset),
-                    transforms_bytes,
-                );
-            }
-        }
-
-        // Set pipeline (argument table is already bound for the render pass)
         encoder.setRenderPipelineState(self.shadow_pipeline.as_objc2());
 
-        // Bind resources
-        let buffer_gpu_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
         unsafe {
-            self.argument_table.setAddress_atIndex(
-                buffer_gpu_addr + shadows_offset as u64,
-                BufferBindingIndex::Primitives as NSUInteger,
-            );
-            self.argument_table.setAddress_atIndex(
-                buffer_gpu_addr + transforms_offset as u64,
-                BufferBindingIndex::Transforms as NSUInteger,
-            );
-        }
-
-        // Draw
-        unsafe {
-            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
                 MTLPrimitiveType::Triangle,
                 0,
                 6,
-                shadows.len() as NSUInteger,
+                count as NSUInteger,
+                base_instance as NSUInteger,
             );
         }
 
-        *instance_offset = next_offset;
         true
     }
 
-    fn draw_underlines_mtl4(
+    /// Draw underlines using prepacked data with baseInstance optimization.
+    fn draw_underlines_prepacked(
         &self,
-        underlines: &[crate::Underline],
-        transforms: &[crate::TransformationMatrix],
-        instance_buffer: &mut super::metal_renderer::InstanceBuffer,
-        instance_offset: &mut usize,
+        count: usize,
+        prepacked: &mut PrepackedPrimitives,
         encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
-        write_instances: bool,
     ) -> bool {
-        if underlines.is_empty() {
+        if count == 0 {
             return true;
         }
 
-        align_offset(instance_offset);
-        let underlines_offset = *instance_offset;
+        let base_instance = prepacked.underlines_next_index;
+        prepacked.underlines_next_index += count;
 
-        let underlines_bytes = mem::size_of_val(underlines);
-        let mut transforms_offset = underlines_offset + underlines_bytes;
-        align_offset(&mut transforms_offset);
-        let transforms_bytes = mem::size_of_val(transforms);
-        let next_offset = transforms_offset + transforms_bytes;
-
-        if next_offset > instance_buffer.size() {
-            return false;
-        }
-
-        if write_instances {
-            unsafe {
-                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-                ptr::copy_nonoverlapping(
-                    underlines.as_ptr() as *const u8,
-                    buffer_ptr.add(underlines_offset),
-                    underlines_bytes,
-                );
-                ptr::copy_nonoverlapping(
-                    transforms.as_ptr() as *const u8,
-                    buffer_ptr.add(transforms_offset),
-                    transforms_bytes,
-                );
-            }
-        }
-
-        // Set pipeline (argument table is already bound for the render pass)
         encoder.setRenderPipelineState(self.underline_pipeline.as_objc2());
 
-        // Bind resources
-        let buffer_gpu_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
         unsafe {
-            self.argument_table.setAddress_atIndex(
-                buffer_gpu_addr + underlines_offset as u64,
-                BufferBindingIndex::Primitives as NSUInteger,
-            );
-            self.argument_table.setAddress_atIndex(
-                buffer_gpu_addr + transforms_offset as u64,
-                BufferBindingIndex::Transforms as NSUInteger,
-            );
-        }
-
-        // Draw
-        unsafe {
-            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
                 MTLPrimitiveType::Triangle,
                 0,
                 6,
-                underlines.len() as NSUInteger,
+                count as NSUInteger,
+                base_instance as NSUInteger,
             );
         }
 
-        *instance_offset = next_offset;
         true
     }
 
-    fn draw_monochrome_sprites_mtl4(
+    /// Draw monochrome sprites using prepacked data with baseInstance optimization.
+    /// Still needs to bind texture per batch (different atlas textures).
+    fn draw_monochrome_sprites_prepacked(
         &self,
         texture_id: crate::AtlasTextureId,
-        sprites: &[crate::MonochromeSprite],
-        instance_buffer: &mut super::metal_renderer::InstanceBuffer,
-        instance_offset: &mut usize,
+        count: usize,
+        prepacked: &mut PrepackedPrimitives,
         encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
-        write_instances: bool,
     ) -> bool {
-        if sprites.is_empty() {
+        if count == 0 {
             return true;
         }
 
-        align_offset(instance_offset);
-        let sprites_offset = *instance_offset;
-        let sprites_bytes = mem::size_of_val(sprites);
-        let next_offset = sprites_offset + sprites_bytes;
-
-        if next_offset > instance_buffer.size() {
-            return false;
-        }
-
-        if write_instances {
-            unsafe {
-                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-                ptr::copy_nonoverlapping(
-                    sprites.as_ptr() as *const u8,
-                    buffer_ptr.add(sprites_offset),
-                    sprites_bytes,
-                );
-            }
-        }
+        let base_instance = prepacked.mono_sprites_next_index;
+        prepacked.mono_sprites_next_index += count;
 
         // Get atlas texture and its size
-        // Note: Texture was already added to residency set during batch pre-scan
         let atlas_texture: metal::Texture = self.sprite_atlas.metal_texture(texture_id);
         let atlas_size: [i32; 2] = [
             atlas_texture.width() as i32,
@@ -1496,89 +1664,49 @@ impl Metal4Renderer {
             *ptr = atlas_size;
         }
 
-        // Set pipeline (argument table is already bound for the render pass)
         encoder.setRenderPipelineState(self.mono_sprite_pipeline.as_objc2());
 
-        // Bind sprite data and atlas size
-        let buffer_gpu_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
+        // Bind atlas size and texture (still needed per batch)
         unsafe {
-            self.argument_table.setAddress_atIndex(
-                buffer_gpu_addr + sprites_offset as u64,
-                BufferBindingIndex::Primitives as NSUInteger,
-            );
-
-            // Bind atlas size buffer
             self.argument_table.setAddress_atIndex(
                 self.atlas_size_buffer.as_objc2().gpuAddress(),
                 BufferBindingIndex::AtlasSize as NSUInteger,
             );
 
-            // Bind atlas texture
             self.argument_table.setTexture_atIndex(
                 atlas_texture.as_objc2().gpuResourceID(),
                 TextureBindingIndex::Atlas as NSUInteger,
             );
-        }
 
-        // Draw
-        unsafe {
-            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
                 MTLPrimitiveType::Triangle,
                 0,
                 6,
-                sprites.len() as NSUInteger,
+                count as NSUInteger,
+                base_instance as NSUInteger,
             );
         }
 
-        *instance_offset = next_offset;
         true
     }
 
-    fn draw_polychrome_sprites_mtl4(
+    /// Draw polychrome sprites using prepacked data with baseInstance optimization.
+    /// Still needs to bind texture per batch (different atlas textures).
+    fn draw_polychrome_sprites_prepacked(
         &self,
-        texture_id: crate::AtlasTextureId,
-        sprites: &[crate::PolychromeSprite],
-        transforms: &[crate::TransformationMatrix],
-        instance_buffer: &mut super::metal_renderer::InstanceBuffer,
-        instance_offset: &mut usize,
+        texture_id: AtlasTextureId,
+        count: usize,
+        prepacked: &mut PrepackedPrimitives,
         encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
-        write_instances: bool,
     ) -> bool {
-        if sprites.is_empty() {
+        if count == 0 {
             return true;
         }
 
-        align_offset(instance_offset);
-        let sprites_offset = *instance_offset;
-
-        let sprites_bytes = mem::size_of_val(sprites);
-        let mut transforms_offset = sprites_offset + sprites_bytes;
-        align_offset(&mut transforms_offset);
-        let transforms_bytes = mem::size_of_val(transforms);
-        let next_offset = transforms_offset + transforms_bytes;
-
-        if next_offset > instance_buffer.size() {
-            return false;
-        }
-
-        if write_instances {
-            unsafe {
-                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-                ptr::copy_nonoverlapping(
-                    sprites.as_ptr() as *const u8,
-                    buffer_ptr.add(sprites_offset),
-                    sprites_bytes,
-                );
-                ptr::copy_nonoverlapping(
-                    transforms.as_ptr() as *const u8,
-                    buffer_ptr.add(transforms_offset),
-                    transforms_bytes,
-                );
-            }
-        }
+        let base_instance = prepacked.poly_sprites_next_index;
+        prepacked.poly_sprites_next_index += count;
 
         // Get atlas texture and its size
-        // Note: Texture was already added to residency set during batch pre-scan
         let atlas_texture: metal::Texture = self.sprite_atlas.metal_texture(texture_id);
         let atlas_size: [i32; 2] = [
             atlas_texture.width() as i32,
@@ -1591,42 +1719,68 @@ impl Metal4Renderer {
             *ptr = atlas_size;
         }
 
-        // Set pipeline (argument table is already bound for the render pass)
         encoder.setRenderPipelineState(self.poly_sprite_pipeline.as_objc2());
 
-        // Bind resources
-        let buffer_gpu_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
+        // Bind atlas size and texture (still needed per batch)
         unsafe {
-            self.argument_table.setAddress_atIndex(
-                buffer_gpu_addr + sprites_offset as u64,
-                BufferBindingIndex::Primitives as NSUInteger,
-            );
-            self.argument_table.setAddress_atIndex(
-                buffer_gpu_addr + transforms_offset as u64,
-                BufferBindingIndex::Transforms as NSUInteger,
-            );
-            // Bind atlas size buffer
             self.argument_table.setAddress_atIndex(
                 self.atlas_size_buffer.as_objc2().gpuAddress(),
                 BufferBindingIndex::AtlasSize as NSUInteger,
             );
+
             self.argument_table.setTexture_atIndex(
                 atlas_texture.as_objc2().gpuResourceID(),
                 TextureBindingIndex::Atlas as NSUInteger,
             );
-        }
 
-        // Draw
-        unsafe {
-            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
                 MTLPrimitiveType::Triangle,
                 0,
                 6,
-                sprites.len() as NSUInteger,
+                count as NSUInteger,
+                base_instance as NSUInteger,
             );
         }
 
-        *instance_offset = next_offset;
+        true
+    }
+
+    /// Draw backdrop blurs using prepacked data with baseInstance optimization.
+    fn draw_backdrop_blurs_prepacked(
+        &self,
+        count: usize,
+        prepacked: &mut PrepackedPrimitives,
+        encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
+    ) -> bool {
+        if count == 0 {
+            return true;
+        }
+
+        let base_instance = prepacked.backdrop_blurs_next_index;
+        prepacked.backdrop_blurs_next_index += count;
+
+        encoder.setRenderPipelineState(self.backdrop_blur_pipeline.as_objc2());
+
+        // Bind backdrop texture
+        if let Some(ref backdrop_tex) = self.backdrop_texture {
+            unsafe {
+                self.argument_table.setTexture_atIndex(
+                    backdrop_tex.as_objc2().gpuResourceID(),
+                    TextureBindingIndex::Backdrop as NSUInteger,
+                );
+            }
+        }
+
+        unsafe {
+            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
+                MTLPrimitiveType::Triangle,
+                0,
+                6,
+                count as NSUInteger,
+                base_instance as NSUInteger,
+            );
+        }
+
         true
     }
 
@@ -1771,91 +1925,6 @@ impl Metal4Renderer {
         // Producer barriers are redundant when consumer barriers are in place.
 
         compute_encoder.endEncoding();
-        true
-    }
-
-    /// Draws backdrop blur quads.
-    fn draw_backdrop_blurs_mtl4(
-        &self,
-        blurs: &[crate::BackdropBlur],
-        transforms: &[crate::TransformationMatrix],
-        instance_buffer: &mut super::metal_renderer::InstanceBuffer,
-        instance_offset: &mut usize,
-        encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
-        write_instances: bool,
-    ) -> bool {
-        if blurs.is_empty() {
-            return true;
-        }
-
-        let Some(backdrop_texture) = &self.backdrop_texture else {
-            return false;
-        };
-
-        align_offset(instance_offset);
-        let blurs_offset = *instance_offset;
-
-        let blurs_bytes = mem::size_of_val(blurs);
-        let mut transforms_offset = blurs_offset + blurs_bytes;
-        align_offset(&mut transforms_offset);
-        let transforms_bytes = mem::size_of_val(transforms);
-        let next_offset = transforms_offset + transforms_bytes;
-
-        if next_offset > instance_buffer.size() {
-            return false;
-        }
-
-        // Copy blur and transform data to instance buffer
-        if write_instances {
-            unsafe {
-                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-                ptr::copy_nonoverlapping(
-                    blurs.as_ptr() as *const u8,
-                    buffer_ptr.add(blurs_offset),
-                    blurs_bytes,
-                );
-                ptr::copy_nonoverlapping(
-                    transforms.as_ptr() as *const u8,
-                    buffer_ptr.add(transforms_offset),
-                    transforms_bytes,
-                );
-            }
-        }
-
-        // Note: Backdrop texture was already added to residency set during batch pre-scan
-
-        // Set backdrop blur pipeline
-        encoder.setRenderPipelineState(self.backdrop_blur_pipeline.as_objc2());
-
-        // Bind resources
-        let buffer_gpu_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
-        unsafe {
-            self.argument_table.setAddress_atIndex(
-                buffer_gpu_addr + blurs_offset as u64,
-                BufferBindingIndex::Primitives as NSUInteger,
-            );
-            self.argument_table.setAddress_atIndex(
-                buffer_gpu_addr + transforms_offset as u64,
-                BufferBindingIndex::Transforms as NSUInteger,
-            );
-            // Bind backdrop texture
-            self.argument_table.setTexture_atIndex(
-                backdrop_texture.as_objc2().gpuResourceID(),
-                TextureBindingIndex::Backdrop as NSUInteger,
-            );
-        }
-
-        // Draw
-        unsafe {
-            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                MTLPrimitiveType::Triangle,
-                0,
-                6,
-                blurs.len() as NSUInteger,
-            );
-        }
-
-        *instance_offset = next_offset;
         true
     }
 
@@ -2059,12 +2128,12 @@ impl Metal4Renderer {
         // Set path sprite pipeline
         encoder.setRenderPipelineState(self.path_sprite_pipeline.as_objc2());
 
-        // Bind resources
+        // Bind resources to type-specific slot
         let buffer_gpu_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
         unsafe {
             self.argument_table.setAddress_atIndex(
                 buffer_gpu_addr + *instance_offset as u64,
-                BufferBindingIndex::Primitives as NSUInteger,
+                BufferBindingIndex::PathSprites as NSUInteger,
             );
             // Bind intermediate texture
             self.argument_table.setTexture_atIndex(
@@ -2315,12 +2384,12 @@ impl Metal4Renderer {
         // Set path sprite pipeline
         encoder.setRenderPipelineState(self.path_sprite_pipeline.as_objc2());
 
-        // Bind resources
+        // Bind resources to type-specific slot
         let buffer_gpu_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
         unsafe {
             self.argument_table.setAddress_atIndex(
                 buffer_gpu_addr + *instance_offset as u64,
-                BufferBindingIndex::Primitives as NSUInteger,
+                BufferBindingIndex::PathSprites as NSUInteger,
             );
             // Bind intermediate texture
             self.argument_table.setTexture_atIndex(
@@ -2423,12 +2492,12 @@ impl Metal4Renderer {
                 *ptr = texture_size_data;
             }
 
-            // Bind resources
+            // Bind resources to type-specific slot
             let buffer_gpu_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
             unsafe {
                 self.argument_table.setAddress_atIndex(
                     buffer_gpu_addr + *instance_offset as u64,
-                    BufferBindingIndex::Primitives as NSUInteger,
+                    BufferBindingIndex::Surfaces as NSUInteger,
                 );
                 self.argument_table.setAddress_atIndex(
                     self.texture_size_buffer.as_objc2().gpuAddress(),
