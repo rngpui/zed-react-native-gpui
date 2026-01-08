@@ -17,13 +17,14 @@
 
 use crate::{
     AbsoluteLength, Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent,
-    DispatchPhase, Display, Element, ElementId, Entity, FocusHandle, Global, GlobalElementId,
-    Hitbox, HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext,
-    KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent,
-    MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent,
-    Overflow, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
-    StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea,
-    ContentHash, ContentHasher, style_content_hash, point, px, size,
+    ContentHash, ContentHasher, ContentMask, DispatchPhase, Display, Element, ElementId, Entity,
+    FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, InspectorElementId,
+    IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent,
+    LayoutId, ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent,
+    MousePressureEvent, MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render,
+    ScrollWheelEvent, SharedString, Size, Style, StyleRefinement, Styled, Task, TooltipId,
+    Visibility, Window, WindowControlArea, point, px, size, style_content_hash,
+    window::{PaintIndex, PrepaintStateIndex, SubtreeCacheEntry},
 };
 use collections::HashMap;
 use refineable::Refineable;
@@ -34,8 +35,10 @@ use std::{
     cell::RefCell,
     cmp::Ordering,
     fmt::Debug,
+    hash::{Hash, Hasher},
     marker::PhantomData,
     mem,
+    ops::Range,
     rc::Rc,
     sync::Arc,
     time::Duration,
@@ -1322,6 +1325,165 @@ impl Div {
         self.image_cache = Some(Box::new(cache));
         self
     }
+
+    /// Compute a hash signature for this Div's subtree configuration.
+    /// Used for subtree caching to detect unchanged subtrees.
+    fn compute_subtree_signature(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+
+        let mut hasher = DefaultHasher::new();
+
+        // Hash children count - if structure changes, this invalidates
+        self.children.len().hash(&mut hasher);
+
+        // Hash the element_id since different IDs likely means different content
+        if let Some(ref id) = self.interactivity.element_id {
+            id.hash(&mut hasher);
+        }
+
+        hasher.finish()
+    }
+
+    /// Check if this Div can use subtree caching.
+    /// Some features require full processing each frame.
+    fn can_cache_subtree(&self) -> bool {
+        // Must have an element ID to cache
+        self.interactivity.element_id.is_some()
+            // Can't cache if we have a prepaint listener (needs children_bounds)
+            && self.prepaint_listener.is_none()
+            // Can't cache if we have scroll tracking (needs child_bounds updates each frame)
+            && self.interactivity.tracked_scroll_handle.is_none()
+            // Can't cache scrollable elements (scroll offset changes frequently)
+            // Note: Check overflow style directly since scroll_offset isn't set until interactivity.prepaint
+            && self.interactivity.base_style.overflow.x != Some(Overflow::Scroll)
+            && self.interactivity.base_style.overflow.y != Some(Overflow::Scroll)
+            // Can't cache if we have hover styles (state changes frequently)
+            && self.interactivity.hover_style.is_none()
+            && self.interactivity.group_hover_style.is_none()
+    }
+
+    /// Internal prepaint implementation without caching logic
+    fn prepaint_uncached(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        request_layout: &mut DivFrameState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Hitbox> {
+        let image_cache = self
+            .image_cache
+            .as_mut()
+            .map(|provider| provider.provide(window, cx));
+
+        let has_prepaint_listener = self.prepaint_listener.is_some();
+        let mut children_bounds = Vec::with_capacity(if has_prepaint_listener {
+            request_layout.child_layout_ids.len()
+        } else {
+            0
+        });
+
+        let mut child_min = point(Pixels::MAX, Pixels::MAX);
+        let mut child_max = Point::default();
+        if let Some(handle) = self.interactivity.scroll_anchor.as_ref() {
+            *handle.last_origin.borrow_mut() = bounds.origin - window.element_offset();
+        }
+        let content_size = if request_layout.child_layout_ids.is_empty() {
+            bounds.size
+        } else if let Some(scroll_handle) = self.interactivity.tracked_scroll_handle.as_ref() {
+            let mut state = scroll_handle.0.borrow_mut();
+            state.child_bounds = Vec::with_capacity(request_layout.child_layout_ids.len());
+            for child_layout_id in &request_layout.child_layout_ids {
+                let child_bounds = window.layout_bounds(*child_layout_id);
+                child_min = child_min.min(&child_bounds.origin);
+                child_max = child_max.max(&child_bounds.bottom_right());
+                state.child_bounds.push(child_bounds);
+            }
+            (child_max - child_min).into()
+        } else {
+            for child_layout_id in &request_layout.child_layout_ids {
+                let child_bounds = window.layout_bounds(*child_layout_id);
+                child_min = child_min.min(&child_bounds.origin);
+                child_max = child_max.max(&child_bounds.bottom_right());
+
+                if has_prepaint_listener {
+                    children_bounds.push(child_bounds);
+                }
+            }
+            (child_max - child_min).into()
+        };
+
+        if let Some(scroll_handle) = self.interactivity.tracked_scroll_handle.as_ref() {
+            scroll_handle.scroll_to_active_item();
+        }
+
+        self.interactivity.prepaint(
+            global_id,
+            inspector_id,
+            bounds,
+            content_size,
+            window,
+            cx,
+            |style, scroll_offset, hitbox, window, cx| {
+                // skip children
+                if style.display == Display::None {
+                    return hitbox;
+                }
+
+                window.with_image_cache(image_cache, |window| {
+                    window.with_element_offset(scroll_offset, |window| {
+                        for child in &mut self.children {
+                            child.prepaint(window, cx);
+                        }
+                    });
+
+                    if let Some(listener) = self.prepaint_listener.as_ref() {
+                        listener(children_bounds, window, cx);
+                    }
+                });
+
+                hitbox
+            },
+        )
+    }
+
+    /// Internal paint implementation without caching logic
+    fn paint_uncached(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        hitbox: &mut Option<Hitbox>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let image_cache = self
+            .image_cache
+            .as_mut()
+            .map(|provider| provider.provide(window, cx));
+
+        window.with_image_cache(image_cache, |window| {
+            self.interactivity.paint(
+                global_id,
+                inspector_id,
+                bounds,
+                hitbox.as_ref(),
+                window,
+                cx,
+                |style, window, cx| {
+                    // skip children
+                    if style.display == Display::None {
+                        return;
+                    }
+
+                    for child in &mut self.children {
+                        child.paint(window, cx);
+                    }
+                },
+            )
+        });
+    }
 }
 
 /// A frame state for a `Div` element, which contains layout IDs for its children.
@@ -1332,6 +1494,29 @@ impl Div {
 /// bounds of the children after the layout phase is complete.
 pub struct DivFrameState {
     child_layout_ids: SmallVec<[LayoutId; 2]>,
+    /// Subtree cache state set during prepaint, used by paint
+    subtree_cache_state: Option<SubtreeCacheState>,
+}
+
+/// Tracks subtree caching state between prepaint and paint phases
+enum SubtreeCacheState {
+    /// Cache hit during prepaint - paint should reuse the cached paint range and update the entry
+    CacheHit {
+        id: GlobalElementId,
+        old_paint_range: Range<PaintIndex>,
+        // Updated entry from prepaint (with new prepaint_range, needs paint_range update)
+        partial_entry: SubtreeCacheEntry,
+    },
+    /// Cache miss during prepaint - paint should record and complete the cache entry
+    CacheMiss {
+        id: GlobalElementId,
+        signature: u64,
+        bounds: Bounds<Pixels>,
+        content_mask: ContentMask<Pixels>,
+        element_offset: Point<Pixels>,
+        prepaint_range: Range<PrepaintStateIndex>,
+        hitbox: Option<Hitbox>,
+    },
 }
 
 /// Interactivity state displayed an manipulated in the inspector.
@@ -1417,7 +1602,10 @@ impl Element for Div {
             )
         });
 
-        (layout_id, DivFrameState { child_layout_ids })
+        (layout_id, DivFrameState {
+            child_layout_ids,
+            subtree_cache_state: None,
+        })
     }
 
     #[stacksafe]
@@ -1430,80 +1618,82 @@ impl Element for Div {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Hitbox> {
-        let image_cache = self
-            .image_cache
-            .as_mut()
-            .map(|provider| provider.provide(window, cx));
+        // Check for subtree cache hit
+        if self.can_cache_subtree() {
+            if let Some(id) = global_id {
+                let signature = self.compute_subtree_signature();
+                let content_mask = window.content_mask();
+                let element_offset = window.element_offset();
 
-        let has_prepaint_listener = self.prepaint_listener.is_some();
-        let mut children_bounds = Vec::with_capacity(if has_prepaint_listener {
-            request_layout.child_layout_ids.len()
-        } else {
-            0
-        });
+                if let Some(cached) = window.lookup_subtree_cache(id, signature, bounds, &content_mask, element_offset) {
+                    // Cache hit - extract values before mutable operations
+                    let old_prepaint_range = cached.prepaint_range.clone();
+                    let old_paint_range = cached.paint_range.clone();
+                    let hitbox = cached.hitbox.clone();
 
-        let mut child_min = point(Pixels::MAX, Pixels::MAX);
-        let mut child_max = Point::default();
-        if let Some(handle) = self.interactivity.scroll_anchor.as_ref() {
-            *handle.last_origin.borrow_mut() = bounds.origin - window.element_offset();
-        }
-        let content_size = if request_layout.child_layout_ids.is_empty() {
-            bounds.size
-        } else if let Some(scroll_handle) = self.interactivity.tracked_scroll_handle.as_ref() {
-            let mut state = scroll_handle.0.borrow_mut();
-            state.child_bounds = Vec::with_capacity(request_layout.child_layout_ids.len());
-            for child_layout_id in &request_layout.child_layout_ids {
-                let child_bounds = window.layout_bounds(*child_layout_id);
-                child_min = child_min.min(&child_bounds.origin);
-                child_max = child_max.max(&child_bounds.bottom_right());
-                state.child_bounds.push(child_bounds);
-            }
-            (child_max - child_min).into()
-        } else {
-            for child_layout_id in &request_layout.child_layout_ids {
-                let child_bounds = window.layout_bounds(*child_layout_id);
-                child_min = child_min.min(&child_bounds.origin);
-                child_max = child_max.max(&child_bounds.bottom_right());
+                    // Record NEW prepaint start before reuse
+                    let prepaint_start = window.prepaint_index();
 
-                if has_prepaint_listener {
-                    children_bounds.push(child_bounds);
-                }
-            }
-            (child_max - child_min).into()
-        };
+                    // Reuse prepaint data from previous frame
+                    window.reuse_prepaint(old_prepaint_range);
 
-        if let Some(scroll_handle) = self.interactivity.tracked_scroll_handle.as_ref() {
-            scroll_handle.scroll_to_active_item();
-        }
+                    // Record NEW prepaint end after reuse
+                    let prepaint_end = window.prepaint_index();
 
-        self.interactivity.prepaint(
-            global_id,
-            inspector_id,
-            bounds,
-            content_size,
-            window,
-            cx,
-            |style, scroll_offset, hitbox, window, cx| {
-                // skip children
-                if style.display == Display::None {
+                    // Create partial cache entry with NEW prepaint range (paint_range updated in paint phase)
+                    let partial_entry = SubtreeCacheEntry {
+                        subtree_signature: signature,
+                        bounds,
+                        content_mask: content_mask.clone(),
+                        element_offset,
+                        prepaint_range: prepaint_start..prepaint_end,
+                        paint_range: Default::default(), // Will be set in paint phase
+                        hitbox: hitbox.clone(),
+                    };
+
+                    // Store cache hit state for paint phase
+                    request_layout.subtree_cache_state = Some(SubtreeCacheState::CacheHit {
+                        id: id.clone(),
+                        old_paint_range,
+                        partial_entry,
+                    });
+
                     return hitbox;
                 }
 
-                window.with_image_cache(image_cache, |window| {
-                    window.with_element_offset(scroll_offset, |window| {
-                        for child in &mut self.children {
-                            child.prepaint(window, cx);
-                        }
-                    });
+                // Cache miss - record prepaint start for later caching
+                let prepaint_start = window.prepaint_index();
 
-                    if let Some(listener) = self.prepaint_listener.as_ref() {
-                        listener(children_bounds, window, cx);
-                    }
+                // Do normal prepaint
+                let hitbox = self.prepaint_uncached(
+                    global_id,
+                    inspector_id,
+                    bounds,
+                    request_layout,
+                    window,
+                    cx,
+                );
+
+                // Record prepaint end
+                let prepaint_end = window.prepaint_index();
+
+                // Store cache miss state for paint phase to complete
+                request_layout.subtree_cache_state = Some(SubtreeCacheState::CacheMiss {
+                    id: id.clone(),
+                    signature,
+                    bounds,
+                    content_mask,
+                    element_offset,
+                    prepaint_range: prepaint_start..prepaint_end,
+                    hitbox: hitbox.clone(),
                 });
 
-                hitbox
-            },
-        )
+                return hitbox;
+            }
+        }
+
+        // Not cacheable - do normal prepaint
+        self.prepaint_uncached(global_id, inspector_id, bounds, request_layout, window, cx)
     }
 
     #[stacksafe]
@@ -1512,36 +1702,67 @@ impl Element for Div {
         global_id: Option<&GlobalElementId>,
         inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
+        request_layout: &mut Self::RequestLayoutState,
         hitbox: &mut Option<Hitbox>,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let image_cache = self
-            .image_cache
-            .as_mut()
-            .map(|provider| provider.provide(window, cx));
+        // Check for subtree cache state from prepaint
+        match request_layout.subtree_cache_state.take() {
+            Some(SubtreeCacheState::CacheHit { id, old_paint_range, mut partial_entry }) => {
+                // Cache hit - record NEW paint start before reuse
+                let paint_start = window.paint_index();
 
-        window.with_image_cache(image_cache, |window| {
-            self.interactivity.paint(
-                global_id,
-                inspector_id,
-                bounds,
-                hitbox.as_ref(),
-                window,
-                cx,
-                |style, window, cx| {
-                    // skip children
-                    if style.display == Display::None {
-                        return;
-                    }
+                // Reuse paint data from previous frame
+                window.reuse_paint(old_paint_range);
 
-                    for child in &mut self.children {
-                        child.paint(window, cx);
-                    }
-                },
-            )
-        });
+                // Record NEW paint end after reuse
+                let paint_end = window.paint_index();
+
+                // Update entry with NEW paint range and insert for next frame
+                partial_entry.paint_range = paint_start..paint_end;
+                window.insert_subtree_cache(id, partial_entry);
+                return;
+            }
+            Some(SubtreeCacheState::CacheMiss {
+                id,
+                signature,
+                bounds: cached_bounds,
+                content_mask,
+                element_offset,
+                prepaint_range,
+                hitbox: cached_hitbox,
+            }) => {
+                // Cache miss - record paint start
+                let paint_start = window.paint_index();
+
+                // Do normal paint
+                self.paint_uncached(global_id, inspector_id, bounds, hitbox, window, cx);
+
+                // Record paint end
+                let paint_end = window.paint_index();
+
+                // Insert complete cache entry for next frame
+                window.insert_subtree_cache(
+                    id,
+                    SubtreeCacheEntry {
+                        subtree_signature: signature,
+                        bounds: cached_bounds,
+                        content_mask,
+                        element_offset,
+                        prepaint_range,
+                        paint_range: paint_start..paint_end,
+                        hitbox: cached_hitbox,
+                    },
+                );
+                return;
+            }
+            None => {
+                // No cache state - do normal paint
+            }
+        }
+
+        self.paint_uncached(global_id, inspector_id, bounds, hitbox, window, cx);
     }
 
     fn content_hash(

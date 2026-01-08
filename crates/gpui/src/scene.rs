@@ -116,8 +116,8 @@ impl Scene {
     /// This avoids the need to clone+translate the primitive before insertion,
     /// reducing the total clone count from 2 to 1 for cached primitives.
     ///
-    /// Note: This method does NOT add to paint_operations since cached primitives
-    /// don't need Scene-to-Scene replay - they're replayed from PrimitiveCache instead.
+    /// Note: This method DOES add to paint_operations because SubtreeCache
+    /// needs complete paint_operations to replay entire subtrees correctly.
     pub fn insert_primitive_with_offset(
         &mut self,
         primitive: &Primitive,
@@ -138,13 +138,15 @@ impl Scene {
             .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
 
         // Clone with offset and content_mask applied in one pass
-        // Skip paint_operations for cached primitives to reduce clone count
+        // Also add to paint_operations for SubtreeCache replay support
         match primitive {
             Primitive::Shadow(shadow, transform) => {
                 let mut shadow = shadow.clone();
                 shadow.order = order;
                 shadow.bounds = Self::apply_offset(shadow.bounds, offset);
                 shadow.content_mask = content_mask;
+                self.paint_operations
+                    .push(PaintOperation::Primitive(Primitive::Shadow(shadow.clone(), *transform)));
                 self.shadows.push(shadow);
                 self.shadow_transforms.push(*transform);
             }
@@ -153,6 +155,8 @@ impl Scene {
                 quad.order = order;
                 quad.bounds = Self::apply_offset(quad.bounds, offset);
                 quad.content_mask = content_mask;
+                self.paint_operations
+                    .push(PaintOperation::Primitive(Primitive::Quad(quad.clone(), *transform)));
                 self.quads.push(quad);
                 self.quad_transforms.push(*transform);
             }
@@ -161,6 +165,8 @@ impl Scene {
                 blur.order = order;
                 blur.bounds = Self::apply_offset(blur.bounds, offset);
                 blur.content_mask = content_mask;
+                self.paint_operations
+                    .push(PaintOperation::Primitive(Primitive::BackdropBlur(blur.clone(), *transform)));
                 self.backdrop_blurs.push(blur);
                 self.backdrop_blur_transforms.push(*transform);
             }
@@ -177,6 +183,8 @@ impl Scene {
                     };
                     vertex.content_mask = content_mask.clone();
                 }
+                self.paint_operations
+                    .push(PaintOperation::Primitive(Primitive::Path(path.clone())));
                 self.paths.push(path);
             }
             Primitive::Underline(underline, transform) => {
@@ -184,6 +192,8 @@ impl Scene {
                 underline.order = order;
                 underline.bounds = Self::apply_offset(underline.bounds, offset);
                 underline.content_mask = content_mask;
+                self.paint_operations
+                    .push(PaintOperation::Primitive(Primitive::Underline(underline.clone(), *transform)));
                 self.underlines.push(underline);
                 self.underline_transforms.push(*transform);
             }
@@ -192,6 +202,8 @@ impl Scene {
                 sprite.order = order;
                 sprite.bounds = Self::apply_offset(sprite.bounds, offset);
                 sprite.content_mask = content_mask;
+                self.paint_operations
+                    .push(PaintOperation::Primitive(Primitive::MonochromeSprite(sprite.clone())));
                 self.monochrome_sprites.push(sprite);
             }
             Primitive::SubpixelSprite(sprite) => {
@@ -199,6 +211,8 @@ impl Scene {
                 sprite.order = order;
                 sprite.bounds = Self::apply_offset(sprite.bounds, offset);
                 sprite.content_mask = content_mask;
+                self.paint_operations
+                    .push(PaintOperation::Primitive(Primitive::SubpixelSprite(sprite.clone())));
                 self.subpixel_sprites.push(sprite);
             }
             Primitive::PolychromeSprite(sprite, transform) => {
@@ -206,6 +220,8 @@ impl Scene {
                 sprite.order = order;
                 sprite.bounds = Self::apply_offset(sprite.bounds, offset);
                 sprite.content_mask = content_mask;
+                self.paint_operations
+                    .push(PaintOperation::Primitive(Primitive::PolychromeSprite(sprite.clone(), *transform)));
                 self.polychrome_sprites.push(sprite);
                 self.polychrome_sprite_transforms.push(*transform);
             }
@@ -214,6 +230,8 @@ impl Scene {
                 surface.order = order;
                 surface.bounds = Self::apply_offset(surface.bounds, offset);
                 surface.content_mask = content_mask;
+                self.paint_operations
+                    .push(PaintOperation::Primitive(Primitive::Surface(surface.clone())));
                 self.surfaces.push(surface);
             }
         }

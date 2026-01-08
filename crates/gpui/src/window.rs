@@ -677,11 +677,33 @@ pub(crate) struct DeferredDraw {
     paint_range: Range<PaintIndex>,
 }
 
+/// Cache entry for a Div subtree's prepaint/paint results.
+/// Allows skipping recursive child processing when subtree is unchanged.
+#[derive(Clone)]
+pub(crate) struct SubtreeCacheEntry {
+    /// Hash of Div's style + children structure
+    pub(crate) subtree_signature: u64,
+    /// Bounds at time of caching
+    pub(crate) bounds: Bounds<Pixels>,
+    /// Content mask at time of caching
+    pub(crate) content_mask: ContentMask<Pixels>,
+    /// Element offset at time of caching (includes parent scroll offsets)
+    pub(crate) element_offset: Point<Pixels>,
+    /// Range in prepaint arrays (hitboxes, tooltips, etc.) for this subtree
+    pub(crate) prepaint_range: Range<PrepaintStateIndex>,
+    /// Range in paint arrays (scene, listeners, etc.) for this subtree
+    pub(crate) paint_range: Range<PaintIndex>,
+    /// Cached hitbox result from prepaint
+    pub(crate) hitbox: Option<Hitbox>,
+}
+
 pub(crate) struct Frame {
     pub(crate) focus: Option<FocusId>,
     pub(crate) window_active: bool,
     pub(crate) element_states: FxHashMap<(GlobalElementId, TypeId), ElementStateBox>,
     accessed_element_states: Vec<(GlobalElementId, TypeId)>,
+    /// Cache for Div subtree prepaint/paint results, keyed by GlobalElementId
+    pub(crate) subtree_cache: FxHashMap<GlobalElementId, SubtreeCacheEntry>,
     pub(crate) mouse_listeners: Vec<Option<AnyMouseListener>>,
     pub(crate) dispatch_tree: DispatchTree,
     pub(crate) scene: Scene,
@@ -728,6 +750,7 @@ impl Frame {
             window_active: false,
             element_states: FxHashMap::default(),
             accessed_element_states: Vec::new(),
+            subtree_cache: FxHashMap::default(),
             mouse_listeners: Vec::new(),
             dispatch_tree,
             scene: Scene::default(),
@@ -753,6 +776,7 @@ impl Frame {
     pub(crate) fn clear(&mut self) {
         self.element_states.clear();
         self.accessed_element_states.clear();
+        self.subtree_cache.clear();
         self.mouse_listeners.clear();
         self.dispatch_tree.clear();
         self.scene.clear();
@@ -2759,6 +2783,33 @@ impl Window {
             self.scale_factor(),
             operations,
         );
+    }
+
+    /// Look up a cached subtree entry from the previous frame.
+    /// Returns the entry if it matches the given signature, bounds, content mask, and element offset.
+    pub(crate) fn lookup_subtree_cache(
+        &self,
+        id: &GlobalElementId,
+        subtree_signature: u64,
+        bounds: Bounds<Pixels>,
+        content_mask: &ContentMask<Pixels>,
+        element_offset: Point<Pixels>,
+    ) -> Option<&SubtreeCacheEntry> {
+        let entry = self.rendered_frame.subtree_cache.get(id)?;
+        if entry.subtree_signature == subtree_signature
+            && entry.bounds == bounds
+            && entry.content_mask == *content_mask
+            && entry.element_offset == element_offset
+        {
+            Some(entry)
+        } else {
+            None
+        }
+    }
+
+    /// Insert a subtree cache entry for the current frame.
+    pub(crate) fn insert_subtree_cache(&mut self, id: GlobalElementId, entry: SubtreeCacheEntry) {
+        self.next_frame.subtree_cache.insert(id, entry);
     }
 
     /// Look up shaped text from the cache.
