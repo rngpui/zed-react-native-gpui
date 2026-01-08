@@ -976,7 +976,10 @@ impl Metal4Renderer {
         let mut current_encoder: Option<Retained<ProtocolObject<dyn MTL4RenderCommandEncoder>>> = Some(encoder);
 
         // Note: batches were already collected during the residency pre-scan above
-        for batch in batches {
+        // Use index-based iteration to allow skipping consecutive path batches after batching
+        let mut batch_index = 0;
+        while batch_index < batches.len() {
+            let batch = &batches[batch_index];
             // If we don't have an encoder, something went wrong (shouldn't happen)
             let Some(ref encoder) = current_encoder else {
                 log::warn!("Metal 4: No encoder available for batch");
@@ -1016,7 +1019,7 @@ impl Metal4Renderer {
                 }
                 PrimitiveBatch::MonochromeSprites { texture_id, sprites } => {
                     self.draw_monochrome_sprites_mtl4(
-                        texture_id,
+                        *texture_id,
                         sprites,
                         &mut instance_buffer,
                         &mut instance_offset,
@@ -1026,7 +1029,7 @@ impl Metal4Renderer {
                 }
                 PrimitiveBatch::PolychromeSprites { texture_id, sprites, transforms } => {
                     self.draw_polychrome_sprites_mtl4(
-                        texture_id,
+                        *texture_id,
                         sprites,
                         transforms,
                         &mut instance_buffer,
@@ -1082,15 +1085,30 @@ impl Metal4Renderer {
                     // 2. Render paths to intermediate texture (with MSAA)
                     // 3. Create new encoder with LoadAction::Load
                     // 4. Draw path sprites from intermediate
+                    //
+                    // OPTIMIZATION: Batch consecutive path groups together to reduce encoder switches.
+                    // Instead of 2 encoder switches per path batch, we do 2 for ALL consecutive batches.
+
+                    // Collect all consecutive path batches
+                    let mut path_slices: Vec<&[Path<ScaledPixels>]> = vec![paths];
+                    let mut consecutive_count = 1;
+                    while batch_index + consecutive_count < batches.len() {
+                        if let PrimitiveBatch::Paths(next_paths) = &batches[batch_index + consecutive_count] {
+                            path_slices.push(next_paths);
+                            consecutive_count += 1;
+                        } else {
+                            break;
+                        }
+                    }
 
                     // End current encoder
                     if let Some(enc) = current_encoder.take() {
                         enc.endEncoding();
                     }
 
-                    // Render paths to intermediate texture
-                    let did_draw = self.draw_paths_to_intermediate_mtl4(
-                        paths,
+                    // Render ALL paths to intermediate texture in one pass
+                    let did_draw = self.draw_paths_to_intermediate_batched_mtl4(
+                        &path_slices,
                         &mut instance_buffer,
                         &mut instance_offset,
                         viewport_size,
@@ -1106,10 +1124,11 @@ impl Metal4Renderer {
                         BarrierType::AfterRender,
                     );
 
-                    if did_draw {
+                    let success = if did_draw {
                         if let Some(ref enc) = current_encoder {
-                            self.draw_paths_from_intermediate_mtl4(
-                                paths,
+                            // Composite ALL path sprites in one pass
+                            self.draw_paths_from_intermediate_batched_mtl4(
+                                &path_slices,
                                 &mut instance_buffer,
                                 &mut instance_offset,
                                 enc,
@@ -1121,7 +1140,14 @@ impl Metal4Renderer {
                     } else {
                         // Intermediate draw failed (likely buffer overflow) - return false to trigger retry
                         false
-                    }
+                    };
+
+                    // Skip the consecutive path batches we already processed
+                    // (batch_index will be incremented by 1 at the end of the loop,
+                    // so we skip consecutive_count - 1 additional batches here)
+                    batch_index += consecutive_count - 1;
+
+                    success
                 }
                 PrimitiveBatch::Surfaces(surfaces) => {
                     // Surfaces render video frames using YCbCr textures
@@ -1159,6 +1185,8 @@ impl Metal4Renderer {
                 // Return error to trigger retry with larger buffer
                 return Err(instance_buffer);
             }
+
+            batch_index += 1;
         }
 
         // 8. End encoding (if we still have an encoder)
@@ -2046,6 +2074,262 @@ impl Metal4Renderer {
         }
 
         // Draw
+        unsafe {
+            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                MTLPrimitiveType::Triangle,
+                0,
+                6,
+                sprites.len() as NSUInteger,
+            );
+        }
+
+        *instance_offset = next_offset;
+        true
+    }
+
+    /// Renders multiple path batches to the intermediate texture in a single pass.
+    /// This batched version reduces encoder switches when there are consecutive path batches.
+    fn draw_paths_to_intermediate_batched_mtl4(
+        &self,
+        path_slices: &[&[Path<ScaledPixels>]],
+        instance_buffer: &mut super::metal_renderer::InstanceBuffer,
+        instance_offset: &mut usize,
+        viewport_size: Size<DevicePixels>,
+        write_instances: bool,
+    ) -> bool {
+        // Fast path: if only one slice, delegate to the original function
+        if path_slices.len() == 1 {
+            return self.draw_paths_to_intermediate_mtl4(
+                path_slices[0],
+                instance_buffer,
+                instance_offset,
+                viewport_size,
+                write_instances,
+            );
+        }
+
+        // Check if we have any paths at all
+        let total_paths: usize = path_slices.iter().map(|s| s.len()).sum();
+        if total_paths == 0 {
+            return true;
+        }
+
+        let Some(intermediate_texture) = &self.path_intermediate_texture else {
+            return false;
+        };
+
+        // Build vertex data from ALL paths across all slices
+        align_offset(instance_offset);
+        let mut vertices = Vec::new();
+        for paths in path_slices.iter() {
+            for path in paths.iter() {
+                vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
+                    xy_position: v.xy_position,
+                    st_position: v.st_position,
+                    color: path.color,
+                    bounds: path.bounds.intersect(&path.content_mask.bounds),
+                }));
+            }
+        }
+
+        if vertices.is_empty() {
+            return true;
+        }
+
+        let vertices_bytes = mem::size_of_val(vertices.as_slice());
+        let next_offset = *instance_offset + vertices_bytes;
+
+        if next_offset > instance_buffer.size() {
+            return false;
+        }
+
+        // Copy vertex data to instance buffer
+        if write_instances {
+            unsafe {
+                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
+                ptr::copy_nonoverlapping(
+                    vertices.as_ptr() as *const u8,
+                    buffer_ptr.add(*instance_offset),
+                    vertices_bytes,
+                );
+            }
+        }
+
+        // Configure cached intermediate render pass descriptor
+        unsafe {
+            let color_attachments = self.intermediate_render_pass_desc.colorAttachments();
+            let color_attachment = color_attachments.objectAtIndexedSubscript(0);
+            color_attachment.setLoadAction(MTLLoadAction::Clear);
+            color_attachment.setClearColor(objc2_metal::MTLClearColor {
+                red: 0.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 0.0,
+            });
+
+            // Use MSAA if available
+            if let Some(msaa_texture) = &self.path_intermediate_msaa_texture {
+                color_attachment.setTexture(Some(msaa_texture.as_objc2()));
+                color_attachment.setResolveTexture(Some(intermediate_texture.as_objc2()));
+                color_attachment.setStoreAction(MTLStoreAction::MultisampleResolve);
+            } else {
+                color_attachment.setTexture(Some(intermediate_texture.as_objc2()));
+                color_attachment.setStoreAction(MTLStoreAction::Store);
+            }
+        }
+
+        let Some(encoder) = self.command_buffer.renderCommandEncoderWithDescriptor(&self.intermediate_render_pass_desc) else {
+            return false;
+        };
+
+        // Set viewport for intermediate texture
+        encoder.setViewport(MTLViewport {
+            originX: 0.0,
+            originY: 0.0,
+            width: viewport_size.width.0 as f64,
+            height: viewport_size.height.0 as f64,
+            znear: 0.0,
+            zfar: 1.0,
+        });
+
+        // Set argument table
+        encoder.setArgumentTable_atStages(
+            &self.argument_table,
+            MTLRenderStages::Vertex | MTLRenderStages::Fragment,
+        );
+
+        // Set path rasterization pipeline
+        encoder.setRenderPipelineState(self.path_rasterization_pipeline.as_objc2());
+
+        // Bind vertex data
+        let buffer_gpu_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
+        unsafe {
+            self.argument_table.setAddress_atIndex(
+                buffer_gpu_addr + *instance_offset as u64,
+                BufferBindingIndex::PathVertices as NSUInteger,
+            );
+            self.argument_table.setAddress_atIndex(
+                self.viewport_size_buffer.as_objc2().gpuAddress(),
+                BufferBindingIndex::AtlasSize as NSUInteger,
+            );
+        }
+
+        // Draw all path vertices in one draw call
+        unsafe {
+            encoder.drawPrimitives_vertexStart_vertexCount(
+                MTLPrimitiveType::Triangle,
+                0,
+                vertices.len() as NSUInteger,
+            );
+        }
+
+        encoder.endEncoding();
+
+        *instance_offset = next_offset;
+        true
+    }
+
+    /// Draws path sprites from multiple path batches in a single pass.
+    /// This batched version reduces encoder switches when there are consecutive path batches.
+    fn draw_paths_from_intermediate_batched_mtl4(
+        &self,
+        path_slices: &[&[Path<ScaledPixels>]],
+        instance_buffer: &mut super::metal_renderer::InstanceBuffer,
+        instance_offset: &mut usize,
+        encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
+        write_instances: bool,
+    ) -> bool {
+        // Fast path: if only one slice, delegate to the original function
+        if path_slices.len() == 1 {
+            return self.draw_paths_from_intermediate_mtl4(
+                path_slices[0],
+                instance_buffer,
+                instance_offset,
+                encoder,
+                write_instances,
+            );
+        }
+
+        // Check if we have any paths at all
+        let total_paths: usize = path_slices.iter().map(|s| s.len()).sum();
+        if total_paths == 0 {
+            return true;
+        }
+
+        let Some(intermediate_texture) = &self.path_intermediate_texture else {
+            return false;
+        };
+
+        // Build sprites from ALL paths across all slices
+        // When copying paths from the intermediate texture to the drawable,
+        // each pixel must only be copied once, in case of transparent paths.
+        //
+        // We need to handle each original path slice separately to respect
+        // the draw order semantics within each batch.
+        let mut sprites: Vec<PathSprite> = Vec::new();
+        for paths in path_slices.iter() {
+            if paths.is_empty() {
+                continue;
+            }
+
+            let first_path = &paths[0];
+            if paths.last().unwrap().order == first_path.order {
+                // All paths in this slice have the same draw order - use individual bounds
+                sprites.extend(paths.iter().map(|path| PathSprite {
+                    bounds: path.clipped_bounds(),
+                }));
+            } else {
+                // Mixed draw orders - use spanning rect for this slice
+                let mut bounds = first_path.clipped_bounds();
+                for path in paths.iter().skip(1) {
+                    bounds = bounds.union(&path.clipped_bounds());
+                }
+                sprites.push(PathSprite { bounds });
+            }
+        }
+
+        if sprites.is_empty() {
+            return true;
+        }
+
+        align_offset(instance_offset);
+        let sprites_bytes = mem::size_of_val(sprites.as_slice());
+        let next_offset = *instance_offset + sprites_bytes;
+
+        if next_offset > instance_buffer.size() {
+            return false;
+        }
+
+        // Copy sprite data to instance buffer
+        if write_instances {
+            unsafe {
+                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
+                ptr::copy_nonoverlapping(
+                    sprites.as_ptr() as *const u8,
+                    buffer_ptr.add(*instance_offset),
+                    sprites_bytes,
+                );
+            }
+        }
+
+        // Set path sprite pipeline
+        encoder.setRenderPipelineState(self.path_sprite_pipeline.as_objc2());
+
+        // Bind resources
+        let buffer_gpu_addr = instance_buffer.metal_buffer().as_objc2().gpuAddress();
+        unsafe {
+            self.argument_table.setAddress_atIndex(
+                buffer_gpu_addr + *instance_offset as u64,
+                BufferBindingIndex::Primitives as NSUInteger,
+            );
+            // Bind intermediate texture
+            self.argument_table.setTexture_atIndex(
+                intermediate_texture.as_objc2().gpuResourceID(),
+                TextureBindingIndex::Intermediate as NSUInteger,
+            );
+        }
+
+        // Draw all sprites in one draw call
         unsafe {
             encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
                 MTLPrimitiveType::Triangle,
