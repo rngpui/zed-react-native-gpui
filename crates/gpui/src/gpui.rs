@@ -45,6 +45,7 @@ mod subscription;
 mod svg_renderer;
 mod tab_stop;
 mod taffy;
+pub use taffy::LayoutCacheStats;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
 mod text_shape_cache;

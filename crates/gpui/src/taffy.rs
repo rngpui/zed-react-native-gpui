@@ -1,6 +1,6 @@
 use crate::{
-    AbsoluteLength, App, Bounds, DefiniteLength, Edges, Length, Pixels, Point, Size, Style, Window,
-    point, size,
+    AbsoluteLength, App, Bounds, DefiniteLength, Edges, GlobalElementId, Length, Pixels, Point,
+    Size, Style, Window, point, size,
 };
 use collections::{FxHashMap, FxHashSet};
 use stacksafe::{StackSafe, stacksafe};
@@ -25,13 +25,33 @@ type NodeMeasureFn = StackSafe<
 >;
 
 struct NodeContext {
-    measure: NodeMeasureFn,
+    measure: Option<NodeMeasureFn>,
+    /// Generation when this node was last accessed
+    last_access: u64,
 }
+
+/// Statistics for layout cache performance.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct LayoutCacheStats {
+    /// Number of cache hits (reused nodes)
+    pub hits: u64,
+    /// Number of cache misses (new nodes created)
+    pub misses: u64,
+    /// Number of stale nodes pruned
+    pub pruned: u64,
+}
+
 pub struct TaffyLayoutEngine {
     taffy: TaffyTree<NodeContext>,
     absolute_layout_bounds: FxHashMap<LayoutId, Bounds<Pixels>>,
     computed_layouts: FxHashSet<LayoutId>,
     layout_bounds_scratch_space: Vec<LayoutId>,
+    /// Maps element IDs to their Taffy node IDs for reuse across frames
+    element_to_node: FxHashMap<GlobalElementId, NodeId>,
+    /// Current frame generation
+    generation: u64,
+    /// Statistics for cache performance
+    stats: LayoutCacheStats,
 }
 
 const EXPECT_MESSAGE: &str = "we should avoid taffy layout errors by construction if possible";
@@ -45,13 +65,189 @@ impl TaffyLayoutEngine {
             absolute_layout_bounds: FxHashMap::default(),
             computed_layouts: FxHashSet::default(),
             layout_bounds_scratch_space: Vec::new(),
+            element_to_node: FxHashMap::default(),
+            generation: 0,
+            stats: LayoutCacheStats::default(),
         }
     }
 
+    /// Called at the start of each frame to prepare for layout
+    pub fn begin_frame(&mut self) {
+        self.generation += 1;
+        self.absolute_layout_bounds.clear();
+        self.computed_layouts.clear();
+    }
+
+    /// Called at the end of each frame to prune stale nodes
+    pub fn end_frame(&mut self) {
+        // Remove nodes that weren't accessed this frame
+        let current_generation = self.generation;
+        let taffy = &mut self.taffy;
+        let stats = &mut self.stats;
+
+        self.element_to_node.retain(|_element_id, &mut node_id| {
+            if let Some(context) = taffy.get_node_context(node_id) {
+                if context.last_access < current_generation {
+                    // Node wasn't accessed this frame - remove it
+                    let _ = taffy.remove(node_id);
+                    stats.pruned += 1;
+                    return false;
+                }
+            }
+            true
+        });
+    }
+
+    /// Clear all nodes (fallback for when tree structure is incompatible)
     pub fn clear(&mut self) {
         self.taffy.clear();
         self.absolute_layout_bounds.clear();
         self.computed_layouts.clear();
+        self.element_to_node.clear();
+    }
+
+    /// Returns the stats and resets the counters.
+    pub fn take_stats(&mut self) -> LayoutCacheStats {
+        std::mem::take(&mut self.stats)
+    }
+
+    /// Returns the current stats without resetting them.
+    #[allow(dead_code)]
+    pub fn peek_stats(&self) -> LayoutCacheStats {
+        self.stats
+    }
+
+    /// Request layout for an element with a known identity.
+    /// Reuses the existing Taffy node if available.
+    pub fn request_layout_with_id(
+        &mut self,
+        element_id: &GlobalElementId,
+        style: Style,
+        rem_size: Pixels,
+        scale_factor: f32,
+        children: &[LayoutId],
+    ) -> LayoutId {
+        let taffy_style = style.to_taffy(rem_size, scale_factor);
+
+        if let Some(&node_id) = self.element_to_node.get(element_id) {
+            // Reuse existing node
+            if let Some(context) = self.taffy.get_node_context_mut(node_id) {
+                context.last_access = self.generation;
+                context.measure = None; // Clear any old measure function
+            }
+
+            // Update style
+            self.taffy.set_style(node_id, taffy_style).expect(EXPECT_MESSAGE);
+
+            // Update children
+            self.taffy
+                .set_children(node_id, LayoutId::to_taffy_slice(children))
+                .expect(EXPECT_MESSAGE);
+
+            self.stats.hits += 1;
+            node_id.into()
+        } else {
+            // Create new node
+            let node_id = if children.is_empty() {
+                self.taffy
+                    .new_leaf_with_context(
+                        taffy_style,
+                        NodeContext {
+                            measure: None,
+                            last_access: self.generation,
+                        },
+                    )
+                    .expect(EXPECT_MESSAGE)
+            } else {
+                self.taffy
+                    .new_with_children(taffy_style, LayoutId::to_taffy_slice(children))
+                    .expect(EXPECT_MESSAGE)
+            };
+
+            // For nodes created with new_with_children, set context manually
+            if !children.is_empty() {
+                self.taffy
+                    .set_node_context(
+                        node_id,
+                        Some(NodeContext {
+                            measure: None,
+                            last_access: self.generation,
+                        }),
+                    )
+                    .expect(EXPECT_MESSAGE);
+            }
+
+            self.element_to_node.insert(element_id.clone(), node_id);
+            self.stats.misses += 1;
+            node_id.into()
+        }
+    }
+
+    /// Request layout for an element with a known identity and a measure function.
+    /// Reuses the existing Taffy node if available (but always updates the measure function).
+    pub fn request_measured_layout_with_id(
+        &mut self,
+        element_id: &GlobalElementId,
+        style: Style,
+        rem_size: Pixels,
+        scale_factor: f32,
+        measure: impl FnMut(
+            Size<Option<Pixels>>,
+            Size<AvailableSpace>,
+            &mut Window,
+            &mut App,
+        ) -> Size<Pixels>
+            + 'static,
+    ) -> LayoutId {
+        let taffy_style = style.to_taffy(rem_size, scale_factor);
+        // Cast to dyn FnMut to match the NodeMeasureFn type
+        let boxed: Box<
+            dyn FnMut(
+                Size<Option<Pixels>>,
+                Size<AvailableSpace>,
+                &mut Window,
+                &mut App,
+            ) -> Size<Pixels>,
+        > = Box::new(measure);
+        let measure_fn: NodeMeasureFn = StackSafe::new(boxed);
+
+        if let Some(&node_id) = self.element_to_node.get(element_id) {
+            // Reuse existing node - update style and measure function
+            self.taffy.set_style(node_id, taffy_style).expect(EXPECT_MESSAGE);
+
+            // Update context with new measure function
+            self.taffy
+                .set_node_context(
+                    node_id,
+                    Some(NodeContext {
+                        measure: Some(measure_fn),
+                        last_access: self.generation,
+                    }),
+                )
+                .expect(EXPECT_MESSAGE);
+
+            // Mark dirty since measure function changed
+            self.taffy.mark_dirty(node_id).expect(EXPECT_MESSAGE);
+
+            self.stats.hits += 1;
+            node_id.into()
+        } else {
+            // Create new node
+            let node_id = self
+                .taffy
+                .new_leaf_with_context(
+                    taffy_style,
+                    NodeContext {
+                        measure: Some(measure_fn),
+                        last_access: self.generation,
+                    },
+                )
+                .expect(EXPECT_MESSAGE);
+
+            self.element_to_node.insert(element_id.clone(), node_id);
+            self.stats.misses += 1;
+            node_id.into()
+        }
     }
 
     pub fn request_layout(
@@ -96,7 +292,8 @@ impl TaffyLayoutEngine {
             .new_leaf_with_context(
                 taffy_style,
                 NodeContext {
-                    measure: StackSafe::new(Box::new(measure)),
+                    measure: Some(StackSafe::new(Box::new(measure))),
+                    last_access: self.generation,
                 },
             )
             .expect(EXPECT_MESSAGE)
@@ -207,6 +404,10 @@ impl TaffyLayoutEngine {
                         return taffy::geometry::Size::default();
                     };
 
+                    let Some(ref mut measure) = node_context.measure else {
+                        return taffy::geometry::Size::default();
+                    };
+
                     let known_dimensions = Size {
                         width: known_dimensions.width.map(|e| Pixels(e / scale_factor)),
                         height: known_dimensions.height.map(|e| Pixels(e / scale_factor)),
@@ -225,8 +426,7 @@ impl TaffyLayoutEngine {
                         untransform(available_space.height),
                     );
 
-                    let a: Size<Pixels> =
-                        (node_context.measure)(known_dimensions, available_space, window, cx);
+                    let a: Size<Pixels> = measure(known_dimensions, available_space, window, cx);
                     size(a.width.0 * scale_factor, a.height.0 * scale_factor).into()
                 },
             )

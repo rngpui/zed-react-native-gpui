@@ -9,7 +9,7 @@
 use std::time::Instant;
 
 use gpui::{
-    Application, Bounds, Context, MeasureCacheStats, PrimitiveCacheStats, Render,
+    Application, Bounds, Context, LayoutCacheStats, MeasureCacheStats, PrimitiveCacheStats, Render,
     TextShapeCacheStats, TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*, px,
     rgb, size,
 };
@@ -29,6 +29,7 @@ struct CacheBench {
     cache_stats: PrimitiveCacheStats,
     text_cache_stats: TextShapeCacheStats,
     measure_cache_stats: MeasureCacheStats,
+    layout_cache_stats: LayoutCacheStats,
     frame_count: u64,
 }
 
@@ -40,6 +41,7 @@ impl CacheBench {
             cache_stats: PrimitiveCacheStats::default(),
             text_cache_stats: TextShapeCacheStats::default(),
             measure_cache_stats: MeasureCacheStats::default(),
+            layout_cache_stats: LayoutCacheStats::default(),
             frame_count: 0,
         }
     }
@@ -63,6 +65,7 @@ impl CacheBench {
         self.cache_stats = window.take_primitive_cache_stats();
         self.text_cache_stats = window.take_text_shape_cache_stats();
         self.measure_cache_stats = window.take_measure_cache_stats();
+        self.layout_cache_stats = window.take_layout_cache_stats();
         self.frame_count += 1;
 
         (fps, avg_frame_time)
@@ -78,6 +81,7 @@ impl Render for CacheBench {
         let stats = self.cache_stats;
         let text_stats = self.text_cache_stats;
         let measure_stats = self.measure_cache_stats;
+        let layout_stats = self.layout_cache_stats;
         let frame_count = self.frame_count;
 
         // Calculate hit rates
@@ -98,6 +102,13 @@ impl Render for CacheBench {
         let measure_total = measure_stats.hits + measure_stats.misses;
         let measure_hit_rate = if measure_total > 0 {
             (measure_stats.hits as f32 / measure_total as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        let layout_total = layout_stats.hits + layout_stats.misses;
+        let layout_hit_rate = if layout_total > 0 {
+            (layout_stats.hits as f32 / layout_total as f32) * 100.0
         } else {
             0.0
         };
@@ -178,6 +189,22 @@ impl Render for CacheBench {
                             .child(stat_box("Misses", format!("{}", measure_stats.misses), rgb(0xf38ba8)))
                             .child(stat_box("Hit Rate", format!("{:.1}%", measure_hit_rate), rgb(0xf9e2af)))
                             .child(stat_box("Inserts", format!("{}", measure_stats.inserts), rgb(0x89dceb))),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(0x9399b2))
+                            .text_sm()
+                            .mt_2()
+                            .child("Layout Cache"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_4()
+                            .child(stat_box("Hits", format!("{}", layout_stats.hits), rgb(0xa6e3a1)))
+                            .child(stat_box("Misses", format!("{}", layout_stats.misses), rgb(0xf38ba8)))
+                            .child(stat_box("Hit Rate", format!("{:.1}%", layout_hit_rate), rgb(0xf9e2af)))
+                            .child(stat_box("Pruned", format!("{}", layout_stats.pruned), rgb(0x89dceb))),
                     ),
             )
             .child(

@@ -2239,6 +2239,7 @@ impl Window {
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
         self.invalidate_entities();
         self.primitive_cache.begin_frame();
+        self.layout_engine.as_mut().unwrap().begin_frame();
         debug_assert!(self.paint_scopes.is_empty());
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
@@ -2261,7 +2262,7 @@ impl Window {
                 .set_input_handler(input_handler.unwrap());
         }
 
-        self.layout_engine.as_mut().unwrap().clear();
+        self.layout_engine.as_mut().unwrap().end_frame();
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
 
@@ -4175,6 +4176,63 @@ impl Window {
             .as_mut()
             .unwrap()
             .request_measured_layout(style, rem_size, scale_factor, measure)
+    }
+
+    /// Add a node to the layout tree with element identity for caching.
+    /// If this element was laid out in a previous frame, the existing Taffy node will be reused.
+    ///
+    /// This method should only be called as part of the request_layout or prepaint phase of element drawing.
+    #[must_use]
+    pub fn request_layout_with_id(
+        &mut self,
+        element_id: &GlobalElementId,
+        style: Style,
+        children: impl IntoIterator<Item = LayoutId>,
+        cx: &mut App,
+    ) -> LayoutId {
+        self.invalidator.debug_assert_prepaint();
+
+        cx.layout_id_buffer.clear();
+        cx.layout_id_buffer.extend(children);
+        let rem_size = self.rem_size();
+        let scale_factor = self.scale_factor();
+
+        self.layout_engine.as_mut().unwrap().request_layout_with_id(
+            element_id,
+            style,
+            rem_size,
+            scale_factor,
+            &cx.layout_id_buffer,
+        )
+    }
+
+    /// Add a measured node to the layout tree with element identity for caching.
+    /// If this element was laid out in a previous frame, the existing Taffy node will be reused.
+    ///
+    /// This method should only be called as part of the request_layout or prepaint phase of element drawing.
+    pub fn request_measured_layout_with_id<F>(
+        &mut self,
+        element_id: &GlobalElementId,
+        style: Style,
+        measure: F,
+    ) -> LayoutId
+    where
+        F: FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
+            + 'static,
+    {
+        self.invalidator.debug_assert_prepaint();
+
+        let rem_size = self.rem_size();
+        let scale_factor = self.scale_factor();
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .request_measured_layout_with_id(element_id, style, rem_size, scale_factor, measure)
+    }
+
+    /// Returns layout cache statistics and resets the counters.
+    pub fn take_layout_cache_stats(&mut self) -> crate::taffy::LayoutCacheStats {
+        self.layout_engine.as_mut().unwrap().take_stats()
     }
 
     /// Compute the layout for the given id within the given available space.
