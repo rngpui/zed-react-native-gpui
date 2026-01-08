@@ -302,7 +302,7 @@ impl Element for Img {
                 inspector_id,
                 window,
                 cx,
-                |mut style, window, cx| {
+                |global_id, mut style, window, cx| {
                     let mut replacement_id = None;
 
                     match self.source.use_data(
@@ -405,7 +405,11 @@ impl Element for Img {
                         }
                     }
 
-                    window.request_layout(style, replacement_id, cx)
+                    if let Some(id) = global_id {
+                        window.request_layout_with_id(id, style, replacement_id, cx)
+                    } else {
+                        window.request_layout(style, replacement_id, cx)
+                    }
                 },
             );
 

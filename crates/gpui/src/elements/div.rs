@@ -1399,14 +1399,19 @@ impl Element for Div {
                 inspector_id,
                 window,
                 cx,
-                |style, window, cx| {
+                |global_id, style, window, cx| {
                     window.with_text_style(style.text_style().cloned(), |window| {
                         child_layout_ids = self
                             .children
                             .iter_mut()
                             .map(|child| child.request_layout(window, cx))
                             .collect::<SmallVec<_>>();
-                        window.request_layout(style, child_layout_ids.iter().copied(), cx)
+                        // Use ID-aware layout when we have an element ID
+                        if let Some(id) = global_id {
+                            window.request_layout_with_id(id, style, child_layout_ids.iter().copied(), cx)
+                        } else {
+                            window.request_layout(style, child_layout_ids.iter().copied(), cx)
+                        }
                     })
                 },
             )
@@ -1630,7 +1635,7 @@ impl Interactivity {
         _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
-        f: impl FnOnce(Style, &mut Window, &mut App) -> LayoutId,
+        f: impl FnOnce(Option<&GlobalElementId>, Style, &mut Window, &mut App) -> LayoutId,
     ) -> LayoutId {
         #[cfg(any(feature = "inspector", debug_assertions))]
         window.with_inspector_state(
@@ -1702,7 +1707,7 @@ impl Interactivity {
                 }
 
                 let mut style = self.compute_style_internal(None, element_state.as_mut(), window, cx);
-                let layout_id = f(style, window, cx);
+                let layout_id = f(global_id, style, window, cx);
                 (layout_id, element_state)
             },
         )

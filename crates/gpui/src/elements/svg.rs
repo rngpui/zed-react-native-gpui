@@ -72,7 +72,13 @@ impl Element for Svg {
             inspector_id,
             window,
             cx,
-            |style, window, cx| window.request_layout(style, None, cx),
+            |global_id, style, window, cx| {
+                if let Some(id) = global_id {
+                    window.request_layout_with_id(id, style, None, cx)
+                } else {
+                    window.request_layout(style, None, cx)
+                }
+            },
         );
         (layout_id, ())
     }
