@@ -9,15 +9,17 @@ use crate::{
     KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
     LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent,
     MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority, PromptButton,
-    PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
-    Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
-    ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
-    SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap,
-    TaffyLayoutEngine, Task, TextRenderingMode, TextStyle, TextStyleRefinement,
-    TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
-    point, prelude::*, px, rems, size, transparent_black,
+    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority,
+    PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams,
+    RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X,
+    SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle,
+    Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
+    SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
+    TextStyleRefinement, TransformationMatrix, Underline, UnderlineStyle, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
+    WindowParams, WindowTextSystem, point, prelude::*,
+    primitive_cache::{CacheReplay, CachedPaintOperation, PrimitiveCache, PrimitiveCacheStats}, px, rems, scene::Primitive,
+    size, transparent_black,
 };
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
@@ -60,6 +62,7 @@ use crate::util::atomic_incr_if_not_zero;
 pub use prompts::*;
 
 pub(crate) const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(864.));
+const DEFAULT_PRIMITIVE_CACHE_ENTRIES: usize = 10_000;
 
 /// A 6:5 aspect ratio minimum window size to be used for functional,
 /// additional-to-main-Zed windows, like the settings and rules library windows.
@@ -829,6 +832,87 @@ enum InputModality {
     Keyboard,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaintScopeMode {
+    Capture,
+    Replay,
+    Passthrough,
+}
+
+pub(crate) struct PaintScope {
+    mode: PaintScopeMode,
+    origin: Point<ScaledPixels>,
+    /// The new origin to translate cached primitives to (for replay mode)
+    replay_origin: Point<ScaledPixels>,
+    /// For capture mode: owned operations being collected
+    /// For replay mode: shared reference to cached operations (via Arc)
+    capture_operations: SmallVec<[CachedPaintOperation; 8]>,
+    replay_operations: Option<std::sync::Arc<SmallVec<[CachedPaintOperation; 8]>>>,
+    replay_index: usize,
+}
+
+impl PaintScope {
+    pub(crate) fn capture(origin: Point<ScaledPixels>) -> Self {
+        Self {
+            mode: PaintScopeMode::Capture,
+            origin,
+            replay_origin: Point::default(),
+            capture_operations: SmallVec::new(),
+            replay_operations: None,
+            replay_index: 0,
+        }
+    }
+
+    pub(crate) fn replay(
+        operations: std::sync::Arc<SmallVec<[CachedPaintOperation; 8]>>,
+        replay_origin: Point<ScaledPixels>,
+    ) -> Self {
+        Self {
+            mode: PaintScopeMode::Replay,
+            origin: Point::default(),
+            replay_origin,
+            capture_operations: SmallVec::new(),
+            replay_operations: Some(operations),
+            replay_index: 0,
+        }
+    }
+
+    pub(crate) fn passthrough() -> Self {
+        Self {
+            mode: PaintScopeMode::Passthrough,
+            origin: Point::default(),
+            replay_origin: Point::default(),
+            capture_operations: SmallVec::new(),
+            replay_operations: None,
+            replay_index: 0,
+        }
+    }
+
+    pub(crate) fn mode(&self) -> PaintScopeMode {
+        self.mode
+    }
+
+    pub(crate) fn into_operations(self) -> SmallVec<[CachedPaintOperation; 8]> {
+        self.capture_operations
+    }
+
+    pub(crate) fn replay_index(&self) -> usize {
+        self.replay_index
+    }
+
+    pub(crate) fn operations_len(&self) -> usize {
+        self.replay_operations.as_ref().map_or(0, |ops| ops.len())
+    }
+}
+
+fn other_kind(operation: &CachedPaintOperation) -> &'static str {
+    match operation {
+        CachedPaintOperation::Primitive(_) => "primitive",
+        CachedPaintOperation::StartLayer(_) => "layer_start",
+        CachedPaintOperation::EndLayer => "layer_end",
+    }
+}
+
 /// Holds the state for a specific window.
 pub struct Window {
     pub(crate) handle: AnyWindowHandle,
@@ -858,6 +942,11 @@ pub struct Window {
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
+    primitive_cache: PrimitiveCache,
+    /// True if the last frame was completely stable (all cache hits at same positions).
+    /// When true, we can potentially skip drawing if nothing has changed.
+    last_frame_was_stable: bool,
+    paint_scopes: Vec<PaintScope>,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -1339,6 +1428,9 @@ impl Window {
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            primitive_cache: PrimitiveCache::new(DEFAULT_PRIMITIVE_CACHE_ENTRIES),
+            last_frame_was_stable: false,
+            paint_scopes: Vec::new(),
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
@@ -2140,6 +2232,8 @@ impl Window {
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
         self.invalidate_entities();
+        self.primitive_cache.begin_frame();
+        debug_assert!(self.paint_scopes.is_empty());
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
         self.invalidator.set_dirty(false);
@@ -2205,6 +2299,7 @@ impl Window {
         self.refreshing = false;
         self.invalidator.set_phase(DrawPhase::None);
         self.needs_present.set(true);
+        self.log_primitive_cache_stats();
 
         ArenaClearNeeded
     }
@@ -2234,7 +2329,8 @@ impl Window {
 
     #[profiling::function]
     fn present(&self) {
-        self.platform_window.draw(&self.rendered_frame.scene);
+        self.platform_window
+            .draw_incremental(&self.rendered_frame.scene, self.rendered_frame.scene.dirty_batch_ranges());
         self.needs_present.set(false);
         profiling::finish_frame!();
     }
@@ -2622,6 +2718,212 @@ impl Window {
             range.start.scene_index..range.end.scene_index,
             &self.rendered_frame.scene,
         );
+    }
+
+    pub(crate) fn push_paint_scope(&mut self, scope: PaintScope) {
+        self.paint_scopes.push(scope);
+    }
+
+    pub(crate) fn pop_paint_scope(&mut self) -> Option<PaintScope> {
+        self.paint_scopes.pop()
+    }
+
+    pub(crate) fn lookup_primitive_cache(
+        &mut self,
+        id: &GlobalElementId,
+        content_hash: u64,
+        bounds: Bounds<ScaledPixels>,
+    ) -> Option<CacheReplay> {
+        self.primitive_cache
+            .lookup(id, content_hash, bounds, self.scale_factor())
+    }
+
+    pub(crate) fn insert_primitive_cache(
+        &mut self,
+        id: GlobalElementId,
+        content_hash: u64,
+        bounds: Bounds<ScaledPixels>,
+        operations: SmallVec<[CachedPaintOperation; 8]>,
+    ) {
+        self.primitive_cache.insert(
+            id,
+            content_hash,
+            bounds,
+            self.scale_factor(),
+            operations,
+        );
+    }
+
+    fn log_primitive_cache_stats(&mut self) {
+        let stats = self.primitive_cache.peek_stats();
+
+        // Update scene stability tracking for frame skipping optimization.
+        // A stable frame means all elements hit the cache at their original positions.
+        self.last_frame_was_stable = stats.is_scene_stable();
+
+        if !log::log_enabled!(log::Level::Trace) {
+            return;
+        }
+        if stats.hits == 0 && stats.misses == 0 && stats.inserts == 0 && stats.evictions == 0 {
+            return;
+        }
+        log::trace!(
+            "primitive cache: hits={} misses={} inserts={} evictions={}",
+            stats.hits,
+            stats.misses,
+            stats.inserts,
+            stats.evictions
+        );
+    }
+
+    /// Returns the primitive cache statistics for the current frame and resets the counters.
+    ///
+    /// This is useful for benchmarking and debugging the primitive cache effectiveness.
+    /// Call this after the draw phase to get stats for the completed frame.
+    pub fn take_primitive_cache_stats(&mut self) -> PrimitiveCacheStats {
+        let stats = self.primitive_cache.take_stats();
+        // Update scene stability tracking when stats are taken.
+        // This ensures the optimization works even when stats are taken externally (e.g., by benchmarks).
+        self.last_frame_was_stable = stats.is_scene_stable();
+        stats
+    }
+
+    fn replay_next_primitive(&mut self) -> bool {
+        let Some(scope) = self.paint_scopes.last_mut() else {
+            return false;
+        };
+        if scope.mode != PaintScopeMode::Replay {
+            return false;
+        }
+
+        let Some(operation) = scope.replay_operations.as_ref().and_then(|ops| ops.get(scope.replay_index)).cloned() else {
+            return false;
+        };
+        let replay_origin = scope.replay_origin;
+        scope.replay_index += 1;
+
+        match operation {
+            CachedPaintOperation::Primitive(primitive) => {
+                // replay_origin is the new absolute position; cached primitives have
+                // relative coordinates, so we add the origin to get absolute coords.
+                // We also apply the CURRENT content_mask for proper clipping after scroll.
+                let current_mask = self.content_mask().scale(self.scale_factor());
+                CachedPaintOperation::Primitive(primitive)
+                    .replay(replay_origin, current_mask, &mut self.next_frame.scene);
+                true
+            }
+            other => {
+                log::warn!("replay desync: expected primitive, found {:?}", other_kind(&other));
+                false
+            }
+        }
+    }
+
+    fn replay_next_layer_start(&mut self) -> bool {
+        let Some(scope) = self.paint_scopes.last_mut() else {
+            return false;
+        };
+        if scope.mode != PaintScopeMode::Replay {
+            return false;
+        }
+
+        let Some(operation) = scope.replay_operations.as_ref().and_then(|ops| ops.get(scope.replay_index)).cloned() else {
+            return false;
+        };
+        let replay_origin = scope.replay_origin;
+        scope.replay_index += 1;
+
+        match operation {
+            CachedPaintOperation::StartLayer(bounds) => {
+                let current_mask = self.content_mask().scale(self.scale_factor());
+                CachedPaintOperation::StartLayer(bounds)
+                    .replay(replay_origin, current_mask, &mut self.next_frame.scene);
+                true
+            }
+            other => {
+                log::warn!(
+                    "replay desync: expected layer start, found {:?}",
+                    other_kind(&other)
+                );
+                false
+            }
+        }
+    }
+
+    fn replay_next_layer_end(&mut self) -> bool {
+        let Some(scope) = self.paint_scopes.last_mut() else {
+            return false;
+        };
+        if scope.mode != PaintScopeMode::Replay {
+            return false;
+        }
+
+        let Some(operation) = scope.replay_operations.as_ref().and_then(|ops| ops.get(scope.replay_index)).cloned() else {
+            return false;
+        };
+        let replay_origin = scope.replay_origin;
+        scope.replay_index += 1;
+
+        match operation {
+            CachedPaintOperation::EndLayer => {
+                let current_mask = self.content_mask().scale(self.scale_factor());
+                CachedPaintOperation::EndLayer
+                    .replay(replay_origin, current_mask, &mut self.next_frame.scene);
+                true
+            }
+            other => {
+                log::warn!(
+                    "replay desync: expected layer end, found {:?}",
+                    other_kind(&other)
+                );
+                false
+            }
+        }
+    }
+
+    fn insert_primitive_internal(&mut self, primitive: impl Into<Primitive>) {
+        let primitive = primitive.into();
+        if self.replay_next_primitive() {
+            return;
+        }
+
+        if let Some(scope) = self.paint_scopes.last_mut() {
+            if scope.mode == PaintScopeMode::Capture {
+                let operation = CachedPaintOperation::from_primitive(primitive.clone(), scope.origin);
+                scope.capture_operations.push(operation);
+            }
+        }
+
+        self.next_frame.scene.insert_primitive(primitive);
+    }
+
+    fn push_layer_internal(&mut self, bounds: Bounds<ScaledPixels>) {
+        if self.replay_next_layer_start() {
+            return;
+        }
+
+        if let Some(scope) = self.paint_scopes.last_mut() {
+            if scope.mode == PaintScopeMode::Capture {
+                let operation = CachedPaintOperation::from_layer_start(bounds, scope.origin);
+                scope.capture_operations.push(operation);
+            }
+        }
+
+        self.next_frame.scene.push_layer(bounds);
+    }
+
+    fn pop_layer_internal(&mut self) {
+        if self.replay_next_layer_end() {
+            return;
+        }
+
+        if let Some(scope) = self.paint_scopes.last_mut() {
+            if scope.mode == PaintScopeMode::Capture {
+                scope.capture_operations.push(CachedPaintOperation::EndLayer);
+            }
+        }
+
+        self.next_frame.scene.pop_layer();
     }
 
     /// Push a text style onto the stack, and call a function with that style active.
@@ -3100,15 +3402,13 @@ impl Window {
         let content_mask = self.content_mask();
         let clipped_bounds = bounds.intersect(&content_mask.bounds);
         if !clipped_bounds.is_empty() {
-            self.next_frame
-                .scene
-                .push_layer(clipped_bounds.scale(scale_factor));
+            self.push_layer_internal(clipped_bounds.scale(scale_factor));
         }
 
         let result = f(self);
 
         if !clipped_bounds.is_empty() {
-            self.next_frame.scene.pop_layer();
+            self.pop_layer_internal();
         }
 
         result
@@ -3148,8 +3448,11 @@ impl Window {
         let opacity = self.element_opacity();
         let transform = self.scale_transform_for_scene(transform);
         for shadow in shadows {
+            if self.replay_next_primitive() {
+                continue;
+            }
             let shadow_bounds = (bounds + shadow.offset).dilate(shadow.spread_radius);
-            self.next_frame.scene.insert_primitive((
+            self.insert_primitive_internal((
                 Shadow {
                     order: 0,
                     blur_radius: shadow.blur_radius.scale(scale_factor),
@@ -3187,7 +3490,7 @@ impl Window {
         let opacity = self.element_opacity();
         let transform = self.scale_transform_for_scene(transform);
 
-        self.next_frame.scene.insert_primitive((
+        self.insert_primitive_internal((
             Quad {
                 order: 0,
                 bounds: quad.bounds.scale(scale_factor),
@@ -3239,7 +3542,7 @@ impl Window {
         let opacity = self.element_opacity();
         let transform = self.scale_transform_for_scene(transform);
 
-        self.next_frame.scene.insert_primitive((
+        self.insert_primitive_internal((
             BackdropBlur {
                 order: 0,
                 blur_radius: blur_radius.scale(scale_factor),
@@ -3257,6 +3560,9 @@ impl Window {
     /// This method should only be called as part of the paint phase of element drawing.
     pub fn paint_path(&mut self, mut path: Path<Pixels>, color: impl Into<Background>) {
         self.invalidator.debug_assert_paint();
+        if self.replay_next_primitive() {
+            return;
+        }
 
         let scale_factor = self.scale_factor();
         let content_mask = self.content_mask();
@@ -3264,9 +3570,7 @@ impl Window {
         path.content_mask = content_mask;
         let color: Background = color.into();
         path.color = color.opacity(opacity);
-        self.next_frame
-            .scene
-            .insert_primitive(path.scale(scale_factor));
+        self.insert_primitive_internal(path.scale(scale_factor));
     }
 
     /// Paint an underline into the scene for the next frame at the current z-index.
@@ -3307,7 +3611,7 @@ impl Window {
         let element_opacity = self.element_opacity();
         let transform = self.scale_transform_for_scene(transform);
 
-        self.next_frame.scene.insert_primitive((
+        self.insert_primitive_internal((
             Underline {
                 order: 0,
                 pad: 0,
@@ -3355,7 +3659,7 @@ impl Window {
         let opacity = self.element_opacity();
         let transform = self.scale_transform_for_scene(transform);
 
-        self.next_frame.scene.insert_primitive((
+        self.insert_primitive_internal((
             Underline {
                 order: 0,
                 pad: 0,
@@ -3406,6 +3710,9 @@ impl Window {
         transform: TransformationMatrix,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
+        if self.replay_next_primitive() {
+            return Ok(());
+        }
 
         let element_opacity = self.element_opacity();
         let scale_factor = self.scale_factor();
@@ -3443,7 +3750,7 @@ impl Window {
             let content_mask = self.content_mask().scale(scale_factor);
 
             if subpixel_rendering {
-                self.next_frame.scene.insert_primitive(SubpixelSprite {
+                self.insert_primitive_internal(SubpixelSprite {
                     order: 0,
                     pad: 0,
                     bounds,
@@ -3453,7 +3760,7 @@ impl Window {
                     transformation: TransformationMatrix::unit(),
                 });
             } else {
-                self.next_frame.scene.insert_primitive(MonochromeSprite {
+                self.insert_primitive_internal(MonochromeSprite {
                     order: 0,
                     pad: 0,
                     bounds,
@@ -3520,6 +3827,9 @@ impl Window {
         transform: TransformationMatrix,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
+        if self.replay_next_primitive() {
+            return Ok(());
+        }
 
         let scale_factor = self.scale_factor();
         let glyph_origin = origin.scale(scale_factor);
@@ -3552,7 +3862,7 @@ impl Window {
             let content_mask = self.content_mask().scale(scale_factor);
             let opacity = self.element_opacity();
 
-            self.next_frame.scene.insert_primitive((
+            self.insert_primitive_internal((
                 PolychromeSprite {
                     order: 0,
                     pad: 0,
@@ -3582,6 +3892,9 @@ impl Window {
         cx: &App,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
+        if self.replay_next_primitive() {
+            return Ok(());
+        }
 
         let element_opacity = self.element_opacity();
         let scale_factor = self.scale_factor();
@@ -3619,7 +3932,7 @@ impl Window {
                 .map(|value| ScaledPixels(value.0 as f32 / SMOOTH_SVG_SCALE_FACTOR)),
         };
 
-        self.next_frame.scene.insert_primitive(MonochromeSprite {
+        self.insert_primitive_internal(MonochromeSprite {
             order: 0,
             pad: 0,
             bounds: svg_bounds
@@ -3667,6 +3980,9 @@ impl Window {
         transform: TransformationMatrix,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
+        if self.replay_next_primitive() {
+            return Ok(());
+        }
 
         let scale_factor = self.scale_factor();
         let bounds = bounds.scale(scale_factor);
@@ -3692,7 +4008,7 @@ impl Window {
         let opacity = self.element_opacity();
         let transform = self.scale_transform_for_scene(transform);
 
-        self.next_frame.scene.insert_primitive((
+        self.insert_primitive_internal((
             PolychromeSprite {
                 order: 0,
                 pad: 0,
@@ -3733,7 +4049,7 @@ impl Window {
         let scale_factor = self.scale_factor();
         let bounds = bounds.scale(scale_factor);
         let content_mask = self.content_mask().scale(scale_factor);
-        self.next_frame.scene.insert_primitive(PaintSurface {
+        self.insert_primitive_internal(PaintSurface {
             order: 0,
             bounds,
             content_mask,

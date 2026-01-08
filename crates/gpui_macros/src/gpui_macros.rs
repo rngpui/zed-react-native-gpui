@@ -1,5 +1,6 @@
 mod derive_action;
 mod derive_app_context;
+mod derive_content_hash;
 mod derive_into_element;
 mod derive_render;
 mod derive_visual_context;
@@ -17,6 +18,12 @@ use syn::{DeriveInput, Ident};
 #[proc_macro_derive(Action, attributes(action))]
 pub fn derive_action(input: TokenStream) -> TokenStream {
     derive_action::derive_action(input)
+}
+
+/// `ContentHash` derive macro - see the trait documentation for details.
+#[proc_macro_derive(ContentHash)]
+pub fn derive_content_hash(input: TokenStream) -> TokenStream {
+    derive_content_hash::derive_content_hash(input)
 }
 
 /// This can be used to register an action with the GPUI runtime when you want to manually implement

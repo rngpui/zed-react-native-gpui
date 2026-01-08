@@ -8,10 +8,10 @@
 //! If all of your elements are the same height, see [`crate::UniformList`] for a simpler API
 
 use crate::{
-    AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
-    FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    Overflow, Pixels, Point, ScrollDelta, ScrollWheelEvent, Size, Style, StyleRefinement, Styled,
-    Window, point, px, size,
+    AnyElement, App, AvailableSpace, Bounds, ContentHash, ContentHasher, ContentMask, DispatchPhase,
+    Edges, Element, EntityId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior,
+    InspectorElementId, IntoElement, Overflow, Pixels, Point, ScrollDelta, ScrollWheelEvent, Size,
+    Style, StyleRefinement, Styled, Window, point, px, size, style_content_hash,
 };
 use collections::VecDeque;
 use refineable::Refineable as _;
@@ -1118,6 +1118,35 @@ impl Element for List {
         state.last_layout_bounds = Some(bounds);
         state.last_padding = Some(padding);
         ListPrepaintState { hitbox, layout }
+    }
+
+    fn content_hash(
+        &self,
+        _id: Option<&GlobalElementId>,
+        bounds: Bounds<Pixels>,
+        window: &Window,
+        _cx: &App,
+    ) -> Option<u64> {
+        let mut style = Style::default();
+        style.refine(&self.style);
+        let padding = style
+            .padding
+            .to_pixels(bounds.size.into(), window.rem_size());
+
+        let state = self.state.0.borrow();
+        let scroll_top = state.logical_scroll_top();
+        let visible_range = state.visible_range(bounds.size.height, &scroll_top);
+        let summary = state.items.summary();
+
+        let mut hasher = ContentHasher::default();
+        hasher.write_u64(style_content_hash(&style, window.rem_size()));
+        hasher.write_u64(padding.content_hash());
+        hasher.write_u64(summary.count.content_hash());
+        hasher.write_u64(visible_range.start.content_hash());
+        hasher.write_u64(visible_range.end.content_hash());
+        hasher.write_u64(scroll_top.item_ix.content_hash());
+        hasher.write_u64(scroll_top.offset_in_item.content_hash());
+        Some(hasher.finish())
     }
 
     fn paint(

@@ -32,8 +32,10 @@
 //! your own custom layout algorithm or rendering a code editor.
 
 use crate::{
-    App, ArenaBox, AvailableSpace, Bounds, Context, DispatchNodeId, ELEMENT_ARENA, ElementId,
-    FocusHandle, InspectorElementId, LayoutId, Pixels, Point, Size, Style, Window,
+    App, ArenaBox, AvailableSpace, Bounds, CachePolicy, Context, DispatchNodeId, ELEMENT_ARENA,
+    ElementId, FocusHandle, InspectorElementId, LayoutId, Pixels, Point, ScaledPixels, Size,
+    Style, Window,
+    window::{PaintScope, PaintScopeMode},
     util::FluentBuilder,
 };
 use derive_more::{Deref, DerefMut};
@@ -102,6 +104,23 @@ pub trait Element: 'static + IntoElement {
         window: &mut Window,
         cx: &mut App,
     );
+
+    /// Optionally provide a hash of the content that affects this element's rendering.
+    /// Returning `None` disables primitive caching for this element.
+    fn content_hash(
+        &self,
+        _id: Option<&GlobalElementId>,
+        _bounds: Bounds<Pixels>,
+        _window: &Window,
+        _cx: &App,
+    ) -> Option<u64> {
+        None
+    }
+
+    /// Configure whether primitive caching is allowed for this element.
+    fn cache_policy(&self) -> CachePolicy {
+        CachePolicy::Default
+    }
 
     /// Convert this element into a dynamically-typed [`AnyElement`].
     fn into_any(self) -> AnyElement {
@@ -465,6 +484,36 @@ impl<E: Element> Drawable<E> {
                 }
 
                 window.next_frame.dispatch_tree.set_active_node(node_id);
+                let bounds_scaled = bounds.scale(window.scale_factor());
+                let content_hash = if self.element.cache_policy().allows_caching() {
+                    self.element
+                        .content_hash(global_id.as_ref(), bounds, window, cx)
+                } else {
+                    None
+                };
+                let mut cache_key: Option<(GlobalElementId, u64, Bounds<ScaledPixels>)> = None;
+                let scope = if let (Some(global_id), Some(content_hash)) =
+                    (global_id.as_ref(), content_hash)
+                {
+                    let replay = window.lookup_primitive_cache(
+                        global_id,
+                        content_hash,
+                        bounds_scaled,
+                    );
+                    let key = (global_id.clone(), content_hash, bounds_scaled);
+                    cache_key = Some(key);
+                    if let Some(replay) = replay {
+                        // Cached primitives are stored with coordinates relative to their element
+                        // origin (i.e., coords - original_origin). To replay at the new position,
+                        // we add the new origin to get absolute coordinates.
+                        PaintScope::replay(replay.operations, bounds_scaled.origin)
+                    } else {
+                        PaintScope::capture(bounds_scaled.origin)
+                    }
+                } else {
+                    PaintScope::passthrough()
+                };
+                window.push_paint_scope(scope);
                 self.element.paint(
                     global_id.as_ref(),
                     inspector_id.as_ref(),
@@ -474,6 +523,24 @@ impl<E: Element> Drawable<E> {
                     window,
                     cx,
                 );
+                let scope = window.pop_paint_scope().expect("paint scope missing");
+                if let Some((global_id, content_hash, bounds)) = cache_key {
+                    if scope.mode() == PaintScopeMode::Capture {
+                        window.insert_primitive_cache(
+                            global_id,
+                            content_hash,
+                            bounds,
+                            scope.into_operations(),
+                        );
+                    } else if scope.mode() == PaintScopeMode::Replay
+                        && scope.replay_index() != scope.operations_len()
+                    {
+                        log::warn!(
+                            "replay desync: unused cached operations for {}",
+                            global_id
+                        );
+                    }
+                }
 
                 if global_id.is_some() {
                     window.element_id_stack.pop();

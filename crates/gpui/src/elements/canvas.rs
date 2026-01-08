@@ -1,8 +1,8 @@
 use refineable::Refineable as _;
 
 use crate::{
-    App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, Pixels,
-    Style, StyleRefinement, Styled, Window,
+    App, Bounds, CachePolicy, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
+    Pixels, Style, StyleRefinement, Styled, Window,
 };
 
 /// Construct a canvas element with the given paint callback.
@@ -85,6 +85,10 @@ impl<T: 'static> Element for Canvas<T> {
         style.paint(bounds, window, cx, |window, cx| {
             (self.paint.take().unwrap())(bounds, prepaint, window, cx)
         });
+    }
+
+    fn cache_policy(&self) -> CachePolicy {
+        CachePolicy::Never
     }
 }
 

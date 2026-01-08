@@ -1,9 +1,9 @@
 use std::{fs, path::Path, sync::Arc};
 
 use crate::{
-    App, Asset, Bounds, Element, GlobalElementId, Hitbox, InspectorElementId, InteractiveElement,
-    Interactivity, IntoElement, LayoutId, Pixels, Point, Radians, SharedString, Size,
-    StyleRefinement, Styled, TransformationMatrix, Window, geometry::Negate as _, point, px,
+    App, Asset, Bounds, ContentHash, ContentHasher, Element, GlobalElementId, Hitbox,
+    InspectorElementId, InteractiveElement, Interactivity, IntoElement, LayoutId, Pixels, Point,
+    Radians, SharedString, Size, StyleRefinement, Styled, TransformationMatrix, Window, point, px,
     radians, size,
 };
 use util::ResultExt;
@@ -86,15 +86,30 @@ impl Element for Svg {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Hitbox> {
-        self.interactivity.prepaint(
+        let path_hash = self.path.content_hash();
+        let external_path_hash = self.external_path.content_hash();
+        let transform_hash = self.transformation.content_hash();
+        let mut content_hash = None;
+        let hitbox = self.interactivity.prepaint(
             global_id,
             inspector_id,
             bounds,
             bounds.size,
             window,
             cx,
-            |_, _, hitbox, _, _| hitbox,
-        )
+            |style, _, hitbox, window, _cx| {
+                let mut hasher = ContentHasher::default();
+                hasher.write_u64(crate::style_content_hash(style, window.rem_size()));
+                hasher.write_u64(path_hash);
+                hasher.write_u64(external_path_hash);
+                hasher.write_u64(style.text.color.content_hash());
+                hasher.write_u64(transform_hash);
+                content_hash = Some(hasher.finish());
+                hitbox
+            },
+        );
+        self.interactivity.content_hash = content_hash;
+        hitbox
     }
 
     fn paint(
@@ -160,6 +175,16 @@ impl Element for Svg {
                 }
             },
         )
+    }
+
+    fn content_hash(
+        &self,
+        _id: Option<&GlobalElementId>,
+        _bounds: Bounds<Pixels>,
+        _window: &Window,
+        _cx: &App,
+    ) -> Option<u64> {
+        self.interactivity.content_hash
     }
 }
 
@@ -265,6 +290,18 @@ impl Transformation {
             .rotate(self.rotate)
             .scale(self.scale)
             .translate(point(px(-scaled_center.x.0), px(-scaled_center.y.0)))
+    }
+}
+
+impl ContentHash for Transformation {
+    fn content_hash(&self) -> u64 {
+        let mut hasher = ContentHasher::default();
+        hasher.write_u64(self.scale.width.to_bits() as u64);
+        hasher.write_u64(self.scale.height.to_bits() as u64);
+        hasher.write_u64(self.translate.x.content_hash());
+        hasher.write_u64(self.translate.y.content_hash());
+        hasher.write_u64(self.rotate.0.to_bits() as u64);
+        hasher.finish()
     }
 }
 

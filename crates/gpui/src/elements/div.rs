@@ -22,8 +22,8 @@ use crate::{
     KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent,
     MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent,
     Overflow, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
-    StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea, point, px,
-    size,
+    StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea,
+    ContentHash, ContentHasher, style_content_hash, point, px, size,
 };
 use collections::HashMap;
 use refineable::Refineable;
@@ -1538,6 +1538,16 @@ impl Element for Div {
             )
         });
     }
+
+    fn content_hash(
+        &self,
+        _id: Option<&GlobalElementId>,
+        _bounds: Bounds<Pixels>,
+        _window: &Window,
+        _cx: &App,
+    ) -> Option<u64> {
+        self.interactivity.content_hash
+    }
 }
 
 impl IntoElement for Div {
@@ -1561,6 +1571,7 @@ pub struct Interactivity {
     pub hovered: Option<bool>,
     pub(crate) tooltip_id: Option<TooltipId>,
     pub(crate) content_size: Size<Pixels>,
+    pub(crate) content_hash: Option<u64>,
     pub(crate) key_context: Option<KeyContext>,
     pub(crate) focusable: bool,
     pub(crate) tracked_focus_handle: Option<FocusHandle>,
@@ -1690,7 +1701,7 @@ impl Interactivity {
                     );
                 }
 
-                let style = self.compute_style_internal(None, element_state.as_mut(), window, cx);
+                let mut style = self.compute_style_internal(None, element_state.as_mut(), window, cx);
                 let layout_id = f(style, window, cx);
                 (layout_id, element_state)
             },
@@ -1730,7 +1741,7 @@ impl Interactivity {
             |element_state, window| {
                 let mut element_state =
                     element_state.map(|element_state| element_state.unwrap_or_default());
-                let style = self.compute_style_internal(None, element_state.as_mut(), window, cx);
+                let mut style = self.compute_style_internal(None, element_state.as_mut(), window, cx);
 
                 if let Some(element_state) = element_state.as_mut() {
                     if let Some(clicked_state) = element_state.clicked_state.as_ref() {
@@ -1752,18 +1763,26 @@ impl Interactivity {
                     }
                 }
 
+                let hitbox = if self.should_insert_hitbox(&style, window, cx) {
+                    Some(window.insert_hitbox(bounds, self.hitbox_behavior))
+                } else {
+                    None
+                };
+
+                if hitbox.is_some() {
+                    style = self.compute_style_internal(hitbox.as_ref(), element_state.as_mut(), window, cx);
+                }
+
                 window.with_text_style(style.text_style().cloned(), |window| {
                     window.with_content_mask(
                         style.overflow_mask(bounds, window.rem_size()),
                         |window| {
-                            let hitbox = if self.should_insert_hitbox(&style, window, cx) {
-                                Some(window.insert_hitbox(bounds, self.hitbox_behavior))
-                            } else {
-                                None
-                            };
-
                             let scroll_offset =
                                 self.clamp_scroll_position(bounds, &style, window, cx);
+                            let mut hasher = ContentHasher::default();
+                            hasher.write_u64(style_content_hash(&style, window.rem_size()));
+                            hasher.write_u64(scroll_offset.content_hash());
+                            self.content_hash = Some(hasher.finish());
                             let result = f(&style, scroll_offset, hitbox, window, cx);
                             (result, element_state)
                         },
@@ -3154,6 +3173,20 @@ where
             window,
             cx,
         );
+    }
+
+    fn content_hash(
+        &self,
+        id: Option<&GlobalElementId>,
+        bounds: Bounds<Pixels>,
+        window: &Window,
+        cx: &App,
+    ) -> Option<u64> {
+        self.element.content_hash(id, bounds, window, cx)
+    }
+
+    fn cache_policy(&self) -> crate::CachePolicy {
+        self.element.cache_policy()
     }
 }
 

@@ -1,9 +1,10 @@
 use crate::{
-    ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
-    TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
-    WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
+    ActiveTooltip, AnyView, App, Bounds, ContentHash, ContentHasher, DispatchPhase, Element,
+    ElementId, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId,
+    IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    SharedString, Size, TextOverflow, TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace,
+    Window, WrappedLine, WrappedLineLayout, register_tooltip_mouse_handlers,
+    set_tooltip_on_window,
 };
 use anyhow::Context as _;
 use itertools::Itertools;
@@ -17,6 +18,48 @@ use std::{
     sync::Arc,
 };
 use util::ResultExt;
+
+fn text_style_content_hash(style: &TextStyle, rem_size: Pixels) -> u64 {
+    let mut hasher = ContentHasher::default();
+    hasher.write_u64(style.color.content_hash());
+    hasher.write_u64(crate::content_hash::ContentHash::content_hash(&style.font_family));
+    hasher.write_u64(style.font_features.content_hash());
+    hasher.write_u64(style.font_fallbacks.content_hash());
+    let font_size = style.font_size.to_pixels(rem_size);
+    hasher.write_u64(font_size.content_hash());
+    let line_height = style.line_height.to_pixels(font_size.into(), rem_size);
+    hasher.write_u64(line_height.content_hash());
+    hasher.write_u64(style.font_weight.content_hash());
+    hasher.write_u64(style.font_style.content_hash());
+    hasher.write_u64(style.background_color.content_hash());
+    hasher.write_u64(style.underline.content_hash());
+    hasher.write_u64(style.strikethrough.content_hash());
+    hasher.write_u64(style.white_space.content_hash());
+    hasher.write_u64(style.text_overflow.content_hash());
+    hasher.write_u64(style.text_align.content_hash());
+    hasher.write_u64(style.line_clamp.content_hash());
+    hasher.finish()
+}
+
+fn text_content_hash(
+    text: &str,
+    runs: Option<&[TextRun]>,
+    style: &TextStyle,
+    rem_size: Pixels,
+) -> u64 {
+    let mut hasher = ContentHasher::default();
+    hasher.write_u64(text.content_hash());
+    hasher.write_u64(text_style_content_hash(style, rem_size));
+    if let Some(runs) = runs {
+        let mut runs_hasher = ContentHasher::default();
+        runs_hasher.write_u64(runs.len() as u64);
+        for run in runs {
+            runs_hasher.write_u64(run.content_hash());
+        }
+        hasher.write_u64(runs_hasher.finish());
+    }
+    hasher.finish()
+}
 
 impl Element for &'static str {
     type RequestLayoutState = TextLayout;
@@ -65,6 +108,17 @@ impl Element for &'static str {
         cx: &mut App,
     ) {
         text_layout.paint(self, window, cx)
+    }
+
+    fn content_hash(
+        &self,
+        _id: Option<&GlobalElementId>,
+        _bounds: Bounds<Pixels>,
+        window: &Window,
+        _cx: &App,
+    ) -> Option<u64> {
+        let style = window.text_style();
+        Some(text_content_hash(self, None, &style, window.rem_size()))
     }
 }
 
@@ -132,6 +186,16 @@ impl Element for SharedString {
     ) {
         text_layout.paint(self.as_ref(), window, cx)
     }
+    fn content_hash(
+        &self,
+        _id: Option<&GlobalElementId>,
+        _bounds: Bounds<Pixels>,
+        window: &Window,
+        _cx: &App,
+    ) -> Option<u64> {
+        let style = window.text_style();
+        Some(text_content_hash(self.as_ref(), None, &style, window.rem_size()))
+    }
 }
 
 impl IntoElement for SharedString {
@@ -152,6 +216,7 @@ pub struct StyledText {
     runs: Option<Vec<TextRun>>,
     delayed_highlights: Option<Vec<(Range<usize>, HighlightStyle)>>,
     layout: TextLayout,
+    content_hash: Option<u64>,
 }
 
 impl StyledText {
@@ -162,6 +227,7 @@ impl StyledText {
             runs: None,
             delayed_highlights: None,
             layout: TextLayout::default(),
+            content_hash: None,
         }
     }
 
@@ -204,6 +270,7 @@ impl StyledText {
                 })
                 .collect::<Vec<_>>(),
         );
+        self.content_hash = None;
         self
     }
 
@@ -242,6 +309,7 @@ impl StyledText {
         }
         assert!(text.is_empty(), "invalid text run");
         self.runs = Some(runs);
+        self.content_hash = None;
         self
     }
 }
@@ -271,6 +339,10 @@ impl Element for StyledText {
             })
         });
 
+        let style = window.text_style();
+        self.content_hash =
+            Some(text_content_hash(&self.text, runs.as_deref(), &style, window.rem_size()));
+
         let layout_id = self.layout.layout(self.text.clone(), runs, window, cx);
         (layout_id, ())
     }
@@ -298,6 +370,15 @@ impl Element for StyledText {
         cx: &mut App,
     ) {
         self.layout.paint(&self.text, window, cx)
+    }
+    fn content_hash(
+        &self,
+        _id: Option<&GlobalElementId>,
+        _bounds: Bounds<Pixels>,
+        _window: &Window,
+        _cx: &App,
+    ) -> Option<u64> {
+        self.content_hash
     }
 }
 
@@ -914,6 +995,15 @@ impl Element for InteractiveText {
                 ((), interactive_state)
             },
         );
+    }
+    fn content_hash(
+        &self,
+        _id: Option<&GlobalElementId>,
+        _bounds: Bounds<Pixels>,
+        _window: &Window,
+        _cx: &App,
+    ) -> Option<u64> {
+        self.text.content_hash
     }
 }
 

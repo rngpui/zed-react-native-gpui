@@ -23,6 +23,8 @@ pub(crate) type DrawOrder = u32;
 #[derive(Default)]
 pub(crate) struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
+    generation: u64,
+    dirty_ranges: Vec<Range<usize>>,
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<DrawOrder>,
     pub(crate) shadows: Vec<Shadow>,
@@ -44,6 +46,8 @@ pub(crate) struct Scene {
 impl Scene {
     pub fn clear(&mut self) {
         self.paint_operations.clear();
+        self.generation = self.generation.wrapping_add(1);
+        self.dirty_ranges.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
         self.paths.clear();
@@ -67,18 +71,176 @@ impl Scene {
     }
 
     pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
+        self.push_layer_internal(bounds, false);
+    }
+
+    pub fn push_layer_from_cache(&mut self, bounds: Bounds<ScaledPixels>) {
+        self.push_layer_internal(bounds, true);
+    }
+
+    fn push_layer_internal(&mut self, bounds: Bounds<ScaledPixels>, from_cache: bool) {
         let order = self.primitive_bounds.insert(bounds);
         self.layer_stack.push(order);
+        if !from_cache {
+            self.mark_dirty(self.paint_operations.len());
+        }
         self.paint_operations
             .push(PaintOperation::StartLayer(bounds));
     }
 
     pub fn pop_layer(&mut self) {
+        self.pop_layer_internal(false);
+    }
+
+    pub fn pop_layer_from_cache(&mut self) {
+        self.pop_layer_internal(true);
+    }
+
+    fn pop_layer_internal(&mut self, from_cache: bool) {
         self.layer_stack.pop();
+        if !from_cache {
+            self.mark_dirty(self.paint_operations.len());
+        }
         self.paint_operations.push(PaintOperation::EndLayer);
     }
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
+        self.insert_primitive_internal(primitive, false);
+    }
+
+    pub fn insert_primitive_from_cache(&mut self, primitive: impl Into<Primitive>) {
+        self.insert_primitive_internal(primitive, true);
+    }
+
+    /// Insert a primitive with an offset applied during insertion.
+    /// This avoids the need to clone+translate the primitive before insertion,
+    /// reducing the total clone count from 2 to 1 for cached primitives.
+    ///
+    /// Note: This method does NOT add to paint_operations since cached primitives
+    /// don't need Scene-to-Scene replay - they're replayed from PrimitiveCache instead.
+    pub fn insert_primitive_with_offset(
+        &mut self,
+        primitive: &Primitive,
+        offset: Point<ScaledPixels>,
+        content_mask: ContentMask<ScaledPixels>,
+    ) {
+        let transformed_bounds = self.offset_bounds(primitive, offset);
+        let clipped_bounds = transformed_bounds.intersect(&content_mask.bounds);
+
+        if clipped_bounds.is_empty() {
+            return;
+        }
+
+        let order = self
+            .layer_stack
+            .last()
+            .copied()
+            .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
+
+        // Clone with offset and content_mask applied in one pass
+        // Skip paint_operations for cached primitives to reduce clone count
+        match primitive {
+            Primitive::Shadow(shadow, transform) => {
+                let mut shadow = shadow.clone();
+                shadow.order = order;
+                shadow.bounds = Self::apply_offset(shadow.bounds, offset);
+                shadow.content_mask = content_mask;
+                self.shadows.push(shadow);
+                self.shadow_transforms.push(*transform);
+            }
+            Primitive::Quad(quad, transform) => {
+                let mut quad = quad.clone();
+                quad.order = order;
+                quad.bounds = Self::apply_offset(quad.bounds, offset);
+                quad.content_mask = content_mask;
+                self.quads.push(quad);
+                self.quad_transforms.push(*transform);
+            }
+            Primitive::BackdropBlur(blur, transform) => {
+                let mut blur = blur.clone();
+                blur.order = order;
+                blur.bounds = Self::apply_offset(blur.bounds, offset);
+                blur.content_mask = content_mask;
+                self.backdrop_blurs.push(blur);
+                self.backdrop_blur_transforms.push(*transform);
+            }
+            Primitive::Path(path) => {
+                let mut path = path.clone();
+                path.order = order;
+                path.id = PathId(self.paths.len());
+                path.bounds = Self::apply_offset(path.bounds, offset);
+                path.content_mask = content_mask.clone();
+                for vertex in &mut path.vertices {
+                    vertex.xy_position = Point {
+                        x: vertex.xy_position.x + offset.x,
+                        y: vertex.xy_position.y + offset.y,
+                    };
+                    vertex.content_mask = content_mask.clone();
+                }
+                self.paths.push(path);
+            }
+            Primitive::Underline(underline, transform) => {
+                let mut underline = underline.clone();
+                underline.order = order;
+                underline.bounds = Self::apply_offset(underline.bounds, offset);
+                underline.content_mask = content_mask;
+                self.underlines.push(underline);
+                self.underline_transforms.push(*transform);
+            }
+            Primitive::MonochromeSprite(sprite) => {
+                let mut sprite = sprite.clone();
+                sprite.order = order;
+                sprite.bounds = Self::apply_offset(sprite.bounds, offset);
+                sprite.content_mask = content_mask;
+                self.monochrome_sprites.push(sprite);
+            }
+            Primitive::SubpixelSprite(sprite) => {
+                let mut sprite = sprite.clone();
+                sprite.order = order;
+                sprite.bounds = Self::apply_offset(sprite.bounds, offset);
+                sprite.content_mask = content_mask;
+                self.subpixel_sprites.push(sprite);
+            }
+            Primitive::PolychromeSprite(sprite, transform) => {
+                let mut sprite = sprite.clone();
+                sprite.order = order;
+                sprite.bounds = Self::apply_offset(sprite.bounds, offset);
+                sprite.content_mask = content_mask;
+                self.polychrome_sprites.push(sprite);
+                self.polychrome_sprite_transforms.push(*transform);
+            }
+            Primitive::Surface(surface) => {
+                let mut surface = surface.clone();
+                surface.order = order;
+                surface.bounds = Self::apply_offset(surface.bounds, offset);
+                surface.content_mask = content_mask;
+                self.surfaces.push(surface);
+            }
+        }
+    }
+
+    fn apply_offset(mut bounds: Bounds<ScaledPixels>, offset: Point<ScaledPixels>) -> Bounds<ScaledPixels> {
+        bounds.origin.x = bounds.origin.x + offset.x;
+        bounds.origin.y = bounds.origin.y + offset.y;
+        bounds
+    }
+
+    fn offset_bounds(&self, primitive: &Primitive, offset: Point<ScaledPixels>) -> Bounds<ScaledPixels> {
+        let bounds = match primitive {
+            Primitive::Shadow(shadow, _) => shadow.bounds,
+            Primitive::Quad(quad, _) => quad.bounds,
+            Primitive::BackdropBlur(blur, _) => blur.bounds,
+            Primitive::Path(path) => path.bounds,
+            Primitive::Underline(underline, _) => underline.bounds,
+            Primitive::MonochromeSprite(sprite) => sprite.bounds,
+            Primitive::SubpixelSprite(sprite) => sprite.bounds,
+            Primitive::PolychromeSprite(sprite, _) => sprite.bounds,
+            Primitive::Surface(surface) => surface.bounds,
+        };
+        Self::apply_offset(bounds, offset)
+    }
+
+    fn insert_primitive_internal(&mut self, primitive: impl Into<Primitive>, from_cache: bool) {
         let mut primitive = primitive.into();
         let transformed_bounds = transformed_bounds(&primitive);
         let clipped_bounds = transformed_bounds.intersect(&primitive.content_mask().bounds);
@@ -199,6 +361,9 @@ impl Scene {
                 Primitive::Surface(surface) => surface.bounds,
             }
         }
+        if !from_cache {
+            self.mark_dirty(self.paint_operations.len());
+        }
         self.paint_operations
             .push(PaintOperation::Primitive(primitive));
     }
@@ -206,9 +371,11 @@ impl Scene {
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
         for operation in &prev_scene.paint_operations[range] {
             match operation {
-                PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
-                PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
-                PaintOperation::EndLayer => self.pop_layer(),
+                PaintOperation::Primitive(primitive) => {
+                    self.insert_primitive_from_cache(primitive.clone())
+                }
+                PaintOperation::StartLayer(bounds) => self.push_layer_from_cache(*bounds),
+                PaintOperation::EndLayer => self.pop_layer_from_cache(),
             }
         }
     }
@@ -271,6 +438,20 @@ impl Scene {
             |sprite| (sprite.order, sprite.tile.tile_id),
         );
         self.surfaces.sort_by_key(|surface| surface.order);
+    }
+
+    fn mark_dirty(&mut self, index: usize) {
+        if let Some(last) = self.dirty_ranges.last_mut() {
+            if last.end == index {
+                last.end += 1;
+                return;
+            }
+        }
+        self.dirty_ranges.push(index..index + 1);
+    }
+
+    pub fn dirty_batch_ranges(&self) -> &[Range<usize>] {
+        &self.dirty_ranges
     }
 
     #[cfg_attr(
