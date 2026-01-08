@@ -9,8 +9,9 @@
 use std::time::Instant;
 
 use gpui::{
-    Application, Bounds, Context, PrimitiveCacheStats, Render, TextShapeCacheStats, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+    Application, Bounds, Context, MeasureCacheStats, PrimitiveCacheStats, Render,
+    TextShapeCacheStats, TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*, px,
+    rgb, size,
 };
 
 const WINDOW_WIDTH: f32 = 1200.0;
@@ -27,6 +28,7 @@ struct CacheBench {
     last_frame: Instant,
     cache_stats: PrimitiveCacheStats,
     text_cache_stats: TextShapeCacheStats,
+    measure_cache_stats: MeasureCacheStats,
     frame_count: u64,
 }
 
@@ -37,6 +39,7 @@ impl CacheBench {
             last_frame: Instant::now(),
             cache_stats: PrimitiveCacheStats::default(),
             text_cache_stats: TextShapeCacheStats::default(),
+            measure_cache_stats: MeasureCacheStats::default(),
             frame_count: 0,
         }
     }
@@ -59,6 +62,7 @@ impl CacheBench {
         // Get cache stats from the previous frame
         self.cache_stats = window.take_primitive_cache_stats();
         self.text_cache_stats = window.take_text_shape_cache_stats();
+        self.measure_cache_stats = window.take_measure_cache_stats();
         self.frame_count += 1;
 
         (fps, avg_frame_time)
@@ -73,6 +77,7 @@ impl Render for CacheBench {
         let (fps, frame_time) = self.update_stats(window);
         let stats = self.cache_stats;
         let text_stats = self.text_cache_stats;
+        let measure_stats = self.measure_cache_stats;
         let frame_count = self.frame_count;
 
         // Calculate hit rates
@@ -86,6 +91,13 @@ impl Render for CacheBench {
         let text_total = text_stats.hits + text_stats.misses;
         let text_hit_rate = if text_total > 0 {
             (text_stats.hits as f32 / text_total as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        let measure_total = measure_stats.hits + measure_stats.misses;
+        let measure_hit_rate = if measure_total > 0 {
+            (measure_stats.hits as f32 / measure_total as f32) * 100.0
         } else {
             0.0
         };
@@ -150,6 +162,22 @@ impl Render for CacheBench {
                             .child(stat_box("Misses", format!("{}", text_stats.misses), rgb(0xf38ba8)))
                             .child(stat_box("Hit Rate", format!("{:.1}%", text_hit_rate), rgb(0xf9e2af)))
                             .child(stat_box("Inserts", format!("{}", text_stats.inserts), rgb(0x89dceb))),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(0x9399b2))
+                            .text_sm()
+                            .mt_2()
+                            .child("Measure Cache"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_4()
+                            .child(stat_box("Hits", format!("{}", measure_stats.hits), rgb(0xa6e3a1)))
+                            .child(stat_box("Misses", format!("{}", measure_stats.misses), rgb(0xf38ba8)))
+                            .child(stat_box("Hit Rate", format!("{:.1}%", measure_hit_rate), rgb(0xf9e2af)))
+                            .child(stat_box("Inserts", format!("{}", measure_stats.inserts), rgb(0x89dceb))),
                     ),
             )
             .child(

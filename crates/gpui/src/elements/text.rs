@@ -484,10 +484,31 @@ impl TextLayout {
                     return size;
                 }
 
+                // Check measure cache first (fast size-only lookup)
+                if truncate_width.is_none() {
+                    if let Some(size) = window.lookup_measure(content_hash, known_dimensions, available_space) {
+                        // We have the size but still need the shaped text for rendering
+                        // Check text shape cache for the full data
+                        if let Some(shaped) = window.lookup_text_shape(content_hash, wrap_width) {
+                            element_state.borrow_mut().replace(TextLayoutInner {
+                                lines: shaped.lines,
+                                len: shaped.len,
+                                line_height: shaped.line_height,
+                                wrap_width,
+                                size: Some(size),
+                                bounds: None,
+                            });
+                        }
+                        return size;
+                    }
+                }
+
                 // Check global text shape cache (for cross-frame caching)
                 if truncate_width.is_none() {
                     if let Some(shaped) = window.lookup_text_shape(content_hash, wrap_width) {
                         let size = shaped.size;
+                        // Also insert into measure cache for fast future lookups
+                        window.insert_measure(content_hash, known_dimensions, available_space, size);
                         element_state.borrow_mut().replace(TextLayoutInner {
                             lines: shaped.lines,
                             len: shaped.len,
@@ -543,7 +564,7 @@ impl TextLayout {
                     size.width = size.width.max(line_size.width).ceil();
                 }
 
-                // Store in global cache for future frames (skip truncated text)
+                // Store in global caches for future frames (skip truncated text)
                 if truncate_width.is_none() {
                     window.insert_text_shape(
                         content_hash,
@@ -555,6 +576,7 @@ impl TextLayout {
                             size,
                         },
                     );
+                    window.insert_measure(content_hash, known_dimensions, available_space, size);
                 }
 
                 element_state.borrow_mut().replace(TextLayoutInner {

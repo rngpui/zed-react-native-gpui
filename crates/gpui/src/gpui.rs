@@ -49,6 +49,8 @@ mod taffy;
 pub mod test;
 mod text_shape_cache;
 pub use text_shape_cache::TextShapeCacheStats;
+mod measure_cache;
+pub use measure_cache::MeasureCacheStats;
 mod text_system;
 mod util;
 mod view;
