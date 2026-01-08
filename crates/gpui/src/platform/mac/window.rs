@@ -1533,6 +1533,15 @@ impl PlatformWindow for MacWindow {
         this.renderer.draw(scene);
     }
 
+    fn draw_incremental(
+        &self,
+        scene: &crate::Scene,
+        dirty_ranges: &[std::ops::Range<usize>],
+    ) {
+        let mut this = self.0.lock();
+        this.renderer.draw_incremental(scene, dirty_ranges);
+    }
+
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.0.lock().renderer.sprite_atlas().clone()
     }

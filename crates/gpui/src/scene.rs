@@ -23,6 +23,8 @@ pub(crate) type DrawOrder = u32;
 #[derive(Default)]
 pub(crate) struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
+    generation: u64,
+    dirty_ranges: Vec<Range<usize>>,
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<DrawOrder>,
     pub(crate) shadows: Vec<Shadow>,
@@ -44,6 +46,8 @@ pub(crate) struct Scene {
 impl Scene {
     pub fn clear(&mut self) {
         self.paint_operations.clear();
+        self.generation = self.generation.wrapping_add(1);
+        self.dirty_ranges.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
         self.paths.clear();
@@ -67,18 +71,48 @@ impl Scene {
     }
 
     pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
+        self.push_layer_internal(bounds, false);
+    }
+
+    pub fn push_layer_from_cache(&mut self, bounds: Bounds<ScaledPixels>) {
+        self.push_layer_internal(bounds, true);
+    }
+
+    fn push_layer_internal(&mut self, bounds: Bounds<ScaledPixels>, from_cache: bool) {
         let order = self.primitive_bounds.insert(bounds);
         self.layer_stack.push(order);
+        if !from_cache {
+            self.mark_dirty(self.paint_operations.len());
+        }
         self.paint_operations
             .push(PaintOperation::StartLayer(bounds));
     }
 
     pub fn pop_layer(&mut self) {
+        self.pop_layer_internal(false);
+    }
+
+    pub fn pop_layer_from_cache(&mut self) {
+        self.pop_layer_internal(true);
+    }
+
+    fn pop_layer_internal(&mut self, from_cache: bool) {
         self.layer_stack.pop();
+        if !from_cache {
+            self.mark_dirty(self.paint_operations.len());
+        }
         self.paint_operations.push(PaintOperation::EndLayer);
     }
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
+        self.insert_primitive_internal(primitive, false);
+    }
+
+    pub fn insert_primitive_from_cache(&mut self, primitive: impl Into<Primitive>) {
+        self.insert_primitive_internal(primitive, true);
+    }
+
+    fn insert_primitive_internal(&mut self, primitive: impl Into<Primitive>, from_cache: bool) {
         let mut primitive = primitive.into();
         let transformed_bounds = transformed_bounds(&primitive);
         let clipped_bounds = transformed_bounds.intersect(&primitive.content_mask().bounds);
@@ -199,6 +233,9 @@ impl Scene {
                 Primitive::Surface(surface) => surface.bounds,
             }
         }
+        if !from_cache {
+            self.mark_dirty(self.paint_operations.len());
+        }
         self.paint_operations
             .push(PaintOperation::Primitive(primitive));
     }
@@ -206,9 +243,11 @@ impl Scene {
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
         for operation in &prev_scene.paint_operations[range] {
             match operation {
-                PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
-                PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
-                PaintOperation::EndLayer => self.pop_layer(),
+                PaintOperation::Primitive(primitive) => {
+                    self.insert_primitive_from_cache(primitive.clone())
+                }
+                PaintOperation::StartLayer(bounds) => self.push_layer_from_cache(*bounds),
+                PaintOperation::EndLayer => self.pop_layer_from_cache(),
             }
         }
     }
@@ -271,6 +310,20 @@ impl Scene {
             |sprite| (sprite.order, sprite.tile.tile_id),
         );
         self.surfaces.sort_by_key(|surface| surface.order);
+    }
+
+    fn mark_dirty(&mut self, index: usize) {
+        if let Some(last) = self.dirty_ranges.last_mut() {
+            if last.end == index {
+                last.end += 1;
+                return;
+            }
+        }
+        self.dirty_ranges.push(index..index + 1);
+    }
+
+    pub fn dirty_batch_ranges(&self) -> &[Range<usize>] {
+        &self.dirty_ranges
     }
 
     #[cfg_attr(

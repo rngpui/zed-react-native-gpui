@@ -1,8 +1,9 @@
 use crate::{
-    AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
-    Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
-    Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
-    SharedString, SharedUri, StyleRefinement, Styled, Task, Window, px,
+    AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, ContentHash, ContentHasher,
+    DefiniteLength, Element, ElementId, Entity, GlobalElementId, Hitbox, Image, ImageCache,
+    InspectorElementId, InteractiveElement, Interactivity, IntoElement, LayoutId, Length,
+    ObjectFit, Pixels, RenderImage, Resource, SharedString, SharedUri, StyleRefinement, Styled,
+    Task, Window, px,
 };
 use anyhow::{Context as _, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -423,7 +424,8 @@ impl Element for Img {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        self.interactivity.prepaint(
+        let source = self.source.clone();
+        let hitbox = self.interactivity.prepaint(
             global_id,
             inspector_id,
             bounds,
@@ -437,7 +439,33 @@ impl Element for Img {
 
                 hitbox
             },
-        )
+        );
+
+        let base_hash = self.interactivity.content_hash;
+        let image_cache = self
+            .image_cache
+            .clone()
+            .or_else(|| window.image_cache_stack.last().cloned());
+        let image_data = source
+            .get_data(image_cache, window, cx)
+            .and_then(|result| result.ok());
+
+        if let Some(data) = image_data {
+            let mut hasher = ContentHasher::default();
+            if let Some(base) = base_hash {
+                hasher.write_u64(base);
+            }
+            hasher.write_u64(data.id.content_hash());
+            hasher.write_u64(request_layout.frame_index as u64);
+            hasher.write_u64(data.scale_factor.content_hash());
+            hasher.write_u64(self.style.grayscale.content_hash());
+            hasher.write_u64(self.style.object_fit.content_hash());
+            self.interactivity.content_hash = Some(hasher.finish());
+        } else {
+            self.interactivity.content_hash = None;
+        }
+
+        hitbox
     }
 
     fn paint(
@@ -488,6 +516,16 @@ impl Element for Img {
                 }
             },
         )
+    }
+
+    fn content_hash(
+        &self,
+        _id: Option<&GlobalElementId>,
+        _bounds: Bounds<Pixels>,
+        _window: &Window,
+        _cx: &App,
+    ) -> Option<u64> {
+        self.interactivity.content_hash
     }
 }
 

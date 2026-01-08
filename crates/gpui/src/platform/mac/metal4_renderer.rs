@@ -77,8 +77,6 @@ enum TextureBindingIndex {
 /// Different render passes require different barrier configurations.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BarrierType {
-    /// No barrier needed
-    None,
     /// Barrier after blit operation (for backdrop blur)
     AfterBlit,
     /// Barrier after render pass (for path rasterization)
@@ -129,6 +127,9 @@ fn align_offset(offset: &mut usize) {
 /// - Supports parallel render encoding with suspend/resume
 #[allow(dead_code)]
 pub struct Metal4Renderer {
+    pending_dirty_ranges: Vec<std::ops::Range<usize>>,
+    incremental_draw: bool,
+    last_scene_len: usize,
     // Core Metal objects
     device: metal::Device,
     layer: metal::MetalLayer,
@@ -217,8 +218,6 @@ pub enum Metal4RendererError {
     PipelineCreationFailed(String),
     /// Failed to load shader library.
     ShaderLibraryFailed(String),
-    /// Other initialization error.
-    Other(String),
 }
 
 impl std::fmt::Display for Metal4RendererError {
@@ -235,7 +234,6 @@ impl std::fmt::Display for Metal4RendererError {
             Self::ResidencySetCreationFailed => write!(f, "Failed to create residency set"),
             Self::PipelineCreationFailed(msg) => write!(f, "Failed to create pipeline: {}", msg),
             Self::ShaderLibraryFailed(msg) => write!(f, "Failed to load shader library: {}", msg),
-            Self::Other(msg) => write!(f, "{}", msg),
         }
     }
 }
@@ -438,6 +436,9 @@ impl Metal4Renderer {
         }
 
         Ok(Self {
+            pending_dirty_ranges: Vec::new(),
+            incremental_draw: false,
+            last_scene_len: 0,
             device,
             layer,
             presents_with_transaction: false,
@@ -697,6 +698,8 @@ impl Metal4Renderer {
         // 1. Get drawable
         let Some(drawable) = self.layer.next_drawable() else {
             log::warn!("Metal 4: No drawable available");
+            self.pending_dirty_ranges.clear();
+            self.incremental_draw = false;
             return;
         };
 
@@ -718,25 +721,56 @@ impl Metal4Renderer {
                 .waitUntilSignaledValue_timeoutMS(wait_value, 1000);
         }
 
+        let mut has_dirty = if self.incremental_draw {
+            !self.pending_dirty_ranges.is_empty()
+        } else {
+            true
+        };
+        if !has_dirty && scene.len() != self.last_scene_len {
+            has_dirty = true;
+        }
+
+        let mut reuse_buffer = None;
+        if !has_dirty {
+            reuse_buffer = self.in_flight_instance_buffers[frame_index].take();
+            if reuse_buffer.is_none() {
+                has_dirty = true;
+            }
+        }
+
         // Release the old instance buffer from this frame slot (GPU is now done with it)
-        if let Some(old_buffer) = self.in_flight_instance_buffers[frame_index].take() {
-            self.instance_buffer_pool.lock().release(old_buffer);
+        if has_dirty {
+            if let Some(old_buffer) = self.in_flight_instance_buffers[frame_index].take() {
+                self.instance_buffer_pool.lock().release(old_buffer);
+            }
         }
 
         // Retry loop - if buffer is too small, we'll retry with a larger one
         loop {
-            let result = self.draw_scene_inner(scene, &drawable, viewport_size, frame_index);
+            let result = self.draw_scene_inner(
+                scene,
+                &drawable,
+                viewport_size,
+                frame_index,
+                reuse_buffer.take(),
+                has_dirty,
+            );
 
             match result {
                 Ok(instance_buffer) => {
                     // Success - store buffer and return
                     self.in_flight_instance_buffers[frame_index] = Some(instance_buffer);
+                    self.pending_dirty_ranges.clear();
+                    self.incremental_draw = false;
+                    self.last_scene_len = scene.len();
                     return;
                 }
                 Err(instance_buffer) => {
                     // Buffer overflow - release the too-small buffer and try with a larger one
                     let mut pool = self.instance_buffer_pool.lock();
                     pool.release(instance_buffer);
+                    reuse_buffer = None;
+                    has_dirty = true;
 
                     let buffer_size = pool.buffer_size();
                     if buffer_size >= 256 * 1024 * 1024 {
@@ -744,6 +778,8 @@ impl Metal4Renderer {
                             "Metal 4: instance buffer size grew too large: {}",
                             buffer_size
                         );
+                        self.pending_dirty_ranges.clear();
+                        self.incremental_draw = false;
                         return;
                     }
 
@@ -758,6 +794,18 @@ impl Metal4Renderer {
         }
     }
 
+    /// Incremental draw; reuses instance buffers when nothing changed.
+    pub fn draw_incremental(
+        &mut self,
+        scene: &Scene,
+        dirty_ranges: &[std::ops::Range<usize>],
+    ) {
+        self.pending_dirty_ranges.clear();
+        self.pending_dirty_ranges.extend_from_slice(dirty_ranges);
+        self.incremental_draw = true;
+        self.draw(scene);
+    }
+
     /// Inner draw method that returns the instance buffer on success,
     /// or returns the buffer as an error if it was too small.
     fn draw_scene_inner(
@@ -766,6 +814,8 @@ impl Metal4Renderer {
         drawable: &metal::MetalDrawableRef,
         viewport_size: Size<DevicePixels>,
         frame_index: usize,
+        instance_buffer: Option<super::metal_renderer::InstanceBuffer>,
+        write_instances: bool,
     ) -> Result<super::metal_renderer::InstanceBuffer, super::metal_renderer::InstanceBuffer> {
 
         // 3. Reset allocator for this frame
@@ -779,8 +829,11 @@ impl Metal4Renderer {
         // Mark residency set for this command buffer
         self.command_buffer.useResidencySet(&self.residency_set);
 
-        // 5. Acquire instance buffer for this frame's data
-        let mut instance_buffer = self.instance_buffer_pool.lock().acquire(&self.device);
+        // 5. Acquire instance buffer for this frame's data (or reuse when clean)
+        let mut instance_buffer = match instance_buffer {
+            Some(buffer) => buffer,
+            None => self.instance_buffer_pool.lock().acquire(&self.device),
+        };
         let mut instance_offset: usize = 0;
 
         // 6. Add resources to residency set and commit only if something changed
@@ -918,6 +971,7 @@ impl Metal4Renderer {
                         &mut instance_buffer,
                         &mut instance_offset,
                         encoder,
+                        write_instances,
                     )
                 }
                 PrimitiveBatch::Shadows(shadows, transforms) => {
@@ -927,6 +981,7 @@ impl Metal4Renderer {
                         &mut instance_buffer,
                         &mut instance_offset,
                         encoder,
+                        write_instances,
                     )
                 }
                 PrimitiveBatch::Underlines(underlines, transforms) => {
@@ -936,6 +991,7 @@ impl Metal4Renderer {
                         &mut instance_buffer,
                         &mut instance_offset,
                         encoder,
+                        write_instances,
                     )
                 }
                 PrimitiveBatch::MonochromeSprites { texture_id, sprites } => {
@@ -945,6 +1001,7 @@ impl Metal4Renderer {
                         &mut instance_buffer,
                         &mut instance_offset,
                         encoder,
+                        write_instances,
                     )
                 }
                 PrimitiveBatch::PolychromeSprites { texture_id, sprites, transforms } => {
@@ -955,6 +1012,7 @@ impl Metal4Renderer {
                         &mut instance_buffer,
                         &mut instance_offset,
                         encoder,
+                        write_instances,
                     )
                 }
                 PrimitiveBatch::BackdropBlurs(blurs, transforms) => {
@@ -988,6 +1046,7 @@ impl Metal4Renderer {
                                 &mut instance_buffer,
                                 &mut instance_offset,
                                 enc,
+                                write_instances,
                             )
                         } else {
                             false
@@ -1015,6 +1074,7 @@ impl Metal4Renderer {
                         &mut instance_buffer,
                         &mut instance_offset,
                         viewport_size,
+                        write_instances,
                     );
 
                     // Create new encoder with LoadAction::Load (preserve existing content)
@@ -1033,6 +1093,7 @@ impl Metal4Renderer {
                                 &mut instance_buffer,
                                 &mut instance_offset,
                                 enc,
+                                write_instances,
                             )
                         } else {
                             false
@@ -1051,6 +1112,7 @@ impl Metal4Renderer {
                             &mut instance_offset,
                             viewport_size,
                             enc,
+                            write_instances,
                         )
                     } else {
                         false
@@ -1128,6 +1190,7 @@ impl Metal4Renderer {
         instance_buffer: &mut super::metal_renderer::InstanceBuffer,
         instance_offset: &mut usize,
         encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
+        write_instances: bool,
     ) -> bool {
         if quads.is_empty() {
             return true;
@@ -1148,18 +1211,20 @@ impl Metal4Renderer {
         }
 
         // Copy data to instance buffer
-        unsafe {
-            let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-            ptr::copy_nonoverlapping(
-                quads.as_ptr() as *const u8,
-                buffer_ptr.add(quads_offset),
-                quads_bytes,
-            );
-            ptr::copy_nonoverlapping(
-                transforms.as_ptr() as *const u8,
-                buffer_ptr.add(transforms_offset),
-                transforms_bytes,
-            );
+        if write_instances {
+            unsafe {
+                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
+                ptr::copy_nonoverlapping(
+                    quads.as_ptr() as *const u8,
+                    buffer_ptr.add(quads_offset),
+                    quads_bytes,
+                );
+                ptr::copy_nonoverlapping(
+                    transforms.as_ptr() as *const u8,
+                    buffer_ptr.add(transforms_offset),
+                    transforms_bytes,
+                );
+            }
         }
 
         // Set pipeline (argument table is already bound for the render pass)
@@ -1199,6 +1264,7 @@ impl Metal4Renderer {
         instance_buffer: &mut super::metal_renderer::InstanceBuffer,
         instance_offset: &mut usize,
         encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
+        write_instances: bool,
     ) -> bool {
         if shadows.is_empty() {
             return true;
@@ -1217,18 +1283,20 @@ impl Metal4Renderer {
             return false;
         }
 
-        unsafe {
-            let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-            ptr::copy_nonoverlapping(
-                shadows.as_ptr() as *const u8,
-                buffer_ptr.add(shadows_offset),
-                shadows_bytes,
-            );
-            ptr::copy_nonoverlapping(
-                transforms.as_ptr() as *const u8,
-                buffer_ptr.add(transforms_offset),
-                transforms_bytes,
-            );
+        if write_instances {
+            unsafe {
+                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
+                ptr::copy_nonoverlapping(
+                    shadows.as_ptr() as *const u8,
+                    buffer_ptr.add(shadows_offset),
+                    shadows_bytes,
+                );
+                ptr::copy_nonoverlapping(
+                    transforms.as_ptr() as *const u8,
+                    buffer_ptr.add(transforms_offset),
+                    transforms_bytes,
+                );
+            }
         }
 
         // Set pipeline (argument table is already bound for the render pass)
@@ -1268,6 +1336,7 @@ impl Metal4Renderer {
         instance_buffer: &mut super::metal_renderer::InstanceBuffer,
         instance_offset: &mut usize,
         encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
+        write_instances: bool,
     ) -> bool {
         if underlines.is_empty() {
             return true;
@@ -1286,18 +1355,20 @@ impl Metal4Renderer {
             return false;
         }
 
-        unsafe {
-            let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-            ptr::copy_nonoverlapping(
-                underlines.as_ptr() as *const u8,
-                buffer_ptr.add(underlines_offset),
-                underlines_bytes,
-            );
-            ptr::copy_nonoverlapping(
-                transforms.as_ptr() as *const u8,
-                buffer_ptr.add(transforms_offset),
-                transforms_bytes,
-            );
+        if write_instances {
+            unsafe {
+                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
+                ptr::copy_nonoverlapping(
+                    underlines.as_ptr() as *const u8,
+                    buffer_ptr.add(underlines_offset),
+                    underlines_bytes,
+                );
+                ptr::copy_nonoverlapping(
+                    transforms.as_ptr() as *const u8,
+                    buffer_ptr.add(transforms_offset),
+                    transforms_bytes,
+                );
+            }
         }
 
         // Set pipeline (argument table is already bound for the render pass)
@@ -1337,6 +1408,7 @@ impl Metal4Renderer {
         instance_buffer: &mut super::metal_renderer::InstanceBuffer,
         instance_offset: &mut usize,
         encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
+        write_instances: bool,
     ) -> bool {
         if sprites.is_empty() {
             return true;
@@ -1351,13 +1423,15 @@ impl Metal4Renderer {
             return false;
         }
 
-        unsafe {
-            let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-            ptr::copy_nonoverlapping(
-                sprites.as_ptr() as *const u8,
-                buffer_ptr.add(sprites_offset),
-                sprites_bytes,
-            );
+        if write_instances {
+            unsafe {
+                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
+                ptr::copy_nonoverlapping(
+                    sprites.as_ptr() as *const u8,
+                    buffer_ptr.add(sprites_offset),
+                    sprites_bytes,
+                );
+            }
         }
 
         // Get atlas texture and its size
@@ -1420,6 +1494,7 @@ impl Metal4Renderer {
         instance_buffer: &mut super::metal_renderer::InstanceBuffer,
         instance_offset: &mut usize,
         encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
+        write_instances: bool,
     ) -> bool {
         if sprites.is_empty() {
             return true;
@@ -1438,18 +1513,20 @@ impl Metal4Renderer {
             return false;
         }
 
-        unsafe {
-            let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-            ptr::copy_nonoverlapping(
-                sprites.as_ptr() as *const u8,
-                buffer_ptr.add(sprites_offset),
-                sprites_bytes,
-            );
-            ptr::copy_nonoverlapping(
-                transforms.as_ptr() as *const u8,
-                buffer_ptr.add(transforms_offset),
-                transforms_bytes,
-            );
+        if write_instances {
+            unsafe {
+                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
+                ptr::copy_nonoverlapping(
+                    sprites.as_ptr() as *const u8,
+                    buffer_ptr.add(sprites_offset),
+                    sprites_bytes,
+                );
+                ptr::copy_nonoverlapping(
+                    transforms.as_ptr() as *const u8,
+                    buffer_ptr.add(transforms_offset),
+                    transforms_bytes,
+                );
+            }
         }
 
         // Get atlas texture and its size
@@ -1566,7 +1643,6 @@ impl Metal4Renderer {
         // Add consumer barrier based on barrier type
         // This ensures the previous pass completes before we start rendering
         match barrier_type {
-            BarrierType::None => {}
             BarrierType::AfterBlit => {
                 // Wait for blit operation to complete before fragment stage reads
                 encoder.barrierAfterQueueStages_beforeStages_visibilityOptions(
@@ -1662,6 +1738,7 @@ impl Metal4Renderer {
         instance_buffer: &mut super::metal_renderer::InstanceBuffer,
         instance_offset: &mut usize,
         encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
+        write_instances: bool,
     ) -> bool {
         if blurs.is_empty() {
             return true;
@@ -1685,18 +1762,20 @@ impl Metal4Renderer {
         }
 
         // Copy blur and transform data to instance buffer
-        unsafe {
-            let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-            ptr::copy_nonoverlapping(
-                blurs.as_ptr() as *const u8,
-                buffer_ptr.add(blurs_offset),
-                blurs_bytes,
-            );
-            ptr::copy_nonoverlapping(
-                transforms.as_ptr() as *const u8,
-                buffer_ptr.add(transforms_offset),
-                transforms_bytes,
-            );
+        if write_instances {
+            unsafe {
+                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
+                ptr::copy_nonoverlapping(
+                    blurs.as_ptr() as *const u8,
+                    buffer_ptr.add(blurs_offset),
+                    blurs_bytes,
+                );
+                ptr::copy_nonoverlapping(
+                    transforms.as_ptr() as *const u8,
+                    buffer_ptr.add(transforms_offset),
+                    transforms_bytes,
+                );
+            }
         }
 
         // Note: Backdrop texture was already added to residency set during batch pre-scan
@@ -1744,6 +1823,7 @@ impl Metal4Renderer {
         instance_buffer: &mut super::metal_renderer::InstanceBuffer,
         instance_offset: &mut usize,
         viewport_size: Size<DevicePixels>,
+        write_instances: bool,
     ) -> bool {
         if paths.is_empty() {
             return true;
@@ -1777,13 +1857,15 @@ impl Metal4Renderer {
         }
 
         // Copy vertex data to instance buffer
-        unsafe {
-            let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-            ptr::copy_nonoverlapping(
-                vertices.as_ptr() as *const u8,
-                buffer_ptr.add(*instance_offset),
-                vertices_bytes,
-            );
+        if write_instances {
+            unsafe {
+                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
+                ptr::copy_nonoverlapping(
+                    vertices.as_ptr() as *const u8,
+                    buffer_ptr.add(*instance_offset),
+                    vertices_bytes,
+                );
+            }
         }
 
         // Create render pass descriptor for intermediate texture
@@ -1883,6 +1965,7 @@ impl Metal4Renderer {
         instance_buffer: &mut super::metal_renderer::InstanceBuffer,
         instance_offset: &mut usize,
         encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
+        write_instances: bool,
     ) -> bool {
         let Some(first_path) = paths.first() else {
             return true;
@@ -1924,13 +2007,15 @@ impl Metal4Renderer {
         }
 
         // Copy sprite data to instance buffer
-        unsafe {
-            let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-            ptr::copy_nonoverlapping(
-                sprites.as_ptr() as *const u8,
-                buffer_ptr.add(*instance_offset),
-                sprites_bytes,
-            );
+        if write_instances {
+            unsafe {
+                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
+                ptr::copy_nonoverlapping(
+                    sprites.as_ptr() as *const u8,
+                    buffer_ptr.add(*instance_offset),
+                    sprites_bytes,
+                );
+            }
         }
 
         // Set path sprite pipeline
@@ -1972,6 +2057,7 @@ impl Metal4Renderer {
         instance_offset: &mut usize,
         _viewport_size: Size<DevicePixels>,
         encoder: &ProtocolObject<dyn MTL4RenderCommandEncoder>,
+        write_instances: bool,
     ) -> bool {
         // Set surface pipeline
         encoder.setRenderPipelineState(self.surface_pipeline.as_objc2());
@@ -2022,16 +2108,18 @@ impl Metal4Renderer {
             }
 
             // Write surface bounds to instance buffer
-            unsafe {
-                let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
-                let surface_bounds_ptr = buffer_ptr.add(*instance_offset) as *mut SurfaceBounds;
-                ptr::write(
-                    surface_bounds_ptr,
-                    SurfaceBounds {
-                        bounds: surface.bounds,
-                        content_mask: surface.content_mask.clone(),
-                    },
-                );
+            if write_instances {
+                unsafe {
+                    let buffer_ptr = instance_buffer.metal_buffer().contents() as *mut u8;
+                    let surface_bounds_ptr = buffer_ptr.add(*instance_offset) as *mut SurfaceBounds;
+                    ptr::write(
+                        surface_bounds_ptr,
+                        SurfaceBounds {
+                            bounds: surface.bounds,
+                            content_mask: surface.content_mask.clone(),
+                        },
+                    );
+                }
             }
 
             // Update texture size buffer

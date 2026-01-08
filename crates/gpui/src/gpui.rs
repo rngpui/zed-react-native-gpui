@@ -15,6 +15,7 @@ mod asset_cache;
 mod assets;
 mod bounds_tree;
 mod color;
+mod content_hash;
 /// The default colors used by GPUI.
 pub mod colors;
 mod element;
@@ -29,6 +30,7 @@ mod key_dispatch;
 mod keymap;
 mod path_builder;
 mod platform;
+mod primitive_cache;
 pub mod prelude;
 mod profiler;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -75,13 +77,16 @@ pub(crate) use arena::*;
 pub use asset_cache::*;
 pub use assets::*;
 pub use color::*;
+pub use content_hash::*;
 pub use ctor::ctor;
 pub use element::*;
 pub use elements::*;
 pub use executor::*;
 pub use geometry::*;
 pub use global::*;
-pub use gpui_macros::{AppContext, IntoElement, Render, VisualContext, register_action, test};
+pub use gpui_macros::{
+    AppContext, ContentHash, IntoElement, Render, VisualContext, register_action, test,
+};
 pub use http_client;
 pub use input::*;
 pub use inspector::*;

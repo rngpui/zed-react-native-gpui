@@ -82,6 +82,17 @@ impl MetalRendererBackend {
         }
     }
 
+    pub fn draw_incremental(&mut self, scene: &Scene, dirty_ranges: &[std::ops::Range<usize>]) {
+        match self {
+            MetalRendererBackend::Metal4(renderer) => {
+                renderer.draw_incremental(scene, dirty_ranges);
+            }
+            MetalRendererBackend::Classic(renderer) => {
+                renderer.draw_incremental(scene, dirty_ranges);
+            }
+        }
+    }
+
     pub fn update_transparency(&self, transparent: bool) {
         match self {
             Self::Classic(r) => r.update_transparency(transparent),
