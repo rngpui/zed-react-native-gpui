@@ -1641,11 +1641,18 @@ impl Div {
             };
         }
 
+        // Phase 0.2: Seed the layer's property_trees with the inherited clip.
+        // This must be called AFTER setting content_origin so the clip bounds
+        // are correctly converted to layer-local coordinates.
+        window.seed_layer_inherited_clip();
+
         // Check if the layer needs repaint (content changed)
         let needs_repaint = window.layer_tree().get(layer_id).unwrap().needs_repaint;
 
-        // Register with tile cache so tiles can be acquired
-        let _generation = window.register_scroll_container_tiles(
+        // Register with tile cache so tiles can be acquired.
+        // The returned generation is monotonic per container - we'll use it to
+        // synchronize the display list's generation for proper tile invalidation.
+        let tile_cache_generation = window.register_scroll_container_tiles(
             global_id,
             content_size,
             needs_repaint, // content_changed if needs_repaint
@@ -1666,6 +1673,17 @@ impl Div {
                 .get_mut(layer_id)
                 .unwrap()
                 .prepare_for_repaint();
+
+            // CRITICAL: Synchronize display list generation with tile cache generation.
+            // DisplayList::new() sets generation to 0, but the tile cache maintains
+            // a monotonic generation per container. Without this sync, tiles with
+            // rendered_generation >= 1 would be wrongly considered valid when
+            // display_list.generation resets to 0.
+            if let Some(layer) = window.layer_tree_mut().get_mut(layer_id) {
+                if let Some(display_list) = layer.display_list.as_mut() {
+                    display_list.generation = tile_cache_generation;
+                }
+            }
 
             // Also clear retained hitboxes since we're repainting
             window
@@ -2166,15 +2184,11 @@ impl Element for Div {
             Some(SubtreeCacheState::CacheHit { id, old_paint_range, mut partial_entry }) => {
                 // Inside tiled scroll containers, we can't use reuse_paint because the paint_range
                 // refers to Scene indices, but primitives go to DisplayList instead.
-                // Fall through to normal paint in this case.
+                // Fall through to normal paint in this case. Don't insert SubtreeCache entry
+                // since the paint_range indices would be meaningless - DisplayList's per-element
+                // caching (ElementEntry) handles caching for elements inside layers.
                 if window.is_inside_tiled_scroll_container() {
-                    // Still record the paint range for SubtreeCache
-                    let paint_start = window.paint_index();
                     self.paint_uncached(global_id, inspector_id, bounds, hitbox, window, cx);
-                    let paint_end = window.paint_index();
-
-                    partial_entry.paint_range = paint_start..paint_end;
-                    window.insert_subtree_cache(id, partial_entry);
                     return;
                 }
 
@@ -2245,15 +2259,19 @@ impl Element for Div {
                 // No cached texture - fall back to normal painting
                 // But mark this subtree for texture capture on this frame
 
+                // Inside tiled scroll containers, skip SubtreeCache entirely since
+                // paint_range indices would be meaningless. DisplayList's per-element
+                // caching handles elements inside layers.
+                if window.is_inside_tiled_scroll_container() {
+                    self.paint_uncached(global_id, inspector_id, bounds, hitbox, window, cx);
+                    return;
+                }
+
                 // Record paint start
                 let paint_start = window.paint_index();
 
                 // Begin subtree capture for RTT (if eligible)
-                // Don't capture when inside tiled scroll containers because:
-                // 1. Scene indices would be invalid (primitives go to DisplayList)
-                // 2. Scene is truncated after children paint, invalidating capture indices
-                let should_capture = !window.is_inside_tiled_scroll_container()
-                    && self.should_cache_to_texture(&new_bounds);
+                let should_capture = self.should_cache_to_texture(&new_bounds);
                 if should_capture {
                     window.begin_subtree_capture(id.clone(), new_bounds);
                 }
@@ -2295,6 +2313,14 @@ impl Element for Div {
                 prepaint_range,
                 hitbox: cached_hitbox,
             }) => {
+                // Inside tiled scroll containers, skip SubtreeCache entirely since
+                // paint_range indices would be meaningless. DisplayList's per-element
+                // caching handles elements inside layers.
+                if window.is_inside_tiled_scroll_container() {
+                    self.paint_uncached(global_id, inspector_id, bounds, hitbox, window, cx);
+                    return;
+                }
+
                 // Cache miss - record paint start
                 let paint_start = window.paint_index();
 

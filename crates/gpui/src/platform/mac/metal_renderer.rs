@@ -94,7 +94,10 @@ impl PreviousFrameArrays {
                 || !Self::slices_equal(&self.shadow_transforms, &scene.shadow_transforms),
             underlines: !Self::slices_equal(&self.underlines, &scene.underlines)
                 || !Self::slices_equal(&self.underline_transforms, &scene.underline_transforms),
-            paths: self.paths_len != scene.paths.len(), // Conservative: any length change = dirty
+            // Paths contain Vec<PathVertex> which can't be byte-compared reliably.
+            // Must always mark as dirty to avoid stale GPU buffers when content changes
+            // but count stays the same.
+            paths: !scene.paths.is_empty(),
             backdrop_blurs: !Self::slices_equal(&self.backdrop_blurs, &scene.backdrop_blurs)
                 || !Self::slices_equal(
                     &self.backdrop_blur_transforms,
@@ -111,7 +114,9 @@ impl PreviousFrameArrays {
                 &self.polychrome_sprite_transforms,
                 &scene.polychrome_sprite_transforms,
             ),
-            surfaces: self.surfaces_len != scene.surfaces.len(), // Conservative: CVPixelBuffer not comparable
+            // Surfaces contain CVPixelBuffer which can't be compared.
+            // Must always mark as dirty to avoid stale GPU buffers.
+            surfaces: !scene.surfaces.is_empty(),
         }
     }
 

@@ -3343,6 +3343,9 @@ impl Window {
     ///
     /// Creates a new compositing layer as a child of the current layer.
     /// While inside a non-root layer, primitives are routed to the layer's DisplayList.
+    ///
+    /// Note: After calling this, you should set the layer's content_origin and then
+    /// call `seed_layer_inherited_clip()` to properly inherit the parent's clipping.
     pub(crate) fn push_layer(
         &mut self,
         element_id: GlobalElementId,
@@ -3351,10 +3354,44 @@ impl Window {
         self.layer_tree.push_layer(element_id, reason)
     }
 
+    /// Seed the current layer's property_trees with the inherited content mask.
+    ///
+    /// Phase 0.2: This ensures primitives in nested layers are properly clipped to
+    /// the parent's viewport. Must be called AFTER setting the layer's content_origin,
+    /// since we need correct coordinates for the clip bounds conversion.
+    ///
+    /// Call this after push_layer() and after setting layer properties.
+    pub(crate) fn seed_layer_inherited_clip(&mut self) {
+        let inherited_mask = self.content_mask();
+        let layer_id = self.layer_tree.current_layer().id;
+
+        let layer = self.layer_tree.current_layer_mut();
+        // Convert inherited mask to layer-local coordinates
+        let clip_bounds_in_content = Bounds {
+            origin: Point {
+                x: inherited_mask.bounds.origin.x - layer.content_origin.x,
+                y: inherited_mask.bounds.origin.y - layer.content_origin.y,
+            },
+            size: inherited_mask.bounds.size,
+        };
+        // Create the inherited clip as a root-level clip node
+        let clip_node = layer.property_trees.push_clip(
+            ClipNodeId::ROOT,
+            clip_bounds_in_content,
+            TransformNodeId::ROOT,
+        );
+        // Push onto clip_node_stack so subsequent primitives use this clip
+        self.clip_node_stack.push((layer_id, clip_node));
+    }
+
     /// Pop the current layer from the layer tree stack.
     ///
     /// Returns to the parent layer. Panics if trying to pop the root layer.
+    ///
+    /// Phase 0.2: Also pops the inherited clip node that was pushed by push_layer.
     pub(crate) fn pop_layer(&mut self) {
+        // Pop the inherited clip node that was pushed by push_layer
+        self.clip_node_stack.pop();
         self.layer_tree.pop_layer()
     }
 
