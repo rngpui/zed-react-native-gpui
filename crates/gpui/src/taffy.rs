@@ -98,14 +98,6 @@ impl TaffyLayoutEngine {
         });
     }
 
-    /// Clear all nodes (fallback for when tree structure is incompatible)
-    pub fn clear(&mut self) {
-        self.taffy.clear();
-        self.absolute_layout_bounds.clear();
-        self.computed_layouts.clear();
-        self.element_to_node.clear();
-    }
-
     /// Returns the stats and resets the counters.
     pub fn take_stats(&mut self) -> LayoutCacheStats {
         std::mem::take(&mut self.stats)

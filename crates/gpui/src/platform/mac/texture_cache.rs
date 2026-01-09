@@ -20,9 +20,6 @@ const SIZE_BUCKETS: &[u32] = &[256, 512, 1024, 2048, 4096];
 /// Default memory budget in bytes (256 MB)
 const DEFAULT_MEMORY_BUDGET: usize = 256 * 1024 * 1024;
 
-/// Minimum size for texture caching (64x64 pixels)
-pub const MIN_TEXTURE_SIZE: u32 = 64;
-
 /// Maximum size for texture caching (4096x4096 pixels)
 pub const MAX_TEXTURE_SIZE: u32 = 4096;
 
@@ -170,11 +167,6 @@ impl TextureCacheManager {
         }
     }
 
-    /// Set the memory budget for the texture cache.
-    pub fn set_memory_budget(&mut self, bytes: usize) {
-        self.memory_budget = bytes;
-    }
-
     /// Called at the start of each frame.
     pub fn begin_frame(&mut self) {
         self.generation += 1;
@@ -185,25 +177,6 @@ impl TextureCacheManager {
     pub fn end_frame(&mut self, device: &metal::Device) {
         self.evict_until_budget(device);
         self.update_stats();
-    }
-
-    /// Look up a cached texture for an element.
-    /// Returns Some if the element has a cached texture with matching signature.
-    pub fn lookup(
-        &mut self,
-        element_id: &GlobalElementId,
-        signature: u64,
-    ) -> Option<&CachedTextureEntry> {
-        if let Some(entry) = self.active_textures.get_mut(element_id) {
-            if entry.signature == signature {
-                // Update LRU tracking
-                entry.last_used_generation = self.generation;
-                self.stats.hits += 1;
-                return Some(entry);
-            }
-        }
-        self.stats.misses += 1;
-        None
     }
 
     /// Look up a cached texture by element ID only (for offset-only cache hits).
@@ -294,11 +267,6 @@ impl TextureCacheManager {
         }
     }
 
-    /// Release a texture back to the pool for an element.
-    pub fn release(&mut self, element_id: &GlobalElementId) {
-        self.release_internal(element_id);
-    }
-
     fn release_internal(&mut self, element_id: &GlobalElementId) {
         if let Some(entry) = self.active_textures.remove(element_id) {
             // Remove from reverse lookup map
@@ -308,7 +276,6 @@ impl TextureCacheManager {
                 width: entry.texture.width,
                 height: entry.texture.height,
             };
-            let memory_bytes = entry.texture.memory_bytes;
 
             // Return texture to pool
             self.free_pool
@@ -407,16 +374,6 @@ impl TextureCacheManager {
         self.stats.misses = 0;
         self.stats.evictions = 0;
         stats
-    }
-
-    /// Check if a size is suitable for texture caching.
-    pub fn is_cacheable_size(size: Size<DevicePixels>) -> bool {
-        let width = size.width.0 as u32;
-        let height = size.height.0 as u32;
-        width >= MIN_TEXTURE_SIZE
-            && height >= MIN_TEXTURE_SIZE
-            && width <= MAX_TEXTURE_SIZE
-            && height <= MAX_TEXTURE_SIZE
     }
 }
 

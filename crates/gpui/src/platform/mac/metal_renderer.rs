@@ -1994,11 +1994,6 @@ impl MetalRenderer {
             return;
         }
 
-        log::trace!(
-            "RTT PRE-PASS: {} captures to check",
-            captures.len()
-        );
-
         // Create command buffer for RTT pre-pass
         let command_buffer = self.command_queue.new_command_buffer();
 
@@ -2050,16 +2045,7 @@ impl MetalRenderer {
                 continue;
             }
 
-            let texture_id = acquire_result.entry.id;
             let texture = acquire_result.entry.texture.texture.clone();
-
-            log::warn!(
-                "RTT PRE-PASS: rendering NEW texture {:?} for element {:?}, size {}x{}",
-                texture_id,
-                capture.id,
-                texture_size.width.0,
-                texture_size.height.0
-            );
 
             // Create render pass descriptor targeting the texture
             let render_pass_descriptor = metal::RenderPassDescriptor::new();
@@ -2087,15 +2073,6 @@ impl MetalRenderer {
 
             // Create mini-scene with primitives translated to texture coordinates
             let mini_scene = scene.create_capture_scene(capture);
-
-            log::warn!(
-                "RTT: mini-scene created with {} shadows, {} quads, {} underlines, {} mono sprites, {} poly sprites",
-                mini_scene.shadows.len(),
-                mini_scene.quads.len(),
-                mini_scene.underlines.len(),
-                mini_scene.monochrome_sprites.len(),
-                mini_scene.polychrome_sprites.len()
-            );
 
             // Render all primitive types to the texture
             // Order matters for correct blending - render back to front
@@ -2619,12 +2596,6 @@ impl MetalRenderer {
         command_encoder: &metal::RenderCommandEncoderRef,
         write_instances: bool,
     ) -> bool {
-        if !sprites.is_empty() {
-            log::warn!(
-                "RTT DRAW: {} cached texture sprites to draw",
-                sprites.len()
-            );
-        }
         for sprite in sprites {
             // Look up the texture from the cache and clone the texture reference
             // (metal::Texture implements Clone as an Arc-like reference)
@@ -2634,14 +2605,6 @@ impl MetalRenderer {
                 .map(|entry| entry.texture.texture.clone());
 
             if let Some(texture) = texture {
-                log::trace!(
-                    "draw_cached_textures: drawing sprite {:?} at bounds={:?}, uv={:?}, texture {}x{}",
-                    sprite.texture_id,
-                    sprite.bounds,
-                    sprite.uv_bounds,
-                    texture.width(),
-                    texture.height()
-                );
                 let ok = self.draw_cached_texture(
                     sprite.bounds,
                     sprite.content_mask.clone(),

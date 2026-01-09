@@ -1833,8 +1833,6 @@ impl Element for Div {
                 // Offset-only hit - the element's position changed (e.g., during scrolling)
                 // but its content is the same.
 
-                log::warn!("RTT DEBUG: OffsetOnlyHit for {:?}, offset_delta={:?}", id, offset_delta);
-
                 // Compute new bounds from offset delta
                 let new_bounds = Bounds {
                     origin: cached_entry.bounds.origin + offset_delta,
@@ -1843,16 +1841,7 @@ impl Element for Div {
 
                 // Query the texture cache for a cached texture for this element
                 // This checks if the renderer has rendered this subtree to a texture
-                let texture_info_result = window.get_cached_texture_info(&id);
-                log::warn!("RTT DEBUG: get_cached_texture_info returned {:?}", texture_info_result.is_some());
-                if let Some(texture_info) = texture_info_result {
-                    log::warn!(
-                        "RTT USING CACHED TEXTURE: {:?}, bounds={:?}, uv_bounds={:?}, content_mask={:?}",
-                        texture_info.id,
-                        new_bounds,
-                        texture_info.uv_bounds,
-                        current_content_mask.bounds
-                    );
+                if let Some(texture_info) = window.get_cached_texture_info(&id) {
                     let paint_start = window.paint_index();
                     // Insert the cached texture sprite at the new position
                     // Use CURRENT content_mask for clipping (may differ from cached due to scroll edges)
@@ -1884,10 +1873,6 @@ impl Element for Div {
 
                 // No cached texture - fall back to normal painting
                 // But mark this subtree for texture capture on this frame
-                log::trace!(
-                    "RTT FALLBACK: no cached texture, painting + capturing. bounds={:?}",
-                    new_bounds
-                );
 
                 // Record paint start
                 let paint_start = window.paint_index();
@@ -1895,11 +1880,7 @@ impl Element for Div {
                 // Begin subtree capture for RTT (if eligible)
                 let should_capture = self.should_cache_to_texture(&new_bounds);
                 if should_capture {
-                    window.begin_subtree_capture(
-                        id.clone(),
-                        new_bounds,
-                        current_content_mask.clone(),
-                    );
+                    window.begin_subtree_capture(id.clone(), new_bounds);
                 }
 
                 // Do normal paint

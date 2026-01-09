@@ -74,8 +74,6 @@ pub(crate) struct SubtreeCapture {
     pub id: GlobalElementId,
     /// Screen bounds of the subtree
     pub bounds: Bounds<ScaledPixels>,
-    /// Content mask applied to this subtree
-    pub content_mask: ContentMask<ScaledPixels>,
     /// Index of the first paint operation in this subtree
     pub primitive_start: usize,
     /// Index past the last paint operation in this subtree (exclusive)
@@ -140,16 +138,10 @@ impl Scene {
 
     /// Begin capturing primitives for a subtree that may be cached to a texture.
     /// Call this before painting the subtree's content.
-    pub fn begin_subtree_capture(
-        &mut self,
-        id: GlobalElementId,
-        bounds: Bounds<ScaledPixels>,
-        content_mask: ContentMask<ScaledPixels>,
-    ) {
+    pub fn begin_subtree_capture(&mut self, id: GlobalElementId, bounds: Bounds<ScaledPixels>) {
         self.pending_subtree_captures.push(SubtreeCapture {
             id,
             bounds,
-            content_mask,
             primitive_start: self.paint_operations.len(),
             primitive_end: 0, // Will be set in end_subtree_capture
         });
@@ -160,13 +152,6 @@ impl Scene {
     pub fn end_subtree_capture(&mut self) -> Option<SubtreeCapture> {
         self.pending_subtree_captures.pop().map(|mut capture| {
             capture.primitive_end = self.paint_operations.len();
-            log::warn!(
-                "RTT CAPTURE END: element={:?}, range={}..{}, has_content={}",
-                capture.id,
-                capture.primitive_start,
-                capture.primitive_end,
-                capture.primitive_end > capture.primitive_start
-            );
             // Only add to completed if it has actual content
             if capture.primitive_end > capture.primitive_start {
                 self.completed_subtree_captures.push(capture.clone());
@@ -827,80 +812,6 @@ impl Primitive {
             Primitive::PolychromeSprite(sprite, _) => &sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
             Primitive::CachedTexture(sprite) => &sprite.content_mask,
-        }
-    }
-
-    /// Create a new primitive with bounds translated by the given offset.
-    /// Used for render-to-texture where primitives need texture-relative coordinates.
-    pub fn translate(&self, offset: Point<ScaledPixels>) -> Primitive {
-        match self {
-            Primitive::Shadow(shadow, transform) => {
-                let mut s = shadow.clone();
-                s.bounds.origin = s.bounds.origin + offset;
-                s.content_mask.bounds.origin = s.content_mask.bounds.origin + offset;
-                Primitive::Shadow(s, *transform)
-            }
-            Primitive::Quad(quad, transform) => {
-                let mut q = quad.clone();
-                q.bounds.origin = q.bounds.origin + offset;
-                q.content_mask.bounds.origin = q.content_mask.bounds.origin + offset;
-                Primitive::Quad(q, *transform)
-            }
-            Primitive::BackdropBlur(blur, transform) => {
-                let mut b = blur.clone();
-                b.bounds.origin = b.bounds.origin + offset;
-                b.content_mask.bounds.origin = b.content_mask.bounds.origin + offset;
-                Primitive::BackdropBlur(b, *transform)
-            }
-            Primitive::Path(path) => {
-                let mut p = path.clone();
-                p.bounds.origin = p.bounds.origin + offset;
-                p.content_mask.bounds.origin = p.content_mask.bounds.origin + offset;
-                // Also translate vertices
-                for vertex in &mut p.vertices {
-                    vertex.xy_position = point(
-                        vertex.xy_position.x + offset.x,
-                        vertex.xy_position.y + offset.y,
-                    );
-                }
-                Primitive::Path(p)
-            }
-            Primitive::Underline(underline, transform) => {
-                let mut u = underline.clone();
-                u.bounds.origin = u.bounds.origin + offset;
-                u.content_mask.bounds.origin = u.content_mask.bounds.origin + offset;
-                Primitive::Underline(u, *transform)
-            }
-            Primitive::MonochromeSprite(sprite) => {
-                let mut s = sprite.clone();
-                s.bounds.origin = s.bounds.origin + offset;
-                s.content_mask.bounds.origin = s.content_mask.bounds.origin + offset;
-                Primitive::MonochromeSprite(s)
-            }
-            Primitive::SubpixelSprite(sprite) => {
-                let mut s = sprite.clone();
-                s.bounds.origin = s.bounds.origin + offset;
-                s.content_mask.bounds.origin = s.content_mask.bounds.origin + offset;
-                Primitive::SubpixelSprite(s)
-            }
-            Primitive::PolychromeSprite(sprite, transform) => {
-                let mut s = sprite.clone();
-                s.bounds.origin = s.bounds.origin + offset;
-                s.content_mask.bounds.origin = s.content_mask.bounds.origin + offset;
-                Primitive::PolychromeSprite(s, *transform)
-            }
-            Primitive::Surface(surface) => {
-                let mut s = surface.clone();
-                s.bounds.origin = s.bounds.origin + offset;
-                s.content_mask.bounds.origin = s.content_mask.bounds.origin + offset;
-                Primitive::Surface(s)
-            }
-            Primitive::CachedTexture(sprite) => {
-                let mut s = sprite.clone();
-                s.bounds.origin = s.bounds.origin + offset;
-                s.content_mask.bounds.origin = s.content_mask.bounds.origin + offset;
-                Primitive::CachedTexture(s)
-            }
         }
     }
 

@@ -81,11 +81,6 @@ impl TextShapeCache {
         self.entries.len()
     }
 
-    /// Returns the current stats without resetting them.
-    pub fn peek_stats(&self) -> TextShapeCacheStats {
-        self.stats
-    }
-
     /// Returns the stats and resets the counters.
     pub fn take_stats(&mut self) -> TextShapeCacheStats {
         std::mem::take(&mut self.stats)

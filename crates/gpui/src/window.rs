@@ -2805,28 +2805,6 @@ impl Window {
         );
     }
 
-    /// Look up a cached subtree entry from the previous frame.
-    /// Returns the entry if it matches the given signature, bounds, content mask, and element offset.
-    pub(crate) fn lookup_subtree_cache(
-        &self,
-        id: &GlobalElementId,
-        subtree_signature: u64,
-        bounds: Bounds<Pixels>,
-        content_mask: &ContentMask<Pixels>,
-        element_offset: Point<Pixels>,
-    ) -> Option<&SubtreeCacheEntry> {
-        let entry = self.rendered_frame.subtree_cache.get(id)?;
-        if entry.subtree_signature == subtree_signature
-            && entry.bounds == bounds
-            && entry.content_mask == *content_mask
-            && entry.element_offset == element_offset
-        {
-            Some(entry)
-        } else {
-            None
-        }
-    }
-
     /// Look up a cached subtree entry, distinguishing between full hits and offset-only hits.
     ///
     /// Returns:
@@ -2938,20 +2916,7 @@ impl Window {
         // Update scene stability tracking for frame skipping optimization.
         // A stable frame means all elements hit the cache at their original positions.
         self.last_frame_was_stable = stats.is_scene_stable();
-
-        if !log::log_enabled!(log::Level::Trace) {
-            return;
-        }
-        if stats.hits == 0 && stats.misses == 0 && stats.inserts == 0 && stats.evictions == 0 {
-            return;
-        }
-        log::trace!(
-            "primitive cache: hits={} misses={} inserts={} evictions={}",
-            stats.hits,
-            stats.misses,
-            stats.inserts,
-            stats.evictions
-        );
+        let _ = stats;
     }
 
     /// Returns the primitive cache statistics for the current frame and resets the counters.
@@ -2977,18 +2942,11 @@ impl Window {
 
     /// Begin capturing primitives for a subtree that may be cached to a texture.
     /// Call this before painting the subtree's content.
-    pub(crate) fn begin_subtree_capture(
-        &mut self,
-        id: GlobalElementId,
-        bounds: Bounds<Pixels>,
-        content_mask: ContentMask<Pixels>,
-    ) {
+    pub(crate) fn begin_subtree_capture(&mut self, id: GlobalElementId, bounds: Bounds<Pixels>) {
         let scale = self.scale_factor();
-        self.next_frame.scene.begin_subtree_capture(
-            id,
-            bounds.scale(scale),
-            content_mask.scale(scale),
-        );
+        self.next_frame
+            .scene
+            .begin_subtree_capture(id, bounds.scale(scale));
     }
 
     /// End subtree capture and mark it for render-to-texture.

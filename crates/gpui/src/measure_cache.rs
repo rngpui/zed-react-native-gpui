@@ -132,11 +132,6 @@ impl MeasureCache {
         self.entries.len()
     }
 
-    /// Returns the current stats without resetting them.
-    pub fn peek_stats(&self) -> MeasureCacheStats {
-        self.stats
-    }
-
     /// Returns the stats and resets the counters.
     pub fn take_stats(&mut self) -> MeasureCacheStats {
         std::mem::take(&mut self.stats)
