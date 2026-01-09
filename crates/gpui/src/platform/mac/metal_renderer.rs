@@ -1,5 +1,6 @@
 use super::metal_atlas::MetalAtlas;
 use super::tile_cache::TileCache;
+use super::tile_rasterizer::{TileRasterJob, TileRasterizer, TilePriority};
 use crate::{
     AtlasTextureId, BackdropBlur, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite,
     PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow,
@@ -2182,11 +2183,14 @@ impl MetalRenderer {
     }
 
     /// Pre-pass: rasterize display lists to tile textures for scroll containers.
+    ///
     /// This iterates over all TileSprites in the scene, checks if their tiles need
     /// rasterization, and if so, renders the corresponding display list to the tile texture.
+    ///
+    /// **Threaded Rasterization (Phase 15)**: The CPU-bound work (converting DisplayItems
+    /// to Scene primitives via `rasterize_tile()`) is performed in parallel using rayon,
+    /// while the GPU work (Metal rendering) remains sequential on the main thread.
     fn rasterize_tiles_from_display_lists(&mut self, scene: &Scene) {
-        use crate::platform::mac::tile_cache::TileCache;
-
         let tile_sprites = &scene.tile_sprites;
         if tile_sprites.is_empty() {
             return;
@@ -2196,9 +2200,8 @@ impl MetalRenderer {
         // macOS retina displays typically use 2.0, non-retina use 1.0
         let scale_factor = self.layer.contents_scale() as f32;
 
-        // Collect tiles that need rendering along with their display list data
-        // We clone the data to avoid borrow conflicts with PropertyTrees caching
-        let mut tiles_to_render: Vec<(crate::GlobalElementId, crate::TileCoord, crate::display_list::DisplayList, crate::PropertyTrees)> = Vec::new();
+        // Collect tiles that need rendering as TileRasterJobs
+        let mut jobs: Vec<TileRasterJob> = Vec::new();
 
         for sprite in tile_sprites {
             let container_id = &sprite.tile_key.container_id;
@@ -2220,20 +2223,30 @@ impl MetalRenderer {
             );
 
             if needs_render {
-                // Clone display list and property trees for rasterization
+                // Clone display list and property trees for rasterization (needed for thread safety)
                 // PropertyTrees needs mutable access for caching world transforms/clips
-                tiles_to_render.push((container_id.clone(), coord, display_list.clone(), property_trees.clone()));
+                jobs.push(TileRasterJob {
+                    container_id: container_id.clone(),
+                    coord,
+                    display_list: display_list.clone(),
+                    property_trees: property_trees.clone(),
+                    // All tiles in tile_sprites are visible by definition
+                    priority: TilePriority::VISIBLE,
+                });
             }
         }
 
-        // Now rasterize each tile that needs rendering
-        for (container_id, coord, display_list, mut property_trees) in tiles_to_render {
-            // Rasterize the display list to this tile
-            let tile_bounds = TileCache::tile_content_bounds(coord, scale_factor);
-            let raster_result = display_list.rasterize_tile(tile_bounds, scale_factor, &mut property_trees);
+        if jobs.is_empty() {
+            return;
+        }
 
-            // Render to the tile texture
-            self.rasterize_display_list_tile(&container_id, coord, &raster_result);
+        // Parallel CPU rasterization using rayon
+        // This is the performance-critical change: multiple tiles rasterize concurrently
+        let results = TileRasterizer::rasterize_parallel(jobs, scale_factor);
+
+        // Sequential GPU rendering (Metal commands must be submitted from main thread)
+        for result in results {
+            self.rasterize_display_list_tile(&result.container_id, result.coord, &result.raster_result);
         }
     }
 

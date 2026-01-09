@@ -107,6 +107,7 @@ itertools.workspace = true
 log.workspace = true
 num_cpus = "1.13"
 parking = "2.0.0"
+rayon.workspace = true
 parking_lot.workspace = true
 postage.workspace = true
 profiling.workspace = true

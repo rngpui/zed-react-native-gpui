@@ -7520,6 +7520,7 @@ dependencies = [
  "profiling",
  "rand 0.9.2",
  "raw-window-handle",
+ "rayon",
  "reqwest_client",
  "resvg",
  "schemars",
