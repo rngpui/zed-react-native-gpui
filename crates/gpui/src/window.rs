@@ -20,6 +20,7 @@ use crate::{
     WindowParams, WindowTextSystem, point, prelude::*,
     primitive_cache::{CacheReplay, CachedPaintOperation, PrimitiveCache, PrimitiveCacheStats}, px, rems, scene::Primitive,
     size, transparent_black,
+    display_list::DisplayListManager,
 };
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
@@ -991,6 +992,7 @@ pub struct Window {
     primitive_cache: PrimitiveCache,
     text_shape_cache: crate::text_shape_cache::TextShapeCache,
     measure_cache: crate::measure_cache::MeasureCache,
+    display_list_manager: DisplayListManager,
     /// True if the last frame was completely stable (all cache hits at same positions).
     /// When true, we can potentially skip drawing if nothing has changed.
     last_frame_was_stable: bool,
@@ -1479,6 +1481,7 @@ impl Window {
             primitive_cache: PrimitiveCache::new(DEFAULT_PRIMITIVE_CACHE_ENTRIES),
             text_shape_cache: crate::text_shape_cache::TextShapeCache::new(DEFAULT_TEXT_SHAPE_CACHE_ENTRIES),
             measure_cache: crate::measure_cache::MeasureCache::new(DEFAULT_MEASURE_CACHE_ENTRIES),
+            display_list_manager: DisplayListManager::new(),
             last_frame_was_stable: false,
             paint_scopes: Vec::new(),
             next_frame_callbacks,
@@ -2940,6 +2943,57 @@ impl Window {
         self.rendered_frame.scene.dirty_stats()
     }
 
+    /// Get or create a display list for the given element.
+    ///
+    /// Display lists are used for browser-like tiled rendering of scroll containers.
+    /// Elements paint to a display list instead of directly to the scene, and the
+    /// display list is then rasterized to tiles on demand.
+    pub(crate) fn display_list_for(
+        &mut self,
+        element_id: &GlobalElementId,
+    ) -> &mut crate::display_list::DisplayList {
+        self.display_list_manager.get_or_create(element_id)
+    }
+
+    /// Get the display list manager.
+    pub(crate) fn display_list_manager(&mut self) -> &mut DisplayListManager {
+        &mut self.display_list_manager
+    }
+
+    /// Populate a display list from painted primitives in the given range.
+    ///
+    /// This converts Scene primitives to DisplayList format for browser-like
+    /// tiled rendering. The display list stores resolution-independent
+    /// representations that can be rasterized to tiles at any scale factor.
+    ///
+    /// Returns the number of items in the display list.
+    ///
+    /// `content_origin` is the window-space origin of the scroll container.
+    /// All display list item bounds will be offset by this amount to convert
+    /// from window coordinates to content coordinates.
+    pub(crate) fn populate_display_list_from_paint_range(
+        &mut self,
+        element_id: &GlobalElementId,
+        primitive_range: std::ops::Range<usize>,
+        content_origin: Point<Pixels>,
+    ) -> usize {
+        let scale_factor = self.scale_factor();
+
+        // Get or create the display list
+        let display_list = self.display_list_manager.get_or_create(element_id);
+
+        // Populate from scene primitives, offsetting to content coordinates
+        crate::display_list::populate_display_list_from_scene(
+            display_list,
+            &self.next_frame.scene,
+            primitive_range,
+            scale_factor,
+            content_origin,
+        );
+
+        display_list.items.len()
+    }
+
     /// Begin capturing primitives for a subtree that may be cached to a texture.
     /// Call this before painting the subtree's content.
     pub(crate) fn begin_subtree_capture(&mut self, id: GlobalElementId, bounds: Bounds<Pixels>) {
@@ -2989,6 +3043,122 @@ impl Window {
         element_id: &GlobalElementId,
     ) -> Option<crate::scene::CachedTextureInfo> {
         self.platform_window.get_cached_texture_info(element_id)
+    }
+
+    // ==========================================================================
+    // Tiled Scroll Container Rendering
+    // ==========================================================================
+
+    /// Register a scroll container for tiled rendering.
+    /// Returns the content generation number for cache invalidation.
+    pub(crate) fn register_scroll_container_tiles(
+        &mut self,
+        id: &GlobalElementId,
+        content_size: Size<Pixels>,
+        content_changed: bool,
+    ) -> u64 {
+        self.platform_window
+            .register_scroll_container_tiles(id, content_size, content_changed)
+    }
+
+    /// Calculate visible tile range for a scroll container.
+    pub(crate) fn visible_tile_range(
+        &self,
+        scroll_offset: Point<Pixels>,
+        viewport_size: Size<Pixels>,
+        scale_factor: f32,
+    ) -> (crate::scene::TileCoord, crate::scene::TileCoord) {
+        use crate::scene::TileCoord;
+
+        // Tile size in logical pixels (512 device pixels / scale factor)
+        let tile_size_px = 512.0 / scale_factor;
+
+        // scroll_offset is negative (scroll down = negative y)
+        // -scroll_offset is the content position at viewport top-left
+        let content_top_left_x = -scroll_offset.x.0;
+        let content_top_left_y = -scroll_offset.y.0;
+
+        let min_tile = TileCoord {
+            x: (content_top_left_x / tile_size_px).floor() as i32,
+            y: (content_top_left_y / tile_size_px).floor() as i32,
+        };
+
+        let max_tile = TileCoord {
+            x: ((content_top_left_x + viewport_size.width.0) / tile_size_px).ceil() as i32 - 1,
+            y: ((content_top_left_y + viewport_size.height.0) / tile_size_px).ceil() as i32 - 1,
+        };
+
+        (min_tile, max_tile)
+    }
+
+    /// Calculate content-space bounds for a tile (in logical pixels).
+    pub(crate) fn tile_content_bounds(
+        &self,
+        coord: crate::scene::TileCoord,
+        scale_factor: f32,
+    ) -> Bounds<Pixels> {
+        let tile_size_f32 = 512.0 / scale_factor;
+        Bounds {
+            origin: Point {
+                x: Pixels(coord.x as f32 * tile_size_f32),
+                y: Pixels(coord.y as f32 * tile_size_f32),
+            },
+            size: Size {
+                width: Pixels(tile_size_f32),
+                height: Pixels(tile_size_f32),
+            },
+        }
+    }
+
+    /// Acquire a tile for rendering. Returns true if the tile needs to be rendered.
+    pub(crate) fn acquire_tile(
+        &mut self,
+        container_id: &GlobalElementId,
+        coord: crate::scene::TileCoord,
+        content_generation: u64,
+    ) -> bool {
+        self.platform_window
+            .acquire_tile(container_id, coord, content_generation)
+    }
+
+    /// Begin capturing primitives for a specific tile.
+    pub(crate) fn begin_tile_capture(
+        &mut self,
+        _container_id: GlobalElementId,
+        _coord: crate::scene::TileCoord,
+        _content_bounds: Bounds<Pixels>,
+    ) {
+        // TODO: Set up tile capture state
+        // For now, this is a no-op
+    }
+
+    /// End tile capture.
+    pub(crate) fn end_tile_capture(&mut self) {
+        // TODO: Finalize tile capture
+        // For now, this is a no-op
+    }
+
+    /// Insert a tile sprite primitive for compositing.
+    pub(crate) fn insert_tile_sprite(
+        &mut self,
+        container_id: GlobalElementId,
+        coord: crate::scene::TileCoord,
+        bounds: Bounds<Pixels>,
+        content_mask: ContentMask<Pixels>,
+    ) {
+        use crate::scene::{TileKey, TileSprite};
+
+        let scale = self.scale_factor();
+        self.next_frame.scene.insert_primitive(TileSprite {
+            order: 0, // Will be set by insert_primitive_internal
+            _pad: 0,
+            bounds: bounds.scale(scale),
+            content_mask: content_mask.scale(scale),
+            tile_key: TileKey {
+                container_id,
+                coord,
+            },
+        });
     }
 
     fn replay_next_primitive(&mut self) -> bool {
@@ -4831,6 +5001,15 @@ impl Window {
         if hit_test != self.mouse_hit_test {
             self.mouse_hit_test = hit_test;
             self.reset_cursor_style(cx);
+        }
+
+        // Debug logging for scroll events
+        if event.is::<crate::ScrollWheelEvent>() {
+            log::trace!(
+                "[DISPATCH-SCROLL] Got ScrollWheelEvent, {} mouse_listeners, {} hitbox ids",
+                self.rendered_frame.mouse_listeners.len(),
+                self.mouse_hit_test.ids.len()
+            );
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]

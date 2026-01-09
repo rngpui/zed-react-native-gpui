@@ -1503,6 +1503,43 @@ impl Div {
             .as_mut()
             .map(|provider| provider.provide(window, cx));
 
+        // Check if this is a tiled scroll container and extract data needed for tiled rendering.
+        // We extract scroll_offset and content_size here (before the paint closure) to avoid
+        // borrow conflicts with self.interactivity inside the paint callback.
+        //
+        // NOTE: Tiled rendering is currently disabled because the GPUI element system expects
+        // each element to go through prepaint -> paint exactly once per frame. The tiled
+        // approach of painting children multiple times (once per visible tile) doesn't work
+        // with this architecture. A different approach is needed, such as:
+        // - Recording primitives during paint and rendering to tiles in a post-pass
+        // - Using a deferred rendering architecture
+        // - Capturing the scene once and compositing from a backing store
+        //
+        // With the display list architecture, children are painted ONCE to the scene,
+        // and the display list is used for tile rasterization. This respects the
+        // prepaint/paint contract while enabling O(visible_tiles) compositing.
+        let use_tiled_rendering = self.interactivity.is_tiled_scroll_container(bounds);
+        let tiled_data = if use_tiled_rendering {
+            // Extract data from interactivity before the closure captures self
+            let scroll_offset_option = self
+                .interactivity
+                .scroll_offset
+                .as_ref()
+                .map(|r| *r.borrow());
+            log::trace!(
+                "[TILE-SETUP] scroll_offset_option={:?}, content_size=({}, {})",
+                scroll_offset_option,
+                self.interactivity.content_size.width.0,
+                self.interactivity.content_size.height.0
+            );
+            let scroll_offset = scroll_offset_option.unwrap_or_default();
+            let content_size = self.interactivity.content_size;
+            let global_id_owned = global_id.cloned();
+            Some((scroll_offset, content_size, global_id_owned))
+        } else {
+            None
+        };
+
         window.with_image_cache(image_cache, |window| {
             self.interactivity.paint(
                 global_id,
@@ -1517,12 +1554,252 @@ impl Div {
                         return;
                     }
 
-                    for child in &mut self.children {
-                        child.paint(window, cx);
+                    // Use tiled rendering for large scroll containers
+                    if let Some((scroll_offset, content_size, Some(gid))) = tiled_data.as_ref() {
+                        Self::paint_children_tiled(
+                            &mut self.children,
+                            gid,
+                            *scroll_offset,
+                            *content_size,
+                            bounds,
+                            style,
+                            window,
+                            cx,
+                        );
+                    } else {
+                        for child in &mut self.children {
+                            child.paint(window, cx);
+                        }
                     }
                 },
             )
         });
+    }
+
+    /// Paint children using display list architecture for large scroll containers.
+    ///
+    /// This approach:
+    /// 1. Paints children ONCE to the Scene (respecting prepaint/paint contract)
+    /// 2. Captures the painted primitives and converts to DisplayList
+    /// 3. Stores the DisplayList for tile rasterization by the renderer
+    /// 4. Inserts TileSprite primitives for compositing visible tiles
+    ///
+    /// Takes children and other data as parameters (not &mut self) to avoid borrowing
+    /// conflicts with self.interactivity during the paint callback.
+    fn paint_children_tiled(
+        children: &mut SmallVec<[StackSafe<AnyElement>; 2]>,
+        global_id: &GlobalElementId,
+        scroll_offset: Point<Pixels>,
+        content_size: Size<Pixels>,
+        bounds: Bounds<Pixels>,
+        style: &Style,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        use crate::scene::{TileCoord, TileKey, TileSprite};
+
+        // Tile size in device pixels (must match tile_cache::TILE_SIZE)
+        const TILE_SIZE: u32 = 512;
+
+        let scale_factor = window.scale_factor();
+
+        // Get content mask for clipping tiles at viewport edges
+        let Some(content_mask) = style.overflow_mask(bounds, window.rem_size()) else {
+            // No content mask means no overflow clipping - fall back to normal painting
+            for child in children.iter_mut() {
+                child.paint(window, cx);
+            }
+            return;
+        };
+
+        // Check if we have an existing display list we can reuse.
+        // We only need to rebuild when content actually changes, not on scroll.
+        // The display list stores content in content-space coordinates, independent of scroll.
+        let existing_display_list = window.display_list_manager().get(global_id).cloned();
+        let has_valid_display_list = existing_display_list
+            .as_ref()
+            .map(|dl| !dl.items.is_empty())
+            .unwrap_or(false);
+
+        // Register with tile cache and get content generation
+        // For now, content_changed is false if we have a valid display list,
+        // since the display list persists across scroll changes.
+        let content_changed = !has_valid_display_list; // Only rebuild if display list is empty
+        let generation = window.register_scroll_container_tiles(
+            global_id,
+            content_size,
+            content_changed,
+        );
+
+        // Only paint children and rebuild display list if we don't have one or content changed
+        if !has_valid_display_list {
+            // Record scene position before painting children
+            let paint_start = window.next_frame.scene.len();
+
+            // CRITICAL: For tiled rendering, we need to paint ALL content, not just the visible
+            // viewport. The normal content_mask clips to the viewport, which means items below
+            // the visible area wouldn't be painted to the scene and wouldn't appear in the
+            // display list.
+            //
+            // We push a full-content mask directly onto the stack (bypassing the intersection
+            // in with_content_mask) so that all content is rendered. The scroll_offset is used
+            // to position content correctly in window space.
+            let full_content_mask = ContentMask {
+                bounds: Bounds {
+                    // Position the mask at bounds.origin + scroll_offset, which is where
+                    // content (0,0) appears in window space with current scroll
+                    origin: Point {
+                        x: bounds.origin.x + scroll_offset.x,
+                        y: bounds.origin.y + scroll_offset.y,
+                    },
+                    size: content_size,
+                },
+            };
+            window.content_mask_stack.push(full_content_mask);
+
+            // Paint all children ONCE - this respects the prepaint/paint contract
+            for child in children.iter_mut() {
+                child.paint(window, cx);
+            }
+
+            // Pop the full-content mask
+            window.content_mask_stack.pop();
+
+            // Record scene position after painting
+            let paint_end = window.next_frame.scene.len();
+
+            // Convert painted primitives to DisplayList and move to Scene
+            if paint_end > paint_start {
+                let primitive_range = paint_start..paint_end;
+
+                // Convert Scene primitives to DisplayList format
+                // Pass (bounds.origin + scroll_offset) so we can offset from window space to content space.
+                // When scroll_offset is applied, content at position (0,0) paints at:
+                //   window_pos = bounds.origin + scroll_offset
+                // To convert back: content_pos = window_pos - (bounds.origin + scroll_offset)
+                let content_origin = Point {
+                    x: bounds.origin.x + scroll_offset.x,
+                    y: bounds.origin.y + scroll_offset.y,
+                };
+                let item_count = window.populate_display_list_from_paint_range(
+                    global_id,
+                    primitive_range.clone(),
+                    content_origin,
+                );
+
+                log::trace!(
+                    "Display list for {:?}: {} items, generation {}",
+                    global_id,
+                    item_count,
+                    generation
+                );
+
+                // Move the display list from DisplayListManager to Scene for renderer access
+                if let Some(display_list) = window.display_list_manager().get(global_id).cloned() {
+                    window.next_frame.scene.insert_display_list(global_id.clone(), display_list);
+                }
+
+                // TODO: Truncation currently breaks subtree caching (which references paint operation indices).
+                // For now, keep original primitives. This results in double rendering but allows testing.
+                // Proper solution: either mark primitives as "display list only" or defer truncation.
+                // window.next_frame.scene.truncate_paint_operations(paint_start);
+            }
+        } else {
+            // Reuse existing display list - just copy to Scene for renderer access
+            if let Some(display_list) = existing_display_list {
+                window.next_frame.scene.insert_display_list(global_id.clone(), display_list);
+            }
+
+            // Still need to paint children for immediate rendering (non-tiled path)
+            // But since we're in the tiled path, children will be rendered from the display list
+            for child in children.iter_mut() {
+                child.paint(window, cx);
+            }
+        }
+
+        // Calculate visible tile range based on scroll offset and viewport
+        // Tile size in logical pixels
+        let tile_size_px = TILE_SIZE as f32 / scale_factor;
+
+        // scroll_offset is negative (scroll down = negative y)
+        // -scroll_offset is the content position at viewport top-left
+        let content_top_left_x = -scroll_offset.x.0;
+        let content_top_left_y = -scroll_offset.y.0;
+
+        log::trace!(
+            "[TILE-DIV] scroll_offset=({}, {}), content_top_left=({}, {}), tile_size_px={}",
+            scroll_offset.x.0, scroll_offset.y.0,
+            content_top_left_x, content_top_left_y,
+            tile_size_px
+        );
+
+        let min_tile = TileCoord {
+            x: (content_top_left_x / tile_size_px).floor() as i32,
+            y: (content_top_left_y / tile_size_px).floor() as i32,
+        };
+
+        let max_tile = TileCoord {
+            x: ((content_top_left_x + bounds.size.width.0) / tile_size_px).ceil() as i32 - 1,
+            y: ((content_top_left_y + bounds.size.height.0) / tile_size_px).ceil() as i32 - 1,
+        };
+
+        // Insert TileSprite primitives for visible tiles
+        for tile_y in min_tile.y..=max_tile.y {
+            for tile_x in min_tile.x..=max_tile.x {
+                let coord = TileCoord { x: tile_x, y: tile_y };
+
+                // Calculate content-space bounds for this tile (in logical pixels)
+                let tile_content_origin = Point {
+                    x: Pixels(coord.x as f32 * tile_size_px),
+                    y: Pixels(coord.y as f32 * tile_size_px),
+                };
+                let tile_content_size = Size {
+                    width: Pixels(tile_size_px),
+                    height: Pixels(tile_size_px),
+                };
+
+                // Calculate where this tile should appear on screen
+                let screen_origin = Point {
+                    x: bounds.origin.x + tile_content_origin.x + scroll_offset.x,
+                    y: bounds.origin.y + tile_content_origin.y + scroll_offset.y,
+                };
+
+                let tile_sprite = TileSprite {
+                    order: 0, // Will be set by insert_primitive
+                    _pad: 0,
+                    bounds: crate::Bounds {
+                        origin: crate::point(
+                            crate::ScaledPixels(screen_origin.x.0 * scale_factor),
+                            crate::ScaledPixels(screen_origin.y.0 * scale_factor),
+                        ),
+                        size: crate::size(
+                            crate::ScaledPixels(tile_content_size.width.0 * scale_factor),
+                            crate::ScaledPixels(tile_content_size.height.0 * scale_factor),
+                        ),
+                    },
+                    content_mask: ContentMask {
+                        bounds: crate::Bounds {
+                            origin: crate::point(
+                                crate::ScaledPixels(content_mask.bounds.origin.x.0 * scale_factor),
+                                crate::ScaledPixels(content_mask.bounds.origin.y.0 * scale_factor),
+                            ),
+                            size: crate::size(
+                                crate::ScaledPixels(content_mask.bounds.size.width.0 * scale_factor),
+                                crate::ScaledPixels(content_mask.bounds.size.height.0 * scale_factor),
+                            ),
+                        },
+                    },
+                    tile_key: TileKey {
+                        container_id: global_id.clone(),
+                        coord,
+                    },
+                };
+
+                window.next_frame.scene.insert_primitive(tile_sprite);
+            }
+        }
+
+        let _ = generation; // Suppress unused warning
     }
 }
 
@@ -2103,16 +2380,25 @@ impl Interactivity {
 
                 if let Some(scroll_handle) = self.tracked_scroll_handle.as_ref() {
                     self.scroll_offset = Some(scroll_handle.0.borrow().offset.clone());
+                    if let Some(ref rc) = self.scroll_offset {
+                        log::trace!("[PREPAINT-SCROLL] From scroll_handle, ptr={:p}, val=({}, {})",
+                            std::rc::Rc::as_ptr(rc), rc.borrow().x.0, rc.borrow().y.0);
+                    }
                 } else if (self.base_style.overflow.x == Some(Overflow::Scroll)
                     || self.base_style.overflow.y == Some(Overflow::Scroll))
                     && let Some(element_state) = element_state.as_mut()
                 {
+                    let was_some = element_state.scroll_offset.is_some();
                     self.scroll_offset = Some(
                         element_state
                             .scroll_offset
                             .get_or_insert_with(Rc::default)
                             .clone(),
                     );
+                    if let Some(ref rc) = self.scroll_offset {
+                        log::trace!("[PREPAINT-SCROLL] From element_state (was_some={}), id={:?}, ptr={:p}, val=({}, {})",
+                            was_some, global_id, std::rc::Rc::as_ptr(rc), rc.borrow().x.0, rc.borrow().y.0);
+                    }
                 }
 
                 let mut style = self.compute_style_internal(None, element_state.as_mut(), window, cx);
@@ -2403,6 +2689,34 @@ impl Interactivity {
                 ((), element_state)
             },
         );
+    }
+
+    /// Check if this element is a scroll container eligible for tiled rendering.
+    /// Returns true if:
+    /// 1. Element has scroll overflow (x or y)
+    /// 2. Element has an ID (needed for cache keying)
+    /// 3. Content size exceeds the viewport by a significant margin
+    pub fn is_tiled_scroll_container(&self, bounds: Bounds<Pixels>) -> bool {
+        // Must have an ID for cache keying
+        if self.element_id.is_none() {
+            return false;
+        }
+
+        // Must be a scroll container
+        let is_scroll_x = self.base_style.overflow.x == Some(Overflow::Scroll);
+        let is_scroll_y = self.base_style.overflow.y == Some(Overflow::Scroll);
+        if !is_scroll_x && !is_scroll_y {
+            return false;
+        }
+
+        // Content should be larger than viewport for tiling to be worthwhile
+        // Only tile if content exceeds viewport by at least one tile size (512 device pixels ~= 256 logical pixels)
+        let min_excess = Pixels(256.0);
+        let content_exceeds_x = self.content_size.width > bounds.size.width + min_excess;
+        let content_exceeds_y = self.content_size.height > bounds.size.height + min_excess;
+
+        // Must have excess content in at least one scrollable direction
+        (is_scroll_x && content_exceeds_x) || (is_scroll_y && content_exceeds_y)
     }
 
     #[cfg(debug_assertions)]
@@ -2968,6 +3282,8 @@ impl Interactivity {
         _cx: &mut App,
     ) {
         if let Some(scroll_offset) = self.scroll_offset.clone() {
+            log::trace!("[SCROLL-REGISTER] Registering scroll listener, current offset=({}, {}), ptr={:p}",
+                scroll_offset.borrow().x.0, scroll_offset.borrow().y.0, std::rc::Rc::as_ptr(&scroll_offset));
             let overflow = style.overflow;
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
             let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
@@ -2975,7 +3291,14 @@ impl Interactivity {
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-                if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
+                let should_handle = hitbox.should_handle_scroll(window);
+                log::trace!("[SCROLL-RAW] phase={:?}, should_handle={}, delta=({}, {})",
+                    phase, should_handle,
+                    event.delta.pixel_delta(line_height).x.0, event.delta.pixel_delta(line_height).y.0);
+                if phase == DispatchPhase::Bubble && should_handle {
+                    log::trace!("[SCROLL-EVENT] Got scroll event, delta=({}, {}), ptr={:p}",
+                        event.delta.pixel_delta(line_height).x.0, event.delta.pixel_delta(line_height).y.0,
+                        std::rc::Rc::as_ptr(&scroll_offset));
                     let mut scroll_offset = scroll_offset.borrow_mut();
                     let old_scroll_offset = *scroll_offset;
                     let delta = event.delta.pixel_delta(line_height);
@@ -3005,6 +3328,11 @@ impl Interactivity {
                     }
                     scroll_offset.y += delta_y;
                     scroll_offset.x += delta_x;
+                    log::trace!("[SCROLL-MODIFY] overflow=({:?},{:?}), delta=({}, {}), old=({}, {}), new=({}, {})",
+                        overflow.x, overflow.y,
+                        delta_x.0, delta_y.0,
+                        old_scroll_offset.x.0, old_scroll_offset.y.0,
+                        scroll_offset.x.0, scroll_offset.y.0);
                     if *scroll_offset != old_scroll_offset {
                         cx.notify(current_view);
                     }

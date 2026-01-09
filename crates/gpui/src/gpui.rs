@@ -38,6 +38,7 @@ mod profiler;
 mod queue;
 mod scene;
 pub use scene::SceneDirtyStats;
+mod display_list;
 mod shared_string;
 mod shared_uri;
 mod style;

@@ -38,11 +38,11 @@ pub(crate) mod scap_screen_capture;
 use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds,
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Font, FontId, FontMetrics, FontRun,
-    ForegroundExecutor, GlyphId, GpuSpecs, ImageSource, Keymap, LineLayout, Pixels, PlatformInput,
-    Point, Priority, RealtimePriority, RenderGlyphParams, RenderImage, RenderImageParams,
-    RenderSvgParams, Scene, ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer,
-    SystemWindowTab, Task, TaskLabel, TaskTiming, ThreadTaskTimings, Window, WindowControlArea,
-    hash, point, px, size,
+    ForegroundExecutor, GlobalElementId, GlyphId, GpuSpecs, ImageSource, Keymap, LineLayout,
+    Pixels, PlatformInput, Point, Priority, RealtimePriority, RenderGlyphParams, RenderImage,
+    RenderImageParams, RenderSvgParams, Scene, ShapedGlyph, ShapedRun, SharedString, Size,
+    SvgRenderer, SystemWindowTab, Task, TaskLabel, TaskTiming, ThreadTaskTimings, TileCoord,
+    Window, WindowControlArea, hash, point, px, size,
 };
 use anyhow::Result;
 use async_task::Runnable;
@@ -532,6 +532,32 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     ) -> Option<crate::scene::CachedTextureInfo> {
         None
     }
+
+    // Tile cache methods for scroll container rendering
+    // Default implementations do nothing (return stub values).
+    // Platform implementations override for actual tiled rendering.
+
+    /// Register a scroll container for tiled rendering.
+    /// Returns the content generation number for cache invalidation.
+    fn register_scroll_container_tiles(
+        &self,
+        _id: &GlobalElementId,
+        _content_size: Size<Pixels>,
+        _content_changed: bool,
+    ) -> u64 {
+        1 // Stub: always indicate content changed
+    }
+
+    /// Get or create a tile. Returns true if the tile needs rendering.
+    fn acquire_tile(
+        &self,
+        _container_id: &GlobalElementId,
+        _coord: TileCoord,
+        _content_generation: u64,
+    ) -> bool {
+        true // Stub: always needs rendering
+    }
+
     fn is_subpixel_rendering_supported(&self) -> bool;
 
     // macOS specific methods

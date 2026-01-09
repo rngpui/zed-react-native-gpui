@@ -1,12 +1,13 @@
 use super::{BoolExt, MacDisplay, NSRange, NSStringExt, ns_string, renderer};
 use crate::{
     AnyWindowHandle, Bounds, Capslock, DisplayLink, ExternalPaths, FileDropEvent,
-    ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay,
-    PlatformInput, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    SharedString, Size, SystemWindowTab, Timer, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowKind, WindowParams, dispatch_get_main_queue,
-    dispatch_sys::dispatch_async_f, platform::PlatformInputHandler, point, px, size,
+    ForegroundExecutor, GlobalElementId, KeyDownEvent, Keystroke, Modifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformWindow, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab, TileCoord, Timer,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
+    WindowParams, dispatch_get_main_queue, dispatch_sys::dispatch_async_f,
+    platform::PlatformInputHandler, point, px, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use anyhow::Result;
@@ -1548,6 +1549,30 @@ impl PlatformWindow for MacWindow {
     ) -> Option<crate::scene::CachedTextureInfo> {
         let mut this = self.0.lock();
         this.renderer.get_cached_texture_info(element_id)
+    }
+
+    fn register_scroll_container_tiles(
+        &self,
+        id: &GlobalElementId,
+        content_size: Size<Pixels>,
+        content_changed: bool,
+    ) -> u64 {
+        let mut this = self.0.lock();
+        this.renderer
+            .tile_cache()
+            .register_scroll_container(id, content_size, content_changed)
+    }
+
+    fn acquire_tile(
+        &self,
+        container_id: &GlobalElementId,
+        coord: TileCoord,
+        content_generation: u64,
+    ) -> bool {
+        let mut this = self.0.lock();
+        this.renderer
+            .tile_cache()
+            .acquire_tile(container_id, coord, content_generation)
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {

@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, GlobalElementId,
     Hsla, Pixels, Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    display_list::DisplayList,
 };
+use collections::FxHashMap;
 use std::{
     fmt::Debug,
     iter::Peekable,
@@ -103,10 +105,14 @@ pub(crate) struct Scene {
     pub(crate) polychrome_sprite_transforms: Vec<TransformationMatrix>,
     pub(crate) surfaces: Vec<PaintSurface>,
     pub(crate) cached_textures: Vec<CachedTextureSprite>,
+    pub(crate) tile_sprites: Vec<TileSprite>,
     /// Stack of subtrees currently being captured
     pending_subtree_captures: Vec<SubtreeCapture>,
     /// Completed subtree captures ready for render-to-texture
     pub(crate) completed_subtree_captures: Vec<SubtreeCapture>,
+    /// Display lists for tile rasterization. Keyed by scroll container element ID.
+    /// These are populated during the paint phase and used by the renderer for tile rasterization.
+    pub(crate) display_lists: FxHashMap<GlobalElementId, DisplayList>,
 }
 
 impl Scene {
@@ -132,8 +138,20 @@ impl Scene {
         self.polychrome_sprite_transforms.clear();
         self.surfaces.clear();
         self.cached_textures.clear();
+        self.tile_sprites.clear();
         self.pending_subtree_captures.clear();
         self.completed_subtree_captures.clear();
+        self.display_lists.clear();
+    }
+
+    /// Get a display list by element ID.
+    pub fn get_display_list(&self, element_id: &GlobalElementId) -> Option<&DisplayList> {
+        self.display_lists.get(element_id)
+    }
+
+    /// Insert a display list for a scroll container.
+    pub fn insert_display_list(&mut self, element_id: GlobalElementId, display_list: DisplayList) {
+        self.display_lists.insert(element_id, display_list);
     }
 
     /// Begin capturing primitives for a subtree that may be cached to a texture.
@@ -215,6 +233,68 @@ impl Scene {
 
     pub fn len(&self) -> usize {
         self.paint_operations.len()
+    }
+
+    /// Get a slice of paint operations for the given range.
+    /// Used by display list conversion to read captured primitives.
+    pub fn paint_operations_slice(&self, range: std::ops::Range<usize>) -> &[PaintOperation] {
+        &self.paint_operations[range]
+    }
+
+    /// Truncate paint operations to the given length.
+    /// Used to remove primitives that have been converted to a display list for tiled rendering.
+    /// Note: This only removes from paint_operations; the typed arrays (quads, shadows, etc.)
+    /// are rebuilt from paint_operations during batch iteration anyway.
+    pub fn truncate_paint_operations(&mut self, len: usize) {
+        // We need to also update the typed arrays to remove the truncated primitives
+        // Count how many of each type to keep
+        let mut quads_to_keep = 0;
+        let mut shadows_to_keep = 0;
+        let mut paths_to_keep = 0;
+        let mut underlines_to_keep = 0;
+        let mut monochrome_sprites_to_keep = 0;
+        let mut subpixel_sprites_to_keep = 0;
+        let mut polychrome_sprites_to_keep = 0;
+        let mut surfaces_to_keep = 0;
+        let mut cached_textures_to_keep = 0;
+        let mut tile_sprites_to_keep = 0;
+        let mut backdrop_blurs_to_keep = 0;
+
+        for op in &self.paint_operations[..len] {
+            if let PaintOperation::Primitive(prim) = op {
+                match prim {
+                    Primitive::Quad(_, _) => quads_to_keep += 1,
+                    Primitive::Shadow(_, _) => shadows_to_keep += 1,
+                    Primitive::Path(_) => paths_to_keep += 1,
+                    Primitive::Underline(_, _) => underlines_to_keep += 1,
+                    Primitive::MonochromeSprite(_) => monochrome_sprites_to_keep += 1,
+                    Primitive::SubpixelSprite(_) => subpixel_sprites_to_keep += 1,
+                    Primitive::PolychromeSprite(_, _) => polychrome_sprites_to_keep += 1,
+                    Primitive::Surface(_) => surfaces_to_keep += 1,
+                    Primitive::CachedTexture(_) => cached_textures_to_keep += 1,
+                    Primitive::TileSprite(_) => tile_sprites_to_keep += 1,
+                    Primitive::BackdropBlur(_, _) => backdrop_blurs_to_keep += 1,
+                }
+            }
+        }
+
+        self.paint_operations.truncate(len);
+        self.quads.truncate(quads_to_keep);
+        self.quad_transforms.truncate(quads_to_keep);
+        self.shadows.truncate(shadows_to_keep);
+        self.shadow_transforms.truncate(shadows_to_keep);
+        self.paths.truncate(paths_to_keep);
+        self.underlines.truncate(underlines_to_keep);
+        self.underline_transforms.truncate(underlines_to_keep);
+        self.monochrome_sprites.truncate(monochrome_sprites_to_keep);
+        self.subpixel_sprites.truncate(subpixel_sprites_to_keep);
+        self.polychrome_sprites.truncate(polychrome_sprites_to_keep);
+        self.polychrome_sprite_transforms.truncate(polychrome_sprites_to_keep);
+        self.surfaces.truncate(surfaces_to_keep);
+        self.cached_textures.truncate(cached_textures_to_keep);
+        self.tile_sprites.truncate(tile_sprites_to_keep);
+        self.backdrop_blurs.truncate(backdrop_blurs_to_keep);
+        self.backdrop_blur_transforms.truncate(backdrop_blurs_to_keep);
     }
 
     pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
@@ -395,6 +475,15 @@ impl Scene {
                 // Note: CachedTextureSprites are not collected into a typed array
                 // because each one has its own texture and needs individual draw calls
             }
+            Primitive::TileSprite(sprite) => {
+                let mut sprite = sprite.clone();
+                sprite.order = order;
+                sprite.bounds = Self::apply_offset(sprite.bounds, offset);
+                sprite.content_mask = content_mask;
+                self.paint_operations
+                    .push(PaintOperation::Primitive(Primitive::TileSprite(sprite.clone())));
+                self.tile_sprites.push(sprite);
+            }
         }
     }
 
@@ -416,6 +505,7 @@ impl Scene {
             Primitive::PolychromeSprite(sprite, _) => sprite.bounds,
             Primitive::Surface(surface) => surface.bounds,
             Primitive::CachedTexture(sprite) => sprite.bounds,
+            Primitive::TileSprite(sprite) => sprite.bounds,
         };
         Self::apply_offset(bounds, offset)
     }
@@ -528,6 +618,11 @@ impl Scene {
                 // Note: No dirty tracking yet for cached textures
                 self.cached_textures.push(sprite.clone());
             }
+            Primitive::TileSprite(sprite) => {
+                sprite.order = order;
+                // Note: No dirty tracking yet for tile sprites
+                self.tile_sprites.push(sprite.clone());
+            }
         }
 
         /// Compute an axis-aligned bounding box for a transformed primitive.
@@ -591,6 +686,7 @@ impl Scene {
                 Primitive::Path(path) => path.bounds,
                 Primitive::Surface(surface) => surface.bounds,
                 Primitive::CachedTexture(sprite) => sprite.bounds,
+                Primitive::TileSprite(sprite) => sprite.bounds,
             }
         }
         if !from_cache {
@@ -737,6 +833,9 @@ impl Scene {
             cached_textures: &self.cached_textures,
             cached_textures_start: 0,
             cached_textures_iter: self.cached_textures.iter().peekable(),
+            tile_sprites: &self.tile_sprites,
+            tile_sprites_start: 0,
+            tile_sprites_iter: self.tile_sprites.iter().peekable(),
         }
     }
 }
@@ -761,6 +860,7 @@ pub(crate) enum PrimitiveKind {
     PolychromeSprite,
     Surface,
     CachedTexture,
+    TileSprite,
 }
 
 pub(crate) enum PaintOperation {
@@ -781,6 +881,7 @@ pub(crate) enum Primitive {
     PolychromeSprite(PolychromeSprite, TransformationMatrix),
     Surface(PaintSurface),
     CachedTexture(CachedTextureSprite),
+    TileSprite(TileSprite),
 }
 
 impl Primitive {
@@ -797,6 +898,7 @@ impl Primitive {
             Primitive::PolychromeSprite(sprite, _) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
             Primitive::CachedTexture(sprite) => &sprite.bounds,
+            Primitive::TileSprite(sprite) => &sprite.bounds,
         }
     }
 
@@ -812,6 +914,7 @@ impl Primitive {
             Primitive::PolychromeSprite(sprite, _) => &sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
             Primitive::CachedTexture(sprite) => &sprite.content_mask,
+            Primitive::TileSprite(sprite) => &sprite.content_mask,
         }
     }
 
@@ -895,6 +998,12 @@ impl Primitive {
                 s.content_mask = full_mask;
                 Primitive::CachedTexture(s)
             }
+            Primitive::TileSprite(sprite) => {
+                let mut s = sprite.clone();
+                s.bounds.origin = s.bounds.origin + offset;
+                s.content_mask = full_mask;
+                Primitive::TileSprite(s)
+            }
         }
     }
 }
@@ -942,6 +1051,9 @@ struct BatchIterator<'a> {
     cached_textures: &'a [CachedTextureSprite],
     cached_textures_start: usize,
     cached_textures_iter: Peekable<slice::Iter<'a, CachedTextureSprite>>,
+    tile_sprites: &'a [TileSprite],
+    tile_sprites_start: usize,
+    tile_sprites_iter: Peekable<slice::Iter<'a, TileSprite>>,
 }
 
 impl<'a> Iterator for BatchIterator<'a> {
@@ -982,6 +1094,10 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.cached_textures_iter.peek().map(|s| s.order),
                 PrimitiveKind::CachedTexture,
+            ),
+            (
+                self.tile_sprites_iter.peek().map(|s| s.order),
+                PrimitiveKind::TileSprite,
             ),
         ];
         orders_and_kinds.sort_by_key(|(order, kind)| (order.unwrap_or(u32::MAX), *kind));
@@ -1173,6 +1289,22 @@ impl<'a> Iterator for BatchIterator<'a> {
                     &self.cached_textures[textures_start..textures_end],
                 ))
             }
+            PrimitiveKind::TileSprite => {
+                let sprites_start = self.tile_sprites_start;
+                let mut sprites_end = sprites_start + 1;
+                self.tile_sprites_iter.next();
+                while self
+                    .tile_sprites_iter
+                    .next_if(|sprite| (sprite.order, batch_kind) < max_order_and_kind)
+                    .is_some()
+                {
+                    sprites_end += 1;
+                }
+                self.tile_sprites_start = sprites_end;
+                Some(PrimitiveBatch::TileSprites(
+                    &self.tile_sprites[sprites_start..sprites_end],
+                ))
+            }
         }
     }
 }
@@ -1207,6 +1339,7 @@ pub(crate) enum PrimitiveBatch<'a> {
     },
     Surfaces(&'a [PaintSurface]),
     CachedTextures(&'a [CachedTextureSprite]),
+    TileSprites(&'a [TileSprite]),
 }
 
 #[derive(Default, Debug, Clone)]
@@ -1544,6 +1677,48 @@ pub(crate) struct CachedTextureSprite {
 impl From<CachedTextureSprite> for Primitive {
     fn from(sprite: CachedTextureSprite) -> Self {
         Primitive::CachedTexture(sprite)
+    }
+}
+
+/// Identifies a specific tile within a scroll container's tiled cache.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct TileCoord {
+    /// Tile column (can be negative if content starts before origin)
+    pub x: i32,
+    /// Tile row
+    pub y: i32,
+}
+
+/// Full key for a cached tile in a scroll container.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct TileKey {
+    /// The scroll container this tile belongs to
+    pub container_id: GlobalElementId,
+    /// The tile's position within the container's virtual grid
+    pub coord: TileCoord,
+}
+
+/// A sprite that composites a tile from a scroll container's tiled cache.
+/// Tiles are fixed-size textures (512x512 device pixels) that together
+/// cover arbitrarily large scrollable content.
+#[derive(Clone, Debug)]
+#[repr(C)]
+pub(crate) struct TileSprite {
+    /// Draw order for z-ordering with other primitives
+    pub order: DrawOrder,
+    /// Padding for alignment
+    pub _pad: u32,
+    /// Screen bounds where this tile should be drawn
+    pub bounds: Bounds<ScaledPixels>,
+    /// Content mask for clipping (viewport bounds)
+    pub content_mask: ContentMask<ScaledPixels>,
+    /// Key to look up the tile's texture in TileCache
+    pub tile_key: TileKey,
+}
+
+impl From<TileSprite> for Primitive {
+    fn from(sprite: TileSprite) -> Self {
+        Primitive::TileSprite(sprite)
     }
 }
 

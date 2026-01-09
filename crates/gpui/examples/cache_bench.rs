@@ -1,8 +1,20 @@
-//! A benchmark that demonstrates the primitive cache effectiveness.
+//! A benchmark that demonstrates the primitive cache and tiled rendering effectiveness.
 //!
 //! Renders a grid of styled elements that remain static across frames.
 //! After the first frame, all elements should hit the cache, showing
 //! significant reduction in paint work.
+//!
+//! ## Grid Size Configurations
+//!
+//! **Small Grid (Default - RTT Caching):**
+//! - GRID_COLS = 15, GRID_ROWS = 25 (375 cells, ~1875px height)
+//! - Fits in 4096 texture at 2x scale
+//! - Uses RTT (Render-to-Texture) caching for the grid-container
+//!
+//! **Large Grid (Tiled Rendering - when enabled):**
+//! - GRID_COLS = 50, GRID_ROWS = 100 (5000 cells, ~7500px height)
+//! - Exceeds texture limits, requires tiled rendering
+//! - Content is rendered to fixed-size tiles for O(visible_tiles) compositing
 //!
 //! Displays FPS and cache hit/miss statistics in real-time.
 
@@ -18,9 +30,18 @@ const WINDOW_WIDTH: f32 = 1200.0;
 const WINDOW_HEIGHT: f32 = 900.0;
 
 // Grid configuration - adjust to test different element counts
-// Note: Grid size must stay under 2048px per dimension to fit in 4096 texture at 2x scale
+//
+// SMALL GRID (RTT mode - default):
+// Uses RTT caching, must stay under 2048px per dimension to fit in 4096 texture at 2x scale
 const GRID_COLS: usize = 15;
 const GRID_ROWS: usize = 25; // ~1875px height, fits in 4096 texture at 2x
+
+// LARGE GRID (Tiled mode):
+// NOTE: Tiled rendering needs architectural changes to work with GPUI's prepaint/paint system.
+// The current implementation can't paint children multiple times per frame.
+// const GRID_COLS: usize = 50;
+// const GRID_ROWS: usize = 100; // ~7500px height, would require tiled rendering
+
 const CELL_SIZE: f32 = 70.0; // Must be >= 64px for RTT caching
 const CELL_GAP: f32 = 5.0;
 
@@ -234,9 +255,13 @@ impl Render for CacheBench {
             )
             .child(
                 // Scrollable grid of styled elements - these should all cache after frame 1
-                // Note: scroll-container has ID for scroll functionality but RTT caching
-                // is skipped for scroll containers (elements with overflow:scroll).
-                // Only the grid-container participates in RTT caching.
+                //
+                // For SMALL grids: RTT caching is used for grid-container
+                // For LARGE grids: Tiled rendering is used (when enabled) for the scroll-container
+                //
+                // Note: scroll-container has ID for scroll functionality. When tiled rendering
+                // is enabled and content exceeds viewport by >256px, it will use 512px tiles
+                // for O(visible_tiles) compositing instead of RTT caching.
                 div()
                     .id("scroll-container")
                     .flex_1()

@@ -1,8 +1,9 @@
 use super::metal_atlas::MetalAtlas;
+use super::tile_cache::TileCache;
 use crate::{
     AtlasTextureId, BackdropBlur, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite,
     PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow,
-    Size, Surface, TransformationMatrix, Underline, point, size,
+    Size, Surface, TileSprite, TransformationMatrix, Underline, point, size,
 };
 use anyhow::Result;
 use block::ConcreteBlock;
@@ -273,6 +274,8 @@ pub(crate) struct MetalRenderer {
     path_sample_count: u32,
     /// Texture cache for render-to-texture caching of subtrees.
     texture_cache: super::texture_cache::TextureCacheManager,
+    /// Tile cache for scroll container tiled rendering.
+    tile_cache: TileCache,
 }
 
 #[repr(C)]
@@ -451,7 +454,7 @@ impl MetalRenderer {
             cached_instance_buffer: Arc::new(Mutex::new(None)),
             previous_frame_arrays: PreviousFrameArrays::default(),
             array_dirty_flags: ArrayDirtyFlags::all_dirty(),
-            device,
+            device: device.clone(),
             layer,
             presents_with_transaction: false,
             command_queue,
@@ -474,6 +477,7 @@ impl MetalRenderer {
             backdrop_texture: None,
             path_sample_count: PATH_SAMPLE_COUNT,
             texture_cache: super::texture_cache::TextureCacheManager::new(),
+            tile_cache: TileCache::new(device),
         }
     }
 
@@ -499,6 +503,11 @@ impl MetalRenderer {
     #[allow(dead_code)]
     pub fn take_texture_cache_stats(&mut self) -> super::texture_cache::TextureCacheStats {
         self.texture_cache.take_stats()
+    }
+
+    /// Access the tile cache for scroll container tiled rendering.
+    pub fn tile_cache(&mut self) -> &mut TileCache {
+        &mut self.tile_cache
     }
 
     /// Query if an element has a cached texture for RTT compositing.
@@ -604,9 +613,14 @@ impl MetalRenderer {
     pub fn draw(&mut self, scene: &Scene) {
         // Begin texture cache frame for RTT caching
         self.texture_cache.begin_frame();
+        // Begin tile cache frame for scroll container tiled rendering
+        self.tile_cache.begin_frame();
 
         // Pre-pass: render captured subtrees to textures for RTT caching
         self.render_subtrees_to_textures(scene);
+
+        // Pre-pass: rasterize display lists to tile textures for scroll containers
+        self.rasterize_tiles_from_display_lists(scene);
 
         let layer = self.layer.clone();
         let viewport_size = layer.drawable_size();
@@ -636,6 +650,7 @@ impl MetalRenderer {
             self.pending_dirty_ranges.clear();
             self.incremental_draw = false;
             self.texture_cache.end_frame(&self.device);
+            self.tile_cache.end_frame();
             return;
         };
 
@@ -699,6 +714,7 @@ impl MetalRenderer {
                     self.last_scene_len = scene.len();
                     // End texture cache frame - evict unused textures
                     self.texture_cache.end_frame(&self.device);
+                    self.tile_cache.end_frame();
                     return;
                 }
                 Err(err) => {
@@ -726,6 +742,7 @@ impl MetalRenderer {
         }
         // End texture cache frame if we broke out of the loop
         self.texture_cache.end_frame(&self.device);
+        self.tile_cache.end_frame();
     }
 
     /// Renders the scene to a texture and returns the pixel data as an RGBA image.
@@ -1052,6 +1069,14 @@ impl MetalRenderer {
                     write_instances,
                 ),
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
+                PrimitiveBatch::TileSprites(sprites) => self.draw_tile_sprites(
+                    sprites,
+                    instance_buffer,
+                    &mut instance_offset,
+                    viewport_size,
+                    command_encoder,
+                    write_instances,
+                ),
             };
             if !ok {
                 command_encoder.end_encoding();
@@ -2156,6 +2181,67 @@ impl MetalRenderer {
         command_buffer.wait_until_completed();
     }
 
+    /// Pre-pass: rasterize display lists to tile textures for scroll containers.
+    /// This iterates over all TileSprites in the scene, checks if their tiles need
+    /// rasterization, and if so, renders the corresponding display list to the tile texture.
+    fn rasterize_tiles_from_display_lists(&mut self, scene: &Scene) {
+        use crate::platform::mac::tile_cache::TileCache;
+
+        let tile_sprites = &scene.tile_sprites;
+        eprintln!("[TILE] rasterize_tiles_from_display_lists: {} tile sprites, {} display lists",
+            tile_sprites.len(), scene.display_lists.len());
+
+        if tile_sprites.is_empty() {
+            return;
+        }
+
+        // Get scale factor from layer contents scale
+        // macOS retina displays typically use 2.0, non-retina use 1.0
+        let scale_factor = self.layer.contents_scale() as f32;
+
+        // Process each tile sprite
+        for sprite in tile_sprites {
+            let container_id = &sprite.tile_key.container_id;
+            let coord = sprite.tile_key.coord;
+
+            // Look up the display list for this container
+            let Some(display_list) = scene.get_display_list(container_id) else {
+                eprintln!("[TILE] No display list for container {:?}, skipping tile {:?}",
+                    container_id, coord);
+                continue;
+            };
+
+            // Get the content generation from the display list
+            let content_generation = display_list.generation;
+
+            // Try to acquire the tile - this creates/finds the tile texture and tells us if it needs rendering
+            let needs_render = self.tile_cache.acquire_tile(
+                container_id,
+                coord,
+                content_generation,
+            );
+
+            eprintln!("[TILE] Tile {:?} needs_render={}, display_list has {} items",
+                coord, needs_render, display_list.items.len());
+
+            if needs_render {
+                // Rasterize the display list to this tile
+                let tile_bounds = TileCache::tile_content_bounds(coord, scale_factor);
+                let raster_result = display_list.rasterize_tile(tile_bounds, scale_factor);
+
+                eprintln!(
+                    "[TILE] Rasterizing tile {:?}: {} quads, {} shadows",
+                    coord,
+                    raster_result.quads.len(),
+                    raster_result.shadows.len(),
+                );
+
+                // Render to the tile texture
+                self.rasterize_display_list_tile(container_id, coord, &raster_result);
+            }
+        }
+    }
+
     /// Render quads directly to an encoder (for RTT pre-pass).
     /// This is a static method to avoid borrow conflicts with command_buffer.
     fn render_quads_to_encoder_static(
@@ -2623,6 +2709,212 @@ impl MetalRenderer {
                 log::warn!(
                     "draw_cached_textures: texture {:?} not found (evicted?), skipping sprite",
                     sprite.texture_id
+                );
+            }
+        }
+        true
+    }
+
+    /// Rasterize a DisplayList to a tile texture.
+    ///
+    /// This is the key method for the display list architecture. It takes a
+    /// TileRasterResult (obtained by calling `display_list.rasterize_tile()`)
+    /// and renders its primitives to the tile texture acquired from the tile cache.
+    ///
+    /// The caller is responsible for:
+    /// 1. Calling `tile_cache.acquire_tile()` to get a tile texture
+    /// 2. Calling this method only if `acquire_tile` returned `true` (needs_render)
+    /// 3. Ensuring the TileRasterResult contains primitives offset to tile-local coordinates
+    pub fn rasterize_display_list_tile(
+        &mut self,
+        container_id: &crate::GlobalElementId,
+        coord: crate::scene::TileCoord,
+        raster_result: &crate::display_list::TileRasterResult,
+    ) {
+        use crate::scene::TileKey;
+
+        // Get the tile texture
+        let tile_key = TileKey {
+            container_id: container_id.clone(),
+            coord,
+        };
+
+        let texture = match self.tile_cache.get_tile_texture(&tile_key) {
+            Some(t) => t.clone(),
+            None => {
+                log::warn!(
+                    "rasterize_display_list_tile: tile {:?} not found in cache",
+                    tile_key
+                );
+                return;
+            }
+        };
+
+        // Skip if nothing to render
+        if raster_result.is_empty() {
+            return;
+        }
+
+        // Create command buffer for tile rendering
+        let command_buffer = self.command_queue.new_command_buffer();
+
+        let tile_size: Size<DevicePixels> = size(
+            DevicePixels(super::tile_cache::TILE_SIZE as i32),
+            DevicePixels(super::tile_cache::TILE_SIZE as i32),
+        );
+
+        // Create render pass descriptor targeting the tile texture
+        let render_pass_descriptor = metal::RenderPassDescriptor::new();
+        let color_attachment = render_pass_descriptor
+            .color_attachments()
+            .object_at(0)
+            .unwrap();
+        color_attachment.set_texture(Some(&texture));
+        color_attachment.set_load_action(metal::MTLLoadAction::Clear);
+        color_attachment.set_store_action(metal::MTLStoreAction::Store);
+        // Clear to transparent
+        color_attachment.set_clear_color(metal::MTLClearColor::new(0., 0., 0., 0.));
+
+        // Create command encoder for this tile
+        let command_encoder = command_buffer.new_render_command_encoder(&render_pass_descriptor);
+        command_encoder.set_viewport(metal::MTLViewport {
+            originX: 0.0,
+            originY: 0.0,
+            width: super::tile_cache::TILE_SIZE as f64,
+            height: super::tile_cache::TILE_SIZE as f64,
+            znear: 0.0,
+            zfar: 1.0,
+        });
+
+        // Render all primitive types to the tile
+        // Order matters for correct blending - render back to front
+
+        // 1. Shadows (typically behind other content)
+        if !raster_result.shadows.is_empty() {
+            Self::render_shadows_to_encoder_static(
+                &self.device,
+                &self.shadows_pipeline_state,
+                &self.unit_vertices,
+                &raster_result.shadows,
+                &raster_result.shadow_transforms,
+                tile_size,
+                command_encoder,
+            );
+        }
+
+        // 2. Quads (backgrounds, borders)
+        if !raster_result.quads.is_empty() {
+            Self::render_quads_to_encoder_static(
+                &self.device,
+                &self.quads_pipeline_state,
+                &self.unit_vertices,
+                &raster_result.quads,
+                &raster_result.quad_transforms,
+                tile_size,
+                command_encoder,
+            );
+        }
+
+        // 3. Underlines
+        if !raster_result.underlines.is_empty() {
+            Self::render_underlines_to_encoder_static(
+                &self.device,
+                &self.underlines_pipeline_state,
+                &self.unit_vertices,
+                &raster_result.underlines,
+                &raster_result.underline_transforms,
+                tile_size,
+                command_encoder,
+            );
+        }
+
+        // 4. Monochrome sprites (text)
+        if !raster_result.monochrome_sprites.is_empty() {
+            Self::render_monochrome_sprites_to_encoder_static(
+                &self.device,
+                &self.monochrome_sprites_pipeline_state,
+                &self.unit_vertices,
+                &self.sprite_atlas,
+                &raster_result.monochrome_sprites,
+                tile_size,
+                command_encoder,
+            );
+        }
+
+        // 5. Polychrome sprites (colored text, icons)
+        if !raster_result.polychrome_sprites.is_empty() {
+            Self::render_polychrome_sprites_to_encoder_static(
+                &self.device,
+                &self.polychrome_sprites_pipeline_state,
+                &self.unit_vertices,
+                &self.sprite_atlas,
+                &raster_result.polychrome_sprites,
+                &raster_result.polychrome_sprite_transforms,
+                tile_size,
+                command_encoder,
+            );
+        }
+
+        // Note: Paths and backdrop blurs are more complex and less common in scrollable content.
+        // TODO: Add path and backdrop blur rendering if needed for display list tiles
+
+        command_encoder.end_encoding();
+
+        // Commit the tile rendering command buffer
+        command_buffer.commit();
+        // Wait for completion to ensure tile is ready
+        command_buffer.wait_until_completed();
+    }
+
+    /// Access to the tile cache for registering scroll containers and acquiring tiles.
+    pub fn tile_cache_mut(&mut self) -> &mut TileCache {
+        &mut self.tile_cache
+    }
+
+    /// Draws a batch of tile sprites to the screen.
+    /// This composites tiles from scroll container tile caches.
+    fn draw_tile_sprites(
+        &mut self,
+        sprites: &[TileSprite],
+        instance_buffer: &InstanceBuffer,
+        instance_offset: &mut usize,
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+        write_instances: bool,
+    ) -> bool {
+        for sprite in sprites {
+            // Look up the tile texture from the tile cache and clone the reference
+            // (metal::Texture implements Clone as an Arc-like reference)
+            let texture = self
+                .tile_cache
+                .get_tile_texture(&sprite.tile_key)
+                .cloned();
+
+            if let Some(texture) = texture {
+                // Tiles use full UV bounds (0,0 to 1,1) since they are exact size
+                let uv_bounds = Bounds {
+                    origin: point(0.0, 0.0),
+                    size: size(1.0, 1.0),
+                };
+
+                let ok = self.draw_cached_texture(
+                    sprite.bounds,
+                    sprite.content_mask.clone(),
+                    uv_bounds,
+                    &texture,
+                    viewport_size,
+                    command_encoder,
+                    instance_buffer,
+                    instance_offset,
+                    write_instances,
+                );
+                if !ok {
+                    return false;
+                }
+            } else {
+                log::warn!(
+                    "draw_tile_sprites: tile {:?} not found (evicted?), skipping sprite",
+                    sprite.tile_key
                 );
             }
         }
