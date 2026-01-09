@@ -1047,6 +1047,52 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
   return ycbcrToRGBTransform * ycbcr;
 }
 
+// Cached texture sprite shaders - for render-to-texture caching
+struct CachedTextureVertexOutput {
+  float4 position [[position]];
+  float2 texture_coords;
+  float clip_distance [[clip_distance]][4];
+};
+
+struct CachedTextureFragmentInput {
+  float4 position [[position]];
+  float2 texture_coords;
+};
+
+vertex CachedTextureVertexOutput cached_texture_vertex(
+    uint unit_vertex_id [[vertex_id]],
+    uint sprite_id [[instance_id]],
+    constant float2 *unit_vertices [[buffer(CachedTextureInputIndex_Vertices)]],
+    constant CachedTextureSpriteGpu *sprites [[buffer(CachedTextureInputIndex_Sprites)]],
+    constant Size_DevicePixels *viewport_size [[buffer(CachedTextureInputIndex_ViewportSize)]]) {
+  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  CachedTextureSpriteGpu sprite = sprites[sprite_id];
+
+  float4 device_position =
+      to_device_position(unit_vertex, sprite.bounds, viewport_size);
+  float4 clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds,
+                                                 sprite.content_mask.bounds);
+
+  // Compute texture coordinates from UV bounds
+  // unit_vertex is in [0,1] range, map it to the UV bounds
+  float2 uv = float2(
+    sprite.uv_bounds.origin.x + unit_vertex.x * sprite.uv_bounds.size.width,
+    sprite.uv_bounds.origin.y + unit_vertex.y * sprite.uv_bounds.size.height
+  );
+
+  return CachedTextureVertexOutput{
+      device_position,
+      uv,
+      {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
+}
+
+fragment float4 cached_texture_fragment(
+    CachedTextureFragmentInput input [[stage_in]],
+    texture2d<float> cached_texture [[texture(CachedTextureInputIndex_Texture)]]) {
+  constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear);
+  return cached_texture.sample(texture_sampler, input.texture_coords);
+}
+
 float4 hsla_to_rgba(Hsla hsla) {
   float h = hsla.h * 6.0; // Now, it's an angle but scaled in [0, 6) range
   float s = hsla.s;

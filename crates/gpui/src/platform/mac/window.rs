@@ -1542,6 +1542,14 @@ impl PlatformWindow for MacWindow {
         this.renderer.draw_incremental(scene, dirty_ranges);
     }
 
+    fn get_cached_texture_id(
+        &self,
+        element_id: &crate::GlobalElementId,
+    ) -> Option<crate::scene::CachedTextureId> {
+        let mut this = self.0.lock();
+        this.renderer.get_cached_texture_id(element_id)
+    }
+
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.0.lock().renderer.sprite_atlas().clone()
     }

@@ -524,6 +524,14 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     fn completed_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
+    /// Query if an element has a cached texture for RTT compositing.
+    /// Returns the texture ID if the element has a valid cached texture.
+    fn get_cached_texture_id(
+        &self,
+        _element_id: &crate::GlobalElementId,
+    ) -> Option<crate::scene::CachedTextureId> {
+        None
+    }
     fn is_subpixel_rendering_supported(&self) -> bool;
 
     // macOS specific methods

@@ -27,6 +27,7 @@ use metal::{
 use objc::{self, msg_send, sel, sel_impl};
 use parking_lot::Mutex;
 
+use collections::FxHashMap;
 use std::{cell::Cell, ffi::c_void, mem, ptr, slice, sync::Arc};
 
 // Exported to metal
@@ -260,6 +261,7 @@ pub(crate) struct MetalRenderer {
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
     surfaces_pipeline_state: metal::RenderPipelineState,
+    cached_textures_pipeline_state: metal::RenderPipelineState,
     unit_vertices: metal::Buffer,
     #[allow(clippy::arc_with_non_send_sync)]
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
@@ -269,6 +271,8 @@ pub(crate) struct MetalRenderer {
     path_intermediate_msaa_texture: Option<metal::Texture>,
     backdrop_texture: Option<metal::Texture>,
     path_sample_count: u32,
+    /// Texture cache for render-to-texture caching of subtrees.
+    texture_cache: super::texture_cache::TextureCacheManager,
 }
 
 #[repr(C)]
@@ -423,6 +427,14 @@ impl MetalRenderer {
             "surface_fragment",
             MTLPixelFormat::BGRA8Unorm,
         );
+        let cached_textures_pipeline_state = build_pipeline_state(
+            &device,
+            &library,
+            "cached_textures",
+            "cached_texture_vertex",
+            "cached_texture_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        );
 
         let command_queue = device.new_command_queue();
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone()));
@@ -449,6 +461,7 @@ impl MetalRenderer {
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
+            cached_textures_pipeline_state,
             unit_vertices,
             instance_buffer_pool,
             sprite_atlas,
@@ -457,6 +470,7 @@ impl MetalRenderer {
             path_intermediate_msaa_texture: None,
             backdrop_texture: None,
             path_sample_count: PATH_SAMPLE_COUNT,
+            texture_cache: super::texture_cache::TextureCacheManager::new(),
         }
     }
 
@@ -470,6 +484,29 @@ impl MetalRenderer {
 
     pub fn sprite_atlas(&self) -> &Arc<MetalAtlas> {
         &self.sprite_atlas
+    }
+
+    /// Get the current texture cache statistics without resetting counters.
+    #[allow(dead_code)]
+    pub fn texture_cache_stats(&self) -> super::texture_cache::TextureCacheStats {
+        self.texture_cache.peek_stats()
+    }
+
+    /// Get the texture cache statistics and reset hit/miss counters.
+    #[allow(dead_code)]
+    pub fn take_texture_cache_stats(&mut self) -> super::texture_cache::TextureCacheStats {
+        self.texture_cache.take_stats()
+    }
+
+    /// Query if an element has a cached texture for RTT compositing.
+    /// Returns the texture ID if the element has a valid cached texture.
+    pub fn get_cached_texture_id(
+        &mut self,
+        element_id: &crate::GlobalElementId,
+    ) -> Option<crate::scene::CachedTextureId> {
+        self.texture_cache
+            .lookup_by_id(element_id)
+            .map(|entry| entry.id)
     }
 
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
@@ -552,6 +589,12 @@ impl MetalRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) {
+        // Begin texture cache frame for RTT caching
+        self.texture_cache.begin_frame();
+
+        // Pre-pass: render captured subtrees to textures for RTT caching
+        self.render_subtrees_to_textures(scene);
+
         let layer = self.layer.clone();
         let viewport_size = layer.drawable_size();
         let viewport_size: Size<DevicePixels> = size(
@@ -579,6 +622,7 @@ impl MetalRenderer {
             );
             self.pending_dirty_ranges.clear();
             self.incremental_draw = false;
+            self.texture_cache.end_frame(&self.device);
             return;
         };
 
@@ -640,6 +684,8 @@ impl MetalRenderer {
                     self.pending_dirty_ranges.clear();
                     self.incremental_draw = false;
                     self.last_scene_len = scene.len();
+                    // End texture cache frame - evict unused textures
+                    self.texture_cache.end_frame(&self.device);
                     return;
                 }
                 Err(err) => {
@@ -665,6 +711,8 @@ impl MetalRenderer {
                 }
             }
         }
+        // End texture cache frame if we broke out of the loop
+        self.texture_cache.end_frame(&self.device);
     }
 
     /// Renders the scene to a texture and returns the pixel data as an RGBA image.
@@ -976,6 +1024,14 @@ impl MetalRenderer {
                 ),
                 PrimitiveBatch::Surfaces(surfaces) => self.draw_surfaces(
                     surfaces,
+                    instance_buffer,
+                    &mut instance_offset,
+                    viewport_size,
+                    command_encoder,
+                    write_instances,
+                ),
+                PrimitiveBatch::CachedTextures(sprites) => self.draw_cached_textures(
+                    sprites,
                     instance_buffer,
                     &mut instance_offset,
                     viewport_size,
@@ -1850,6 +1906,681 @@ impl MetalRenderer {
         }
         true
     }
+
+    /// Draws a cached texture sprite to the screen.
+    /// Used for render-to-texture caching where subtrees are rendered once
+    /// and then composited at potentially different offsets.
+    #[allow(dead_code)]
+    fn draw_cached_texture(
+        &mut self,
+        bounds: Bounds<ScaledPixels>,
+        content_mask: ContentMask<ScaledPixels>,
+        uv_bounds: Bounds<f32>,
+        texture: &metal::TextureRef,
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+        instance_buffer: &InstanceBuffer,
+        instance_offset: &mut usize,
+        write_instances: bool,
+    ) -> bool {
+        align_offset(instance_offset);
+
+        let sprite_bytes_len = mem::size_of::<CachedTextureSpriteGpu>();
+        let next_offset = *instance_offset + sprite_bytes_len;
+
+        if next_offset > instance_buffer.size {
+            return false;
+        }
+
+        command_encoder.set_render_pipeline_state(&self.cached_textures_pipeline_state);
+        command_encoder.set_vertex_buffer(
+            CachedTextureInputIndex::Vertices as u64,
+            Some(&self.unit_vertices),
+            0,
+        );
+        command_encoder.set_vertex_buffer(
+            CachedTextureInputIndex::Sprites as u64,
+            Some(&instance_buffer.metal_buffer),
+            *instance_offset as u64,
+        );
+        command_encoder.set_vertex_bytes(
+            CachedTextureInputIndex::ViewportSize as u64,
+            mem::size_of_val(&viewport_size) as u64,
+            &viewport_size as *const Size<DevicePixels> as *const _,
+        );
+        command_encoder.set_fragment_texture(
+            CachedTextureInputIndex::Texture as u64,
+            Some(texture),
+        );
+
+        if write_instances {
+            unsafe {
+                let buffer_contents = (instance_buffer.metal_buffer.contents() as *mut u8)
+                    .add(*instance_offset) as *mut CachedTextureSpriteGpu;
+                ptr::write(
+                    buffer_contents,
+                    CachedTextureSpriteGpu {
+                        bounds,
+                        content_mask,
+                        uv_bounds,
+                    },
+                );
+            }
+        }
+
+        command_encoder.draw_primitives_instanced(metal::MTLPrimitiveType::Triangle, 0, 6, 1);
+        *instance_offset = next_offset;
+        true
+    }
+
+    /// Pre-pass: render captured subtrees to offscreen textures.
+    /// This enables O(1) scrolling by compositing cached textures instead of re-rendering.
+    fn render_subtrees_to_textures(&mut self, scene: &Scene) {
+        let captures = scene.subtree_captures();
+        if captures.is_empty() {
+            return;
+        }
+
+        log::trace!(
+            "render_subtrees_to_textures: {} captures to render",
+            captures.len()
+        );
+
+        // Create command buffer for RTT pre-pass
+        let command_buffer = self.command_queue.new_command_buffer();
+
+        for capture in captures {
+            // Convert ScaledPixels to DevicePixels (both are physical pixel coordinates)
+            let texture_size: Size<DevicePixels> = size(
+                DevicePixels(capture.bounds.size.width.0.ceil() as i32),
+                DevicePixels(capture.bounds.size.height.0.ceil() as i32),
+            );
+            let content_bounds: Bounds<DevicePixels> = Bounds {
+                origin: point(
+                    DevicePixels(capture.bounds.origin.x.0.round() as i32),
+                    DevicePixels(capture.bounds.origin.y.0.round() as i32),
+                ),
+                size: texture_size,
+            };
+
+            // Skip if texture is too small or too large
+            if texture_size.width.0 < 64
+                || texture_size.height.0 < 64
+                || texture_size.width.0 > 4096
+                || texture_size.height.0 > 4096
+            {
+                continue;
+            }
+
+            // Acquire texture from the pool
+            // Use a simple signature based on the element ID hash for now
+            let signature = {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                capture.id.hash(&mut hasher);
+                hasher.finish()
+            };
+
+            let entry = self.texture_cache.acquire(
+                &self.device,
+                capture.id.clone(),
+                texture_size,
+                signature,
+                content_bounds,
+            );
+            let texture_id = entry.id;
+            let texture = entry.texture.texture.clone();
+
+            log::trace!(
+                "RTT: acquired texture {:?} for element, size {}x{}",
+                texture_id,
+                texture_size.width.0,
+                texture_size.height.0
+            );
+
+            // Create render pass descriptor targeting the texture
+            let render_pass_descriptor = metal::RenderPassDescriptor::new();
+            let color_attachment = render_pass_descriptor
+                .color_attachments()
+                .object_at(0)
+                .unwrap();
+            color_attachment.set_texture(Some(&texture));
+            color_attachment.set_load_action(metal::MTLLoadAction::Clear);
+            color_attachment.set_store_action(metal::MTLStoreAction::Store);
+            // Clear to transparent
+            color_attachment.set_clear_color(metal::MTLClearColor::new(0., 0., 0., 0.));
+
+            // Create command encoder for this texture
+            let command_encoder =
+                command_buffer.new_render_command_encoder(&render_pass_descriptor);
+            command_encoder.set_viewport(metal::MTLViewport {
+                originX: 0.0,
+                originY: 0.0,
+                width: texture_size.width.0 as f64,
+                height: texture_size.height.0 as f64,
+                znear: 0.0,
+                zfar: 1.0,
+            });
+
+            // Create mini-scene with primitives translated to texture coordinates
+            let mini_scene = scene.create_capture_scene(capture);
+
+            // Render all primitive types to the texture
+            // Order matters for correct blending - render back to front
+
+            // 1. Shadows (typically behind other content)
+            if !mini_scene.shadows.is_empty() {
+                Self::render_shadows_to_encoder_static(
+                    &self.device,
+                    &self.shadows_pipeline_state,
+                    &self.unit_vertices,
+                    &mini_scene.shadows,
+                    &mini_scene.shadow_transforms,
+                    texture_size,
+                    command_encoder,
+                );
+            }
+
+            // 2. Quads (backgrounds, borders)
+            if !mini_scene.quads.is_empty() {
+                Self::render_quads_to_encoder_static(
+                    &self.device,
+                    &self.quads_pipeline_state,
+                    &self.unit_vertices,
+                    &mini_scene.quads,
+                    texture_size,
+                    command_encoder,
+                );
+            }
+
+            // 3. Underlines
+            if !mini_scene.underlines.is_empty() {
+                Self::render_underlines_to_encoder_static(
+                    &self.device,
+                    &self.underlines_pipeline_state,
+                    &self.unit_vertices,
+                    &mini_scene.underlines,
+                    &mini_scene.underline_transforms,
+                    texture_size,
+                    command_encoder,
+                );
+            }
+
+            // 4. Monochrome sprites (text)
+            if !mini_scene.monochrome_sprites.is_empty() {
+                Self::render_monochrome_sprites_to_encoder_static(
+                    &self.device,
+                    &self.monochrome_sprites_pipeline_state,
+                    &self.unit_vertices,
+                    &self.sprite_atlas,
+                    &mini_scene.monochrome_sprites,
+                    texture_size,
+                    command_encoder,
+                );
+            }
+
+            // 5. Polychrome sprites (colored text, icons)
+            if !mini_scene.polychrome_sprites.is_empty() {
+                Self::render_polychrome_sprites_to_encoder_static(
+                    &self.device,
+                    &self.polychrome_sprites_pipeline_state,
+                    &self.unit_vertices,
+                    &self.sprite_atlas,
+                    &mini_scene.polychrome_sprites,
+                    &mini_scene.polychrome_sprite_transforms,
+                    texture_size,
+                    command_encoder,
+                );
+            }
+
+            // Note: Paths and surfaces are more complex (require intermediate textures)
+            // and are less common in scrollable content. Skipping for now.
+            // TODO: Add path rendering if needed for RTT
+
+            command_encoder.end_encoding();
+        }
+
+        // Commit the RTT command buffer
+        command_buffer.commit();
+        // Wait for completion to ensure textures are ready for main pass
+        command_buffer.wait_until_completed();
+    }
+
+    /// Render quads directly to an encoder (for RTT pre-pass).
+    /// This is a static method to avoid borrow conflicts with command_buffer.
+    fn render_quads_to_encoder_static(
+        device: &metal::Device,
+        pipeline_state: &metal::RenderPipelineState,
+        unit_vertices: &metal::Buffer,
+        quads: &[crate::scene::Quad],
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+    ) {
+        if quads.is_empty() {
+            return;
+        }
+
+        // Allocate a temporary instance buffer for this render
+        let instance_size = std::mem::size_of::<crate::scene::Quad>();
+        let buffer_size = quads.len() * instance_size;
+
+        let instance_buffer = device.new_buffer(
+            buffer_size as u64,
+            metal::MTLResourceOptions::StorageModeShared,
+        );
+
+        // Copy quad data to the buffer
+        unsafe {
+            let ptr = instance_buffer.contents() as *mut crate::scene::Quad;
+            std::ptr::copy_nonoverlapping(quads.as_ptr(), ptr, quads.len());
+        }
+
+        // Set up pipeline state
+        command_encoder.set_render_pipeline_state(pipeline_state);
+        command_encoder.set_vertex_buffer(
+            QuadInputIndex::Vertices as u64,
+            Some(unit_vertices),
+            0,
+        );
+        command_encoder.set_vertex_buffer(
+            QuadInputIndex::Quads as u64,
+            Some(&instance_buffer),
+            0,
+        );
+        command_encoder.set_vertex_bytes(
+            QuadInputIndex::ViewportSize as u64,
+            std::mem::size_of::<Size<DevicePixels>>() as u64,
+            &viewport_size as *const Size<DevicePixels> as *const _,
+        );
+
+        // Draw instanced
+        command_encoder.draw_primitives_instanced(
+            metal::MTLPrimitiveType::Triangle,
+            0,
+            6, // 2 triangles = 6 vertices for a quad
+            quads.len() as u64,
+        );
+    }
+
+    /// Render shadows directly to an encoder (for RTT pre-pass).
+    fn render_shadows_to_encoder_static(
+        device: &metal::Device,
+        pipeline_state: &metal::RenderPipelineState,
+        unit_vertices: &metal::Buffer,
+        shadows: &[crate::scene::Shadow],
+        transforms: &[crate::TransformationMatrix],
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+    ) {
+        if shadows.is_empty() {
+            return;
+        }
+
+        // Allocate buffer for shadows + transforms
+        let shadow_bytes = std::mem::size_of_val(shadows);
+        let transform_bytes = std::mem::size_of_val(transforms);
+        let buffer_size = shadow_bytes + 16 + transform_bytes; // 16 for alignment
+
+        let instance_buffer = device.new_buffer(
+            buffer_size as u64,
+            metal::MTLResourceOptions::StorageModeShared,
+        );
+
+        // Copy data to buffer
+        let shadow_offset = 0usize;
+        let mut transform_offset = shadow_bytes;
+        // Align to 16 bytes
+        transform_offset = (transform_offset + 15) & !15;
+
+        unsafe {
+            let base = instance_buffer.contents() as *mut u8;
+            std::ptr::copy_nonoverlapping(
+                shadows.as_ptr() as *const u8,
+                base.add(shadow_offset),
+                shadow_bytes,
+            );
+            std::ptr::copy_nonoverlapping(
+                transforms.as_ptr() as *const u8,
+                base.add(transform_offset),
+                transform_bytes,
+            );
+        }
+
+        // Set up pipeline state
+        command_encoder.set_render_pipeline_state(pipeline_state);
+        command_encoder.set_vertex_buffer(
+            ShadowInputIndex::Vertices as u64,
+            Some(unit_vertices),
+            0,
+        );
+        command_encoder.set_vertex_buffer(
+            ShadowInputIndex::Shadows as u64,
+            Some(&instance_buffer),
+            shadow_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            ShadowInputIndex::Shadows as u64,
+            Some(&instance_buffer),
+            shadow_offset as u64,
+        );
+        command_encoder.set_vertex_buffer(
+            ShadowInputIndex::Transforms as u64,
+            Some(&instance_buffer),
+            transform_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            ShadowInputIndex::Transforms as u64,
+            Some(&instance_buffer),
+            transform_offset as u64,
+        );
+        command_encoder.set_vertex_bytes(
+            ShadowInputIndex::ViewportSize as u64,
+            std::mem::size_of::<Size<DevicePixels>>() as u64,
+            &viewport_size as *const Size<DevicePixels> as *const _,
+        );
+
+        command_encoder.draw_primitives_instanced(
+            metal::MTLPrimitiveType::Triangle,
+            0,
+            6,
+            shadows.len() as u64,
+        );
+    }
+
+    /// Render underlines directly to an encoder (for RTT pre-pass).
+    fn render_underlines_to_encoder_static(
+        device: &metal::Device,
+        pipeline_state: &metal::RenderPipelineState,
+        unit_vertices: &metal::Buffer,
+        underlines: &[crate::scene::Underline],
+        transforms: &[crate::TransformationMatrix],
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+    ) {
+        if underlines.is_empty() {
+            return;
+        }
+
+        // Allocate buffer for underlines + transforms
+        let underline_bytes = std::mem::size_of_val(underlines);
+        let transform_bytes = std::mem::size_of_val(transforms);
+        let buffer_size = underline_bytes + 16 + transform_bytes;
+
+        let instance_buffer = device.new_buffer(
+            buffer_size as u64,
+            metal::MTLResourceOptions::StorageModeShared,
+        );
+
+        let underline_offset = 0usize;
+        let mut transform_offset = underline_bytes;
+        transform_offset = (transform_offset + 15) & !15;
+
+        unsafe {
+            let base = instance_buffer.contents() as *mut u8;
+            std::ptr::copy_nonoverlapping(
+                underlines.as_ptr() as *const u8,
+                base.add(underline_offset),
+                underline_bytes,
+            );
+            std::ptr::copy_nonoverlapping(
+                transforms.as_ptr() as *const u8,
+                base.add(transform_offset),
+                transform_bytes,
+            );
+        }
+
+        command_encoder.set_render_pipeline_state(pipeline_state);
+        command_encoder.set_vertex_buffer(
+            UnderlineInputIndex::Vertices as u64,
+            Some(unit_vertices),
+            0,
+        );
+        command_encoder.set_vertex_buffer(
+            UnderlineInputIndex::Underlines as u64,
+            Some(&instance_buffer),
+            underline_offset as u64,
+        );
+        command_encoder.set_vertex_buffer(
+            UnderlineInputIndex::Transforms as u64,
+            Some(&instance_buffer),
+            transform_offset as u64,
+        );
+        command_encoder.set_vertex_bytes(
+            UnderlineInputIndex::ViewportSize as u64,
+            std::mem::size_of::<Size<DevicePixels>>() as u64,
+            &viewport_size as *const Size<DevicePixels> as *const _,
+        );
+
+        command_encoder.draw_primitives_instanced(
+            metal::MTLPrimitiveType::Triangle,
+            0,
+            6,
+            underlines.len() as u64,
+        );
+    }
+
+    /// Render monochrome sprites (text) directly to an encoder (for RTT pre-pass).
+    fn render_monochrome_sprites_to_encoder_static(
+        device: &metal::Device,
+        pipeline_state: &metal::RenderPipelineState,
+        unit_vertices: &metal::Buffer,
+        sprite_atlas: &Arc<MetalAtlas>,
+        sprites: &[crate::scene::MonochromeSprite],
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+    ) {
+        if sprites.is_empty() {
+            return;
+        }
+
+        // Group sprites by texture ID
+        let mut sprites_by_texture: FxHashMap<AtlasTextureId, Vec<&crate::scene::MonochromeSprite>> =
+            FxHashMap::default();
+        for sprite in sprites {
+            sprites_by_texture
+                .entry(sprite.tile.texture_id)
+                .or_default()
+                .push(sprite);
+        }
+
+        for (texture_id, batch) in sprites_by_texture {
+            let sprite_bytes = batch.len() * std::mem::size_of::<crate::scene::MonochromeSprite>();
+
+            let instance_buffer = device.new_buffer(
+                sprite_bytes as u64,
+                metal::MTLResourceOptions::StorageModeShared,
+            );
+
+            // Copy sprites to buffer
+            unsafe {
+                let base = instance_buffer.contents() as *mut crate::scene::MonochromeSprite;
+                for (i, sprite) in batch.iter().enumerate() {
+                    std::ptr::copy_nonoverlapping(*sprite, base.add(i), 1);
+                }
+            }
+
+            let texture = sprite_atlas.metal_texture(texture_id);
+            let texture_size = size(
+                DevicePixels(texture.width() as i32),
+                DevicePixels(texture.height() as i32),
+            );
+
+            command_encoder.set_render_pipeline_state(pipeline_state);
+            command_encoder.set_vertex_buffer(
+                SpriteInputIndex::Vertices as u64,
+                Some(unit_vertices),
+                0,
+            );
+            command_encoder.set_vertex_buffer(
+                SpriteInputIndex::Sprites as u64,
+                Some(&instance_buffer),
+                0,
+            );
+            command_encoder.set_vertex_bytes(
+                SpriteInputIndex::ViewportSize as u64,
+                std::mem::size_of::<Size<DevicePixels>>() as u64,
+                &viewport_size as *const Size<DevicePixels> as *const _,
+            );
+            command_encoder.set_vertex_bytes(
+                SpriteInputIndex::AtlasTextureSize as u64,
+                std::mem::size_of::<Size<DevicePixels>>() as u64,
+                &texture_size as *const Size<DevicePixels> as *const _,
+            );
+            command_encoder.set_fragment_buffer(
+                SpriteInputIndex::Sprites as u64,
+                Some(&instance_buffer),
+                0,
+            );
+            command_encoder.set_fragment_texture(SpriteInputIndex::AtlasTexture as u64, Some(&texture));
+
+            command_encoder.draw_primitives_instanced(
+                metal::MTLPrimitiveType::Triangle,
+                0,
+                6,
+                batch.len() as u64,
+            );
+        }
+    }
+
+    /// Render polychrome sprites directly to an encoder (for RTT pre-pass).
+    fn render_polychrome_sprites_to_encoder_static(
+        device: &metal::Device,
+        pipeline_state: &metal::RenderPipelineState,
+        unit_vertices: &metal::Buffer,
+        sprite_atlas: &Arc<MetalAtlas>,
+        sprites: &[crate::scene::PolychromeSprite],
+        transforms: &[crate::TransformationMatrix],
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+    ) {
+        if sprites.is_empty() {
+            return;
+        }
+
+        // Group sprites by texture ID (keeping track of transforms)
+        let mut sprites_by_texture: FxHashMap<
+            AtlasTextureId,
+            Vec<(&crate::scene::PolychromeSprite, &crate::TransformationMatrix)>,
+        > = FxHashMap::default();
+        for (sprite, transform) in sprites.iter().zip(transforms.iter()) {
+            sprites_by_texture
+                .entry(sprite.tile.texture_id)
+                .or_default()
+                .push((sprite, transform));
+        }
+
+        for (texture_id, batch) in sprites_by_texture {
+            let sprite_bytes =
+                batch.len() * std::mem::size_of::<crate::scene::PolychromeSprite>();
+            let transform_bytes = batch.len() * std::mem::size_of::<crate::TransformationMatrix>();
+            let buffer_size = sprite_bytes + 16 + transform_bytes;
+
+            let instance_buffer = device.new_buffer(
+                buffer_size as u64,
+                metal::MTLResourceOptions::StorageModeShared,
+            );
+
+            let sprite_offset = 0usize;
+            let mut transform_offset = sprite_bytes;
+            transform_offset = (transform_offset + 15) & !15;
+
+            // Copy sprites and transforms to buffer
+            unsafe {
+                let base = instance_buffer.contents() as *mut u8;
+                let sprite_ptr = base as *mut crate::scene::PolychromeSprite;
+                let transform_ptr = base.add(transform_offset) as *mut crate::TransformationMatrix;
+                for (i, (sprite, transform)) in batch.iter().enumerate() {
+                    std::ptr::copy_nonoverlapping(*sprite, sprite_ptr.add(i), 1);
+                    std::ptr::copy_nonoverlapping(*transform, transform_ptr.add(i), 1);
+                }
+            }
+
+            let texture = sprite_atlas.metal_texture(texture_id);
+            let texture_size = size(
+                DevicePixels(texture.width() as i32),
+                DevicePixels(texture.height() as i32),
+            );
+
+            command_encoder.set_render_pipeline_state(pipeline_state);
+            command_encoder.set_vertex_buffer(
+                SpriteInputIndex::Vertices as u64,
+                Some(unit_vertices),
+                0,
+            );
+            command_encoder.set_vertex_buffer(
+                SpriteInputIndex::Sprites as u64,
+                Some(&instance_buffer),
+                sprite_offset as u64,
+            );
+            command_encoder.set_vertex_buffer(
+                SpriteInputIndex::Transforms as u64,
+                Some(&instance_buffer),
+                transform_offset as u64,
+            );
+            command_encoder.set_vertex_bytes(
+                SpriteInputIndex::ViewportSize as u64,
+                std::mem::size_of::<Size<DevicePixels>>() as u64,
+                &viewport_size as *const Size<DevicePixels> as *const _,
+            );
+            command_encoder.set_vertex_bytes(
+                SpriteInputIndex::AtlasTextureSize as u64,
+                std::mem::size_of::<Size<DevicePixels>>() as u64,
+                &texture_size as *const Size<DevicePixels> as *const _,
+            );
+            command_encoder.set_fragment_buffer(
+                SpriteInputIndex::Sprites as u64,
+                Some(&instance_buffer),
+                sprite_offset as u64,
+            );
+            command_encoder.set_fragment_texture(SpriteInputIndex::AtlasTexture as u64, Some(&texture));
+
+            command_encoder.draw_primitives_instanced(
+                metal::MTLPrimitiveType::Triangle,
+                0,
+                6,
+                batch.len() as u64,
+            );
+        }
+    }
+
+    /// Draws a batch of cached texture sprites to the screen.
+    fn draw_cached_textures(
+        &mut self,
+        sprites: &[crate::scene::CachedTextureSprite],
+        instance_buffer: &InstanceBuffer,
+        instance_offset: &mut usize,
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+        write_instances: bool,
+    ) -> bool {
+        for sprite in sprites {
+            // Look up the texture from the cache and clone the texture reference
+            // (metal::Texture implements Clone as an Arc-like reference)
+            let texture = self
+                .texture_cache
+                .lookup_by_texture_id(sprite.texture_id)
+                .map(|entry| entry.texture.texture.clone());
+
+            if let Some(texture) = texture {
+                let ok = self.draw_cached_texture(
+                    sprite.bounds,
+                    sprite.content_mask.clone(),
+                    sprite.uv_bounds,
+                    &texture,
+                    viewport_size,
+                    command_encoder,
+                    instance_buffer,
+                    instance_offset,
+                    write_instances,
+                );
+                if !ok {
+                    return false;
+                }
+            }
+            // If texture not found (evicted), skip this sprite
+        }
+        true
+    }
 }
 
 fn new_command_encoder<'a>(
@@ -2048,6 +2779,24 @@ enum SurfaceInputIndex {
 enum PathRasterizationInputIndex {
     Vertices = 0,
     ViewportSize = 1,
+}
+
+#[repr(C)]
+enum CachedTextureInputIndex {
+    Vertices = 0,
+    Sprites = 1,
+    ViewportSize = 2,
+    Texture = 3,
+}
+
+/// GPU-side struct for rendering cached textures.
+/// This is a simplified version of CachedTextureSprite for the shader.
+#[derive(Clone, Debug)]
+#[repr(C)]
+pub struct CachedTextureSpriteGpu {
+    pub bounds: Bounds<ScaledPixels>,
+    pub content_mask: ContentMask<ScaledPixels>,
+    pub uv_bounds: Bounds<f32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

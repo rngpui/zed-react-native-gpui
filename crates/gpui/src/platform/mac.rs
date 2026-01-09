@@ -14,6 +14,8 @@ mod screen_capture;
 mod metal_atlas;
 #[cfg(not(feature = "macos-blade"))]
 pub mod metal_renderer;
+#[cfg(not(feature = "macos-blade"))]
+pub mod texture_cache;
 
 use core_video::image_buffer::CVImageBuffer;
 #[cfg(not(feature = "macos-blade"))]

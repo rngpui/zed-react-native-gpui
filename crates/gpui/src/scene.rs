@@ -5,14 +5,15 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Pixels,
-    Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, GlobalElementId,
+    Hsla, Pixels, Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
 use std::{
     fmt::Debug,
     iter::Peekable,
     ops::{Add, Range, Sub},
     slice,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 #[allow(non_camel_case_types, unused)]
@@ -65,6 +66,22 @@ impl SceneDirtyStats {
     }
 }
 
+/// Represents a captured subtree that should be rendered to a texture.
+/// Used for render-to-texture caching of subtrees during scrolling.
+#[derive(Clone, Debug)]
+pub(crate) struct SubtreeCapture {
+    /// The element ID of the subtree root
+    pub id: GlobalElementId,
+    /// Screen bounds of the subtree
+    pub bounds: Bounds<ScaledPixels>,
+    /// Content mask applied to this subtree
+    pub content_mask: ContentMask<ScaledPixels>,
+    /// Index of the first paint operation in this subtree
+    pub primitive_start: usize,
+    /// Index past the last paint operation in this subtree (exclusive)
+    pub primitive_end: usize,
+}
+
 #[derive(Default)]
 pub(crate) struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
@@ -87,6 +104,11 @@ pub(crate) struct Scene {
     pub(crate) polychrome_sprites: Vec<PolychromeSprite>,
     pub(crate) polychrome_sprite_transforms: Vec<TransformationMatrix>,
     pub(crate) surfaces: Vec<PaintSurface>,
+    pub(crate) cached_textures: Vec<CachedTextureSprite>,
+    /// Stack of subtrees currently being captured
+    pending_subtree_captures: Vec<SubtreeCapture>,
+    /// Completed subtree captures ready for render-to-texture
+    pub(crate) completed_subtree_captures: Vec<SubtreeCapture>,
 }
 
 impl Scene {
@@ -111,6 +133,77 @@ impl Scene {
         self.polychrome_sprites.clear();
         self.polychrome_sprite_transforms.clear();
         self.surfaces.clear();
+        self.cached_textures.clear();
+        self.pending_subtree_captures.clear();
+        self.completed_subtree_captures.clear();
+    }
+
+    /// Begin capturing primitives for a subtree that may be cached to a texture.
+    /// Call this before painting the subtree's content.
+    pub fn begin_subtree_capture(
+        &mut self,
+        id: GlobalElementId,
+        bounds: Bounds<ScaledPixels>,
+        content_mask: ContentMask<ScaledPixels>,
+    ) {
+        self.pending_subtree_captures.push(SubtreeCapture {
+            id,
+            bounds,
+            content_mask,
+            primitive_start: self.paint_operations.len(),
+            primitive_end: 0, // Will be set in end_subtree_capture
+        });
+    }
+
+    /// End subtree capture and mark it for render-to-texture.
+    /// Returns the capture if successful.
+    pub fn end_subtree_capture(&mut self) -> Option<SubtreeCapture> {
+        self.pending_subtree_captures.pop().map(|mut capture| {
+            capture.primitive_end = self.paint_operations.len();
+            // Only add to completed if it has actual content
+            if capture.primitive_end > capture.primitive_start {
+                self.completed_subtree_captures.push(capture.clone());
+            }
+            capture
+        })
+    }
+
+    /// Returns the completed subtree captures for this frame.
+    pub fn subtree_captures(&self) -> &[SubtreeCapture] {
+        &self.completed_subtree_captures
+    }
+
+    /// Create a mini-scene from a subtree capture, with primitives translated
+    /// to be relative to the capture bounds origin (for render-to-texture).
+    pub fn create_capture_scene(&self, capture: &SubtreeCapture) -> Scene {
+        let mut mini_scene = Scene::default();
+        // Negate by subtracting from zero (ScaledPixels doesn't implement Neg)
+        let offset = Point {
+            x: ScaledPixels(0.0) - capture.bounds.origin.x,
+            y: ScaledPixels(0.0) - capture.bounds.origin.y,
+        };
+
+        for op in &self.paint_operations[capture.primitive_start..capture.primitive_end] {
+            match op {
+                PaintOperation::Primitive(primitive) => {
+                    let translated = primitive.translate(offset);
+                    mini_scene.insert_primitive(translated);
+                }
+                PaintOperation::StartLayer(bounds) => {
+                    let translated_bounds = Bounds {
+                        origin: bounds.origin + offset,
+                        size: bounds.size,
+                    };
+                    mini_scene.push_layer(translated_bounds);
+                }
+                PaintOperation::EndLayer => {
+                    mini_scene.pop_layer();
+                }
+            }
+        }
+
+        mini_scene.finish();
+        mini_scene
     }
 
     pub fn len(&self) -> usize {
@@ -285,6 +378,16 @@ impl Scene {
                     .push(PaintOperation::Primitive(Primitive::Surface(surface.clone())));
                 self.surfaces.push(surface);
             }
+            Primitive::CachedTexture(sprite) => {
+                let mut sprite = sprite.clone();
+                sprite.order = order;
+                sprite.bounds = Self::apply_offset(sprite.bounds, offset);
+                sprite.content_mask = content_mask;
+                self.paint_operations
+                    .push(PaintOperation::Primitive(Primitive::CachedTexture(sprite)));
+                // Note: CachedTextureSprites are not collected into a typed array
+                // because each one has its own texture and needs individual draw calls
+            }
         }
     }
 
@@ -305,6 +408,7 @@ impl Scene {
             Primitive::SubpixelSprite(sprite) => sprite.bounds,
             Primitive::PolychromeSprite(sprite, _) => sprite.bounds,
             Primitive::Surface(surface) => surface.bounds,
+            Primitive::CachedTexture(sprite) => sprite.bounds,
         };
         Self::apply_offset(bounds, offset)
     }
@@ -400,6 +504,11 @@ impl Scene {
                 }
                 self.surfaces.push(surface.clone());
             }
+            Primitive::CachedTexture(sprite) => {
+                sprite.order = order;
+                // Note: No dirty tracking yet for cached textures
+                self.cached_textures.push(sprite.clone());
+            }
         }
 
         /// Compute an axis-aligned bounding box for a transformed primitive.
@@ -462,6 +571,7 @@ impl Scene {
                 }
                 Primitive::Path(path) => path.bounds,
                 Primitive::Surface(surface) => surface.bounds,
+                Primitive::CachedTexture(sprite) => sprite.bounds,
             }
         }
         if !from_cache {
@@ -541,6 +651,7 @@ impl Scene {
             |sprite| (sprite.order, sprite.tile.tile_id),
         );
         self.surfaces.sort_by_key(|surface| surface.order);
+        self.cached_textures.sort_by_key(|texture| texture.order);
     }
 
     fn mark_dirty(&mut self, index: usize) {
@@ -604,6 +715,9 @@ impl Scene {
             surfaces: &self.surfaces,
             surfaces_start: 0,
             surfaces_iter: self.surfaces.iter().peekable(),
+            cached_textures: &self.cached_textures,
+            cached_textures_start: 0,
+            cached_textures_iter: self.cached_textures.iter().peekable(),
         }
     }
 }
@@ -627,6 +741,7 @@ pub(crate) enum PrimitiveKind {
     SubpixelSprite,
     PolychromeSprite,
     Surface,
+    CachedTexture,
 }
 
 pub(crate) enum PaintOperation {
@@ -646,6 +761,7 @@ pub(crate) enum Primitive {
     SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite, TransformationMatrix),
     Surface(PaintSurface),
+    CachedTexture(CachedTextureSprite),
 }
 
 impl Primitive {
@@ -661,6 +777,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite, _) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
+            Primitive::CachedTexture(sprite) => &sprite.bounds,
         }
     }
 
@@ -675,6 +792,81 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
             Primitive::PolychromeSprite(sprite, _) => &sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
+            Primitive::CachedTexture(sprite) => &sprite.content_mask,
+        }
+    }
+
+    /// Create a new primitive with bounds translated by the given offset.
+    /// Used for render-to-texture where primitives need texture-relative coordinates.
+    pub fn translate(&self, offset: Point<ScaledPixels>) -> Primitive {
+        match self {
+            Primitive::Shadow(shadow, transform) => {
+                let mut s = shadow.clone();
+                s.bounds.origin = s.bounds.origin + offset;
+                s.content_mask.bounds.origin = s.content_mask.bounds.origin + offset;
+                Primitive::Shadow(s, *transform)
+            }
+            Primitive::Quad(quad, transform) => {
+                let mut q = quad.clone();
+                q.bounds.origin = q.bounds.origin + offset;
+                q.content_mask.bounds.origin = q.content_mask.bounds.origin + offset;
+                Primitive::Quad(q, *transform)
+            }
+            Primitive::BackdropBlur(blur, transform) => {
+                let mut b = blur.clone();
+                b.bounds.origin = b.bounds.origin + offset;
+                b.content_mask.bounds.origin = b.content_mask.bounds.origin + offset;
+                Primitive::BackdropBlur(b, *transform)
+            }
+            Primitive::Path(path) => {
+                let mut p = path.clone();
+                p.bounds.origin = p.bounds.origin + offset;
+                p.content_mask.bounds.origin = p.content_mask.bounds.origin + offset;
+                // Also translate vertices
+                for vertex in &mut p.vertices {
+                    vertex.xy_position = point(
+                        vertex.xy_position.x + offset.x,
+                        vertex.xy_position.y + offset.y,
+                    );
+                }
+                Primitive::Path(p)
+            }
+            Primitive::Underline(underline, transform) => {
+                let mut u = underline.clone();
+                u.bounds.origin = u.bounds.origin + offset;
+                u.content_mask.bounds.origin = u.content_mask.bounds.origin + offset;
+                Primitive::Underline(u, *transform)
+            }
+            Primitive::MonochromeSprite(sprite) => {
+                let mut s = sprite.clone();
+                s.bounds.origin = s.bounds.origin + offset;
+                s.content_mask.bounds.origin = s.content_mask.bounds.origin + offset;
+                Primitive::MonochromeSprite(s)
+            }
+            Primitive::SubpixelSprite(sprite) => {
+                let mut s = sprite.clone();
+                s.bounds.origin = s.bounds.origin + offset;
+                s.content_mask.bounds.origin = s.content_mask.bounds.origin + offset;
+                Primitive::SubpixelSprite(s)
+            }
+            Primitive::PolychromeSprite(sprite, transform) => {
+                let mut s = sprite.clone();
+                s.bounds.origin = s.bounds.origin + offset;
+                s.content_mask.bounds.origin = s.content_mask.bounds.origin + offset;
+                Primitive::PolychromeSprite(s, *transform)
+            }
+            Primitive::Surface(surface) => {
+                let mut s = surface.clone();
+                s.bounds.origin = s.bounds.origin + offset;
+                s.content_mask.bounds.origin = s.content_mask.bounds.origin + offset;
+                Primitive::Surface(s)
+            }
+            Primitive::CachedTexture(sprite) => {
+                let mut s = sprite.clone();
+                s.bounds.origin = s.bounds.origin + offset;
+                s.content_mask.bounds.origin = s.content_mask.bounds.origin + offset;
+                Primitive::CachedTexture(s)
+            }
         }
     }
 }
@@ -719,6 +911,9 @@ struct BatchIterator<'a> {
     surfaces: &'a [PaintSurface],
     surfaces_start: usize,
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
+    cached_textures: &'a [CachedTextureSprite],
+    cached_textures_start: usize,
+    cached_textures_iter: Peekable<slice::Iter<'a, CachedTextureSprite>>,
 }
 
 impl<'a> Iterator for BatchIterator<'a> {
@@ -755,6 +950,10 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.surfaces_iter.peek().map(|s| s.order),
                 PrimitiveKind::Surface,
+            ),
+            (
+                self.cached_textures_iter.peek().map(|s| s.order),
+                PrimitiveKind::CachedTexture,
             ),
         ];
         orders_and_kinds.sort_by_key(|(order, kind)| (order.unwrap_or(u32::MAX), *kind));
@@ -930,6 +1129,22 @@ impl<'a> Iterator for BatchIterator<'a> {
                     &self.surfaces[surfaces_start..surfaces_end],
                 ))
             }
+            PrimitiveKind::CachedTexture => {
+                let textures_start = self.cached_textures_start;
+                let mut textures_end = textures_start + 1;
+                self.cached_textures_iter.next();
+                while self
+                    .cached_textures_iter
+                    .next_if(|texture| (texture.order, batch_kind) < max_order_and_kind)
+                    .is_some()
+                {
+                    textures_end += 1;
+                }
+                self.cached_textures_start = textures_end;
+                Some(PrimitiveBatch::CachedTextures(
+                    &self.cached_textures[textures_start..textures_end],
+                ))
+            }
         }
     }
 }
@@ -963,6 +1178,7 @@ pub(crate) enum PrimitiveBatch<'a> {
         transforms: &'a [TransformationMatrix],
     },
     Surfaces(&'a [PaintSurface]),
+    CachedTextures(&'a [CachedTextureSprite]),
 }
 
 #[derive(Default, Debug, Clone)]
@@ -1250,6 +1466,45 @@ pub(crate) struct PolychromeSprite {
 impl From<(PolychromeSprite, TransformationMatrix)> for Primitive {
     fn from((sprite, transform): (PolychromeSprite, TransformationMatrix)) -> Self {
         Primitive::PolychromeSprite(sprite, transform)
+    }
+}
+
+/// Unique identifier for a cached texture used in render-to-texture caching.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CachedTextureId(pub u64);
+
+impl CachedTextureId {
+    /// Generate the next unique texture ID.
+    pub fn next() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// A sprite that composites a cached GPU texture to the screen.
+/// Used for render-to-texture caching where subtrees are rendered once
+/// and then composited at potentially different offsets.
+#[derive(Clone, Debug)]
+#[repr(C)]
+pub(crate) struct CachedTextureSprite {
+    /// Draw order for z-ordering with other primitives
+    pub order: DrawOrder,
+    /// Padding for alignment
+    pub _pad: u32,
+    /// Screen bounds where the texture should be drawn
+    pub bounds: Bounds<ScaledPixels>,
+    /// Content mask for clipping
+    pub content_mask: ContentMask<ScaledPixels>,
+    /// UV bounds within the texture (0.0 to 1.0 range)
+    /// Used when the texture is larger than the content (due to size bucketing)
+    pub uv_bounds: Bounds<f32>,
+    /// ID of the cached texture to sample from
+    pub texture_id: CachedTextureId,
+}
+
+impl From<CachedTextureSprite> for Primitive {
+    fn from(sprite: CachedTextureSprite) -> Self {
+        Primitive::CachedTexture(sprite)
     }
 }
 

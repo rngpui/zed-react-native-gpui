@@ -695,6 +695,26 @@ pub(crate) struct SubtreeCacheEntry {
     pub(crate) paint_range: Range<PaintIndex>,
     /// Cached hitbox result from prepaint
     pub(crate) hitbox: Option<Hitbox>,
+    /// Optional cached texture ID for render-to-texture caching.
+    /// When set, offset-only hits can composite this texture at a new position
+    /// instead of replaying primitives.
+    pub(crate) cached_texture_id: Option<crate::scene::CachedTextureId>,
+}
+
+/// Result of looking up a subtree cache entry.
+/// This distinguishes between full cache hits and offset-only hits.
+#[derive(Clone)]
+pub(crate) enum SubtreeCacheHit<'a> {
+    /// Full cache hit - everything matches including element_offset.
+    /// Can replay cached primitives directly.
+    Full(&'a SubtreeCacheEntry),
+    /// Offset-only hit - signature, bounds, and content_mask match,
+    /// but element_offset differs. Can use cached texture with new offset.
+    OffsetOnly {
+        entry: &'a SubtreeCacheEntry,
+        /// Delta from cached offset to current offset
+        offset_delta: Point<Pixels>,
+    },
 }
 
 pub(crate) struct Frame {
@@ -2807,6 +2827,46 @@ impl Window {
         }
     }
 
+    /// Look up a cached subtree entry, distinguishing between full hits and offset-only hits.
+    ///
+    /// Returns:
+    /// - `Full` when everything matches including element_offset
+    /// - `OffsetOnly` when signature, bounds, and content_mask match but offset differs
+    /// - `None` when signature, bounds, or content_mask don't match
+    ///
+    /// Offset-only hits can be used for render-to-texture caching where the cached
+    /// texture can be composited at a new position.
+    #[allow(dead_code)]
+    pub(crate) fn lookup_subtree_cache_with_offset(
+        &self,
+        id: &GlobalElementId,
+        subtree_signature: u64,
+        bounds: Bounds<Pixels>,
+        content_mask: &ContentMask<Pixels>,
+        element_offset: Point<Pixels>,
+    ) -> Option<SubtreeCacheHit<'_>> {
+        let entry = self.rendered_frame.subtree_cache.get(id)?;
+
+        // First check signature, bounds, and content_mask - these must match for any hit
+        if entry.subtree_signature != subtree_signature
+            || entry.bounds != bounds
+            || entry.content_mask != *content_mask
+        {
+            return None;
+        }
+
+        // Check if offset also matches (full hit) or differs (offset-only hit)
+        if entry.element_offset == element_offset {
+            Some(SubtreeCacheHit::Full(entry))
+        } else {
+            let offset_delta = Point {
+                x: element_offset.x - entry.element_offset.x,
+                y: element_offset.y - entry.element_offset.y,
+            };
+            Some(SubtreeCacheHit::OffsetOnly { entry, offset_delta })
+        }
+    }
+
     /// Insert a subtree cache entry for the current frame.
     pub(crate) fn insert_subtree_cache(&mut self, id: GlobalElementId, entry: SubtreeCacheEntry) {
         self.next_frame.subtree_cache.insert(id, entry);
@@ -2903,6 +2963,59 @@ impl Window {
     /// When `is_fully_cached()` returns true, the renderer could potentially skip GPU uploads.
     pub fn scene_dirty_stats(&self) -> crate::scene::SceneDirtyStats {
         self.rendered_frame.scene.dirty_stats()
+    }
+
+    /// Begin capturing primitives for a subtree that may be cached to a texture.
+    /// Call this before painting the subtree's content.
+    pub(crate) fn begin_subtree_capture(
+        &mut self,
+        id: GlobalElementId,
+        bounds: Bounds<Pixels>,
+        content_mask: ContentMask<Pixels>,
+    ) {
+        let scale = self.scale_factor();
+        self.next_frame.scene.begin_subtree_capture(
+            id,
+            bounds.scale(scale),
+            content_mask.scale(scale),
+        );
+    }
+
+    /// End subtree capture and mark it for render-to-texture.
+    pub(crate) fn end_subtree_capture(&mut self) {
+        self.next_frame.scene.end_subtree_capture();
+    }
+
+    /// Insert a cached texture sprite into the scene.
+    /// Used to composite a previously rendered subtree at a new position.
+    pub(crate) fn insert_cached_texture_sprite(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        content_mask: ContentMask<Pixels>,
+        uv_bounds: Bounds<f32>,
+        texture_id: crate::scene::CachedTextureId,
+    ) {
+        let scale = self.scale_factor();
+        // Order is assigned in insert_primitive_internal
+        self.next_frame.scene.insert_primitive(
+            crate::scene::CachedTextureSprite {
+                order: 0, // Will be set by insert_primitive_internal
+                _pad: 0,
+                bounds: bounds.scale(scale),
+                content_mask: content_mask.scale(scale),
+                uv_bounds,
+                texture_id,
+            },
+        );
+    }
+
+    /// Query if an element has a cached texture for RTT compositing.
+    /// Returns the texture ID if the element has a valid cached texture.
+    pub(crate) fn get_cached_texture_id(
+        &self,
+        element_id: &GlobalElementId,
+    ) -> Option<crate::scene::CachedTextureId> {
+        self.platform_window.get_cached_texture_id(element_id)
     }
 
     fn replay_next_primitive(&mut self) -> bool {

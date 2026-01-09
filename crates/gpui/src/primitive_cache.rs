@@ -243,6 +243,9 @@ fn translate_primitive(mut primitive: Primitive, delta: Point<ScaledPixels>) -> 
         Primitive::Surface(surface) => {
             surface.bounds = offset_bounds(surface.bounds, delta);
         }
+        Primitive::CachedTexture(sprite) => {
+            sprite.bounds = offset_bounds(sprite.bounds, delta);
+        }
     }
     primitive
 }

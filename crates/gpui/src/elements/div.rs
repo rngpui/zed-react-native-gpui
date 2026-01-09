@@ -24,7 +24,7 @@ use crate::{
     MousePressureEvent, MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render,
     ScrollWheelEvent, SharedString, Size, Style, StyleRefinement, Styled, Task, TooltipId,
     Visibility, Window, WindowControlArea, point, px, size, style_content_hash,
-    window::{PaintIndex, PrepaintStateIndex, SubtreeCacheEntry},
+    window::{PaintIndex, PrepaintStateIndex, SubtreeCacheEntry, SubtreeCacheHit},
 };
 use collections::HashMap;
 use refineable::Refineable;
@@ -1362,6 +1362,36 @@ impl Div {
             && self.interactivity.group_hover_style.is_none()
     }
 
+    /// Determine if this Div's subtree should be rendered to a texture for caching.
+    /// This enables O(1) scrolling by compositing the cached texture instead of re-rendering.
+    fn should_cache_to_texture(&self, bounds: &Bounds<Pixels>) -> bool {
+        // Size constraints - too small wastes GPU memory, too large exceeds texture limits
+        let min_size = px(64.);
+        let max_size = px(4096.);
+        if bounds.size.width < min_size || bounds.size.height < min_size {
+            return false;
+        }
+        if bounds.size.width > max_size || bounds.size.height > max_size {
+            return false;
+        }
+
+        // Must already be cacheable at subtree level
+        if !self.can_cache_subtree() {
+            return false;
+        }
+
+        // Exclude elements with animations (would need re-rendering anyway)
+        // Currently we don't have a direct way to check for animations,
+        // so we rely on the subtree cache validation to catch changes
+
+        // For now, all offset-only hits on cacheable subtrees are eligible
+        // Future enhancements could add:
+        // - Minimum primitive count threshold (don't cache simple subtrees)
+        // - Heuristics based on scroll velocity
+        // - Memory pressure checks
+        true
+    }
+
     /// Internal prepaint implementation without caching logic
     fn prepaint_uncached(
         &mut self,
@@ -1507,6 +1537,22 @@ enum SubtreeCacheState {
         // Updated entry from prepaint (with new prepaint_range, needs paint_range update)
         partial_entry: SubtreeCacheEntry,
     },
+    /// Offset-only hit during prepaint - signature/bounds/content_mask match but offset differs.
+    /// If the entry has a cached texture, paint can composite it at the new position.
+    /// Otherwise, falls back to normal painting but may render to texture for future frames.
+    OffsetOnlyHit {
+        id: GlobalElementId,
+        /// The cached entry from previous frame
+        cached_entry: SubtreeCacheEntry,
+        /// Delta from cached offset to current offset
+        offset_delta: Point<Pixels>,
+        /// Current element offset for the new cache entry
+        current_offset: Point<Pixels>,
+        /// Prepaint range from this frame (prepaint was re-run for hitboxes)
+        prepaint_range: Range<PrepaintStateIndex>,
+        /// Hitbox from this frame's prepaint
+        hitbox: Option<Hitbox>,
+    },
     /// Cache miss during prepaint - paint should record and complete the cache entry
     CacheMiss {
         id: GlobalElementId,
@@ -1625,70 +1671,107 @@ impl Element for Div {
                 let content_mask = window.content_mask();
                 let element_offset = window.element_offset();
 
-                if let Some(cached) = window.lookup_subtree_cache(id, signature, bounds, &content_mask, element_offset) {
-                    // Cache hit - extract values before mutable operations
-                    let old_prepaint_range = cached.prepaint_range.clone();
-                    let old_paint_range = cached.paint_range.clone();
-                    let hitbox = cached.hitbox.clone();
+                match window.lookup_subtree_cache_with_offset(id, signature, bounds, &content_mask, element_offset) {
+                    Some(SubtreeCacheHit::Full(cached)) => {
+                        // Full cache hit - extract values before mutable operations
+                        let old_prepaint_range = cached.prepaint_range.clone();
+                        let old_paint_range = cached.paint_range.clone();
+                        let hitbox = cached.hitbox.clone();
 
-                    // Record NEW prepaint start before reuse
-                    let prepaint_start = window.prepaint_index();
+                        // Record NEW prepaint start before reuse
+                        let prepaint_start = window.prepaint_index();
 
-                    // Reuse prepaint data from previous frame
-                    window.reuse_prepaint(old_prepaint_range);
+                        // Reuse prepaint data from previous frame
+                        window.reuse_prepaint(old_prepaint_range);
 
-                    // Record NEW prepaint end after reuse
-                    let prepaint_end = window.prepaint_index();
+                        // Record NEW prepaint end after reuse
+                        let prepaint_end = window.prepaint_index();
 
-                    // Create partial cache entry with NEW prepaint range (paint_range updated in paint phase)
-                    let partial_entry = SubtreeCacheEntry {
-                        subtree_signature: signature,
-                        bounds,
-                        content_mask: content_mask.clone(),
-                        element_offset,
-                        prepaint_range: prepaint_start..prepaint_end,
-                        paint_range: Default::default(), // Will be set in paint phase
-                        hitbox: hitbox.clone(),
-                    };
+                        // Create partial cache entry with NEW prepaint range (paint_range updated in paint phase)
+                        let partial_entry = SubtreeCacheEntry {
+                            subtree_signature: signature,
+                            bounds,
+                            content_mask: content_mask.clone(),
+                            element_offset,
+                            prepaint_range: prepaint_start..prepaint_end,
+                            paint_range: Default::default(), // Will be set in paint phase
+                            hitbox: hitbox.clone(),
+                            cached_texture_id: None, // RTT caching not implemented yet
+                        };
 
-                    // Store cache hit state for paint phase
-                    request_layout.subtree_cache_state = Some(SubtreeCacheState::CacheHit {
-                        id: id.clone(),
-                        old_paint_range,
-                        partial_entry,
-                    });
+                        // Store cache hit state for paint phase
+                        request_layout.subtree_cache_state = Some(SubtreeCacheState::CacheHit {
+                            id: id.clone(),
+                            old_paint_range,
+                            partial_entry,
+                        });
 
-                    return hitbox;
+                        return hitbox;
+                    }
+                    Some(SubtreeCacheHit::OffsetOnly { entry, offset_delta }) => {
+                        // Offset-only hit - signature/bounds/content_mask match but offset differs.
+                        // This happens during scrolling. Clone entry for paint phase.
+                        let cached_entry = entry.clone();
+
+                        // For offset-only hits, we need to do normal prepaint since
+                        // hitboxes and other prepaint state are position-dependent.
+                        let prepaint_start = window.prepaint_index();
+                        let prepaint_hitbox = self.prepaint_uncached(
+                            global_id,
+                            inspector_id,
+                            bounds,
+                            request_layout,
+                            window,
+                            cx,
+                        );
+                        let prepaint_end = window.prepaint_index();
+
+                        // Store offset-only hit state for paint phase
+                        // Paint phase will check for cached texture or fall back to normal painting
+                        request_layout.subtree_cache_state = Some(SubtreeCacheState::OffsetOnlyHit {
+                            id: id.clone(),
+                            cached_entry,
+                            offset_delta,
+                            current_offset: element_offset,
+                            prepaint_range: prepaint_start..prepaint_end,
+                            hitbox: prepaint_hitbox.clone(),
+                        });
+
+                        // Return the new hitbox from actual prepaint (not cached one)
+                        // since position has changed
+                        return prepaint_hitbox;
+                    }
+                    None => {
+                        // Cache miss - record prepaint start for later caching
+                        let prepaint_start = window.prepaint_index();
+
+                        // Do normal prepaint
+                        let hitbox = self.prepaint_uncached(
+                            global_id,
+                            inspector_id,
+                            bounds,
+                            request_layout,
+                            window,
+                            cx,
+                        );
+
+                        // Record prepaint end
+                        let prepaint_end = window.prepaint_index();
+
+                        // Store cache miss state for paint phase to complete
+                        request_layout.subtree_cache_state = Some(SubtreeCacheState::CacheMiss {
+                            id: id.clone(),
+                            signature,
+                            bounds,
+                            content_mask,
+                            element_offset,
+                            prepaint_range: prepaint_start..prepaint_end,
+                            hitbox: hitbox.clone(),
+                        });
+
+                        return hitbox;
+                    }
                 }
-
-                // Cache miss - record prepaint start for later caching
-                let prepaint_start = window.prepaint_index();
-
-                // Do normal prepaint
-                let hitbox = self.prepaint_uncached(
-                    global_id,
-                    inspector_id,
-                    bounds,
-                    request_layout,
-                    window,
-                    cx,
-                );
-
-                // Record prepaint end
-                let prepaint_end = window.prepaint_index();
-
-                // Store cache miss state for paint phase to complete
-                request_layout.subtree_cache_state = Some(SubtreeCacheState::CacheMiss {
-                    id: id.clone(),
-                    signature,
-                    bounds,
-                    content_mask,
-                    element_offset,
-                    prepaint_range: prepaint_start..prepaint_end,
-                    hitbox: hitbox.clone(),
-                });
-
-                return hitbox;
             }
         }
 
@@ -1724,6 +1807,104 @@ impl Element for Div {
                 window.insert_subtree_cache(id, partial_entry);
                 return;
             }
+            Some(SubtreeCacheState::OffsetOnlyHit {
+                id,
+                cached_entry,
+                offset_delta,
+                current_offset,
+                prepaint_range,
+                hitbox: cached_hitbox,
+            }) => {
+                // Offset-only hit - the element's position changed (e.g., during scrolling)
+                // but its content is the same.
+
+                // Query the texture cache for a cached texture for this element
+                // This checks if the renderer has rendered this subtree to a texture
+                if let Some(texture_id) = window.get_cached_texture_id(&id) {
+                    // We have a cached texture - composite it at the new position
+                    let new_bounds = Bounds {
+                        origin: cached_entry.bounds.origin + offset_delta,
+                        size: cached_entry.bounds.size,
+                    };
+                    let new_content_mask = ContentMask {
+                        bounds: Bounds {
+                            origin: cached_entry.content_mask.bounds.origin + offset_delta,
+                            size: cached_entry.content_mask.bounds.size,
+                        },
+                    };
+
+                    // Insert the cached texture sprite at the new position
+                    window.insert_cached_texture_sprite(
+                        new_bounds,
+                        new_content_mask.clone(),
+                        Bounds {
+                            origin: crate::point(0.0, 0.0),
+                            size: crate::size(1.0, 1.0),
+                        },
+                        texture_id,
+                    );
+
+                    // Update cache entry with new offset (keep the texture ID)
+                    window.insert_subtree_cache(
+                        id,
+                        SubtreeCacheEntry {
+                            subtree_signature: cached_entry.subtree_signature,
+                            bounds: new_bounds,
+                            content_mask: new_content_mask,
+                            element_offset: current_offset,
+                            prepaint_range,
+                            paint_range: Default::default(), // No paint operations - using cached texture
+                            hitbox: cached_hitbox,
+                            cached_texture_id: Some(texture_id),
+                        },
+                    );
+                    return;
+                }
+
+                // No cached texture - fall back to normal painting
+                // But mark this subtree for texture capture on this frame
+
+                // Record paint start
+                let paint_start = window.paint_index();
+
+                // Begin subtree capture for RTT (if eligible)
+                let should_capture = self.should_cache_to_texture(&cached_entry.bounds);
+                if should_capture {
+                    window.begin_subtree_capture(
+                        id.clone(),
+                        cached_entry.bounds,
+                        cached_entry.content_mask.clone(),
+                    );
+                }
+
+                // Do normal paint
+                self.paint_uncached(global_id, inspector_id, bounds, hitbox, window, cx);
+
+                // End subtree capture if we started one
+                if should_capture {
+                    window.end_subtree_capture();
+                }
+
+                // Record paint end
+                let paint_end = window.paint_index();
+
+                // Insert updated cache entry with new offset for next frame
+                // Note: cached_texture_id will be set by the renderer pre-pass on subsequent frames
+                window.insert_subtree_cache(
+                    id,
+                    SubtreeCacheEntry {
+                        subtree_signature: cached_entry.subtree_signature,
+                        bounds: cached_entry.bounds,
+                        content_mask: cached_entry.content_mask,
+                        element_offset: current_offset,
+                        prepaint_range,
+                        paint_range: paint_start..paint_end,
+                        hitbox: cached_hitbox,
+                        cached_texture_id: None, // Will be set by renderer pre-pass
+                    },
+                );
+                return;
+            }
             Some(SubtreeCacheState::CacheMiss {
                 id,
                 signature,
@@ -1753,6 +1934,7 @@ impl Element for Div {
                         prepaint_range,
                         paint_range: paint_start..paint_end,
                         hitbox: cached_hitbox,
+                        cached_texture_id: None, // RTT caching not implemented yet
                     },
                 );
                 return;
