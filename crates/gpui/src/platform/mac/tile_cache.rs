@@ -15,7 +15,7 @@
 
 use crate::scene::{TileCoord, TileKey};
 use crate::{Bounds, GlobalElementId, Pixels, Point, Size};
-use collections::FxHashMap;
+use collections::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 
 /// Size of each tile in device pixels. Power of 2 for GPU efficiency.
@@ -56,6 +56,10 @@ pub struct ScrollContainerTiles {
 
     /// LRU order for eviction (oldest at front).
     lru_order: VecDeque<TileCoord>,
+
+    /// Tiles that need re-rasterization due to dirty regions.
+    /// Set during invalidate_tiles_for_dirty_regions(), cleared after rasterization.
+    invalidated_tiles: FxHashSet<TileCoord>,
 }
 
 impl ScrollContainerTiles {
@@ -65,6 +69,7 @@ impl ScrollContainerTiles {
             content_size,
             tiles: FxHashMap::default(),
             lru_order: VecDeque::new(),
+            invalidated_tiles: FxHashSet::default(),
         }
     }
 
@@ -402,5 +407,97 @@ impl TileCache {
     /// Get current statistics.
     pub fn stats(&self) -> TileCacheStats {
         self.stats
+    }
+
+    // ========================================================================
+    // Dirty Region Invalidation (Phase 14: Incremental Invalidation)
+    // ========================================================================
+
+    /// Invalidate tiles that intersect any of the given dirty regions.
+    ///
+    /// This is more efficient than invalidating all tiles when only a small
+    /// part of the content changed. Tiles outside the dirty regions remain
+    /// cached and don't need re-rasterization.
+    ///
+    /// Call this with dirty regions from DisplayList before rendering.
+    pub fn invalidate_tiles_for_dirty_regions(
+        &mut self,
+        container_id: &GlobalElementId,
+        dirty_regions: &[Bounds<Pixels>],
+        scale_factor: f32,
+    ) {
+        if dirty_regions.is_empty() {
+            return;
+        }
+
+        let Some(container) = self.containers.get_mut(container_id) else {
+            return;
+        };
+
+        // For each existing tile, check if it intersects any dirty region
+        for &coord in container.tiles.keys() {
+            let tile_bounds = Self::tile_content_bounds(coord, scale_factor);
+
+            for dirty_region in dirty_regions {
+                if tile_bounds.intersects(dirty_region) {
+                    container.invalidated_tiles.insert(coord);
+                    break; // Don't need to check other regions
+                }
+            }
+        }
+    }
+
+    /// Check if a specific tile is invalidated (needs re-rasterization).
+    ///
+    /// This considers both:
+    /// 1. Generation mismatch (full invalidation)
+    /// 2. Dirty region invalidation (partial invalidation)
+    pub fn is_tile_invalidated(
+        &self,
+        container_id: &GlobalElementId,
+        coord: TileCoord,
+        content_generation: u64,
+    ) -> bool {
+        let Some(container) = self.containers.get(container_id) else {
+            return true; // Unknown container = needs render
+        };
+
+        // Check dirty region invalidation
+        if container.invalidated_tiles.contains(&coord) {
+            return true;
+        }
+
+        // Check generation mismatch
+        if let Some(tile) = container.tiles.get(&coord) {
+            tile.rendered_generation < content_generation
+        } else {
+            true // No tile = needs render
+        }
+    }
+
+    /// Clear the invalidated tiles set for a container.
+    ///
+    /// Call this after all dirty tiles have been re-rasterized.
+    pub fn clear_invalidated_tiles(&mut self, container_id: &GlobalElementId) {
+        if let Some(container) = self.containers.get_mut(container_id) {
+            container.invalidated_tiles.clear();
+        }
+    }
+
+    /// Mark a specific tile as invalidated (needs re-rasterization).
+    ///
+    /// Use this for fine-grained control when you know exactly which tile changed.
+    pub fn invalidate_tile(&mut self, container_id: &GlobalElementId, coord: TileCoord) {
+        if let Some(container) = self.containers.get_mut(container_id) {
+            container.invalidated_tiles.insert(coord);
+        }
+    }
+
+    /// Get the number of invalidated tiles for a container.
+    pub fn invalidated_tile_count(&self, container_id: &GlobalElementId) -> usize {
+        self.containers
+            .get(container_id)
+            .map(|c| c.invalidated_tiles.len())
+            .unwrap_or(0)
     }
 }

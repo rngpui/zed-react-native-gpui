@@ -422,6 +422,12 @@ impl<'a> Iterator for LayerIterator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ElementId;
+    use std::sync::Arc;
+
+    fn test_element_id(n: u64) -> GlobalElementId {
+        GlobalElementId(Arc::from([ElementId::Integer(n)]))
+    }
 
     #[test]
     fn test_layer_tree_creation() {
@@ -435,7 +441,7 @@ mod tests {
     fn test_push_pop_layer() {
         let mut tree = LayerTree::new();
 
-        let element_id = GlobalElementId::from(vec![1u32]);
+        let element_id = test_element_id(1);
         let layer_id = tree.push_layer(element_id, LayerReason::ScrollContainer);
 
         assert!(tree.is_inside_layer());
@@ -452,8 +458,8 @@ mod tests {
     fn test_layers_for_composite() {
         let mut tree = LayerTree::new();
 
-        let id1 = GlobalElementId::from(vec![1u32]);
-        let id2 = GlobalElementId::from(vec![2u32]);
+        let id1 = test_element_id(1);
+        let id2 = test_element_id(2);
 
         tree.push_layer(id1, LayerReason::ScrollContainer);
         tree.pop_layer();
@@ -469,7 +475,7 @@ mod tests {
     fn test_begin_frame_resets() {
         let mut tree = LayerTree::new();
 
-        let id1 = GlobalElementId::from(vec![1u32]);
+        let id1 = test_element_id(1);
         tree.push_layer(id1, LayerReason::ScrollContainer);
 
         assert_eq!(tree.len(), 2);

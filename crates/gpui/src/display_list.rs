@@ -245,10 +245,39 @@ pub(crate) struct PathVertex {
     pub st_position: Point<f32>,
 }
 
+/// Tracks the range of display items owned by an element.
+///
+/// Used for incremental updates: when an element's content changes,
+/// we can remove its items and insert new ones without rebuilding
+/// the entire display list.
+#[derive(Clone, Debug)]
+pub(crate) struct ElementItemRange {
+    /// Starting index in the items vec (inclusive).
+    pub start: usize,
+    /// Ending index in the items vec (exclusive).
+    pub end: usize,
+    /// Combined bounds of all items in this range.
+    pub bounds: Bounds<Pixels>,
+}
+
 /// A display list containing recorded drawing commands for a layer.
 ///
 /// Display lists are created per scroll container and persist across frames
 /// until their content changes. They can be rasterized to tiles on demand.
+///
+/// ## Incremental Invalidation
+///
+/// Instead of clearing and rebuilding the entire display list when content changes,
+/// you can use `invalidate_region()` to mark specific areas as dirty. This enables:
+/// - Only re-rasterizing tiles that intersect dirty regions
+/// - Preserving cached tiles for unchanged content
+/// - O(dirty_area) work instead of O(content_area)
+///
+/// ## Element Item Tracking
+///
+/// When painting with `begin_element()`/`end_element()`, items are tracked by
+/// element ID. This enables partial updates via `update_element()` where only
+/// the changed element's items are replaced.
 #[derive(Clone, Debug)]
 pub(crate) struct DisplayList {
     /// Unique identifier for this display list.
@@ -261,6 +290,15 @@ pub(crate) struct DisplayList {
     pub content_bounds: Bounds<Pixels>,
     /// Recorded display items.
     pub items: Vec<DisplayItem>,
+    /// Dirty regions that need re-rasterization.
+    /// Empty means entire display list is valid (or was just cleared).
+    dirty_regions: Vec<Bounds<Pixels>>,
+    /// Index mapping element IDs to their item ranges.
+    /// Enables O(1) lookup for partial updates.
+    element_items: FxHashMap<GlobalElementId, ElementItemRange>,
+    /// Stack of element IDs currently being painted.
+    /// Used by begin_element()/end_element() to track nesting.
+    element_stack: Vec<(GlobalElementId, usize)>,
 }
 
 impl DisplayList {
@@ -272,14 +310,249 @@ impl DisplayList {
             generation: 0,
             content_bounds: Bounds::default(),
             items: Vec::new(),
+            dirty_regions: Vec::new(),
+            element_items: FxHashMap::default(),
+            element_stack: Vec::new(),
         }
     }
 
     /// Clear the display list and increment the generation.
+    ///
+    /// This invalidates ALL tiles for this display list.
+    /// For partial updates, use `invalidate_region()` instead.
     pub fn clear(&mut self) {
         self.items.clear();
         self.content_bounds = Bounds::default();
+        self.dirty_regions.clear();
+        self.element_items.clear();
+        self.element_stack.clear();
         self.generation += 1;
+    }
+
+    // ========================================================================
+    // Element Item Tracking (Phase 14: Incremental Invalidation)
+    // ========================================================================
+
+    /// Begin tracking items for an element.
+    ///
+    /// Call this before painting an element's items. Call `end_element()`
+    /// when done. Items painted between begin/end are associated with
+    /// the element ID for future partial updates.
+    pub fn begin_element(&mut self, element_id: GlobalElementId) {
+        let start_index = self.items.len();
+        self.element_stack.push((element_id, start_index));
+    }
+
+    /// End tracking items for the current element.
+    ///
+    /// Records the item range for the element started with `begin_element()`.
+    /// Returns the bounds of all items painted for this element.
+    pub fn end_element(&mut self) -> Option<Bounds<Pixels>> {
+        let (element_id, start_index) = self.element_stack.pop()?;
+        let end_index = self.items.len();
+
+        // Calculate bounds of items in this range
+        let mut bounds: Bounds<Pixels> = Bounds::default();
+        for item in &self.items[start_index..end_index] {
+            if let Some(item_bounds) = item.bounds() {
+                if bounds.size.width.0 == 0.0 && bounds.size.height.0 == 0.0 {
+                    bounds = item_bounds;
+                } else {
+                    bounds = bounds.union(&item_bounds);
+                }
+            }
+        }
+
+        self.element_items.insert(
+            element_id,
+            ElementItemRange {
+                start: start_index,
+                end: end_index,
+                bounds,
+            },
+        );
+
+        Some(bounds)
+    }
+
+    /// Get the item range for an element.
+    pub fn get_element_range(&self, element_id: &GlobalElementId) -> Option<&ElementItemRange> {
+        self.element_items.get(element_id)
+    }
+
+    /// Get the bounds of items owned by an element.
+    pub fn get_element_bounds(&self, element_id: &GlobalElementId) -> Option<Bounds<Pixels>> {
+        self.element_items.get(element_id).map(|r| r.bounds)
+    }
+
+    /// Check if an element has items in this display list.
+    pub fn has_element(&self, element_id: &GlobalElementId) -> bool {
+        self.element_items.contains_key(element_id)
+    }
+
+    /// Update items for a specific element.
+    ///
+    /// This is the key method for incremental updates:
+    /// 1. Removes the element's existing items
+    /// 2. Inserts new items in their place
+    /// 3. Marks both old and new regions as dirty
+    ///
+    /// Returns the combined dirty region (old bounds + new bounds).
+    pub fn update_element(
+        &mut self,
+        element_id: &GlobalElementId,
+        new_items: Vec<DisplayItem>,
+    ) -> Option<Bounds<Pixels>> {
+        // Get old range and bounds
+        let old_range = self.element_items.remove(element_id)?;
+        let old_bounds = old_range.bounds;
+
+        // Calculate new bounds
+        let mut new_bounds: Bounds<Pixels> = Bounds::default();
+        for item in &new_items {
+            if let Some(item_bounds) = item.bounds() {
+                if new_bounds.size.width.0 == 0.0 && new_bounds.size.height.0 == 0.0 {
+                    new_bounds = item_bounds;
+                } else {
+                    new_bounds = new_bounds.union(&item_bounds);
+                }
+            }
+        }
+
+        // Calculate size difference for index updates
+        let old_count = old_range.end - old_range.start;
+        let new_count = new_items.len();
+        let count_diff = new_count as isize - old_count as isize;
+
+        // Remove old items and insert new ones
+        self.items.splice(old_range.start..old_range.end, new_items);
+
+        // Update element range
+        self.element_items.insert(
+            element_id.clone(),
+            ElementItemRange {
+                start: old_range.start,
+                end: old_range.start + new_count,
+                bounds: new_bounds,
+            },
+        );
+
+        // Update indices for elements that come after this one
+        if count_diff != 0 {
+            for range in self.element_items.values_mut() {
+                if range.start > old_range.start {
+                    range.start = (range.start as isize + count_diff) as usize;
+                    range.end = (range.end as isize + count_diff) as usize;
+                }
+            }
+        }
+
+        // Mark both old and new bounds as dirty
+        let dirty_bounds = old_bounds.union(&new_bounds);
+        self.invalidate_region(dirty_bounds);
+
+        Some(dirty_bounds)
+    }
+
+    /// Remove all items for an element.
+    ///
+    /// Marks the element's bounds as dirty.
+    pub fn remove_element(&mut self, element_id: &GlobalElementId) -> Option<Bounds<Pixels>> {
+        let range = self.element_items.remove(element_id)?;
+        let bounds = range.bounds;
+
+        // Remove items
+        self.items.drain(range.start..range.end);
+
+        // Update indices for elements that come after
+        let count_diff = range.end - range.start;
+        for r in self.element_items.values_mut() {
+            if r.start > range.start {
+                r.start -= count_diff;
+                r.end -= count_diff;
+            }
+        }
+
+        // Mark as dirty
+        self.invalidate_region(bounds);
+
+        Some(bounds)
+    }
+
+    /// Get the number of tracked elements.
+    pub fn element_count(&self) -> usize {
+        self.element_items.len()
+    }
+
+    // ========================================================================
+    // Dirty Region Tracking (Phase 14: Incremental Invalidation)
+    // ========================================================================
+
+    /// Mark a region as dirty (needing re-rasterization).
+    ///
+    /// Call this when content in a specific area changes. Only tiles that
+    /// intersect dirty regions will be re-rasterized.
+    ///
+    /// Note: This does NOT increment the generation counter. Tiles check
+    /// dirty_regions separately from generation.
+    pub fn invalidate_region(&mut self, bounds: Bounds<Pixels>) {
+        // Don't add zero-size regions
+        if bounds.size.width.0 <= 0.0 || bounds.size.height.0 <= 0.0 {
+            return;
+        }
+
+        // Check if this region is already covered by existing dirty regions
+        // (optimization to avoid redundant regions)
+        let dominated = self.dirty_regions.iter().any(|existing| {
+            existing.origin.x <= bounds.origin.x
+                && existing.origin.y <= bounds.origin.y
+                && existing.origin.x.0 + existing.size.width.0
+                    >= bounds.origin.x.0 + bounds.size.width.0
+                && existing.origin.y.0 + existing.size.height.0
+                    >= bounds.origin.y.0 + bounds.size.height.0
+        });
+
+        if !dominated {
+            self.dirty_regions.push(bounds);
+        }
+    }
+
+    /// Mark the entire display list as dirty.
+    ///
+    /// Use this when you can't determine exactly what changed.
+    /// All tiles will be re-rasterized.
+    pub fn invalidate_all(&mut self) {
+        self.dirty_regions.clear();
+        self.dirty_regions.push(self.content_bounds);
+    }
+
+    /// Clear all dirty regions (call after tiles have been re-rasterized).
+    pub fn clear_dirty_regions(&mut self) {
+        self.dirty_regions.clear();
+    }
+
+    /// Check if there are any dirty regions.
+    pub fn has_dirty_regions(&self) -> bool {
+        !self.dirty_regions.is_empty()
+    }
+
+    /// Get the dirty regions.
+    pub fn dirty_regions(&self) -> &[Bounds<Pixels>] {
+        &self.dirty_regions
+    }
+
+    /// Check if a given bounds intersects any dirty region.
+    ///
+    /// Used to determine if a tile needs re-rasterization.
+    pub fn intersects_dirty_region(&self, bounds: &Bounds<Pixels>) -> bool {
+        // If no dirty regions, nothing is dirty
+        if self.dirty_regions.is_empty() {
+            return false;
+        }
+
+        self.dirty_regions
+            .iter()
+            .any(|dirty| dirty.intersects(bounds))
     }
 
     /// Iterate over items that intersect the given bounds.
@@ -932,10 +1205,11 @@ fn scale_edges_to_pixels(edges: &Edges<crate::ScaledPixels>, inv_scale: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{point, size};
+    use crate::{point, size, ElementId};
+    use std::sync::Arc;
 
     fn test_element_id() -> GlobalElementId {
-        GlobalElementId::from(vec![1u32.into()])
+        GlobalElementId(Arc::from([ElementId::Integer(1)]))
     }
 
     #[test]
@@ -1062,5 +1336,256 @@ mod tests {
         };
         let count = list.items_intersecting(search_bounds).count();
         assert_eq!(count, 2);
+    }
+
+    // ========================================================================
+    // Dirty Region Tests (Phase 14: Incremental Invalidation)
+    // ========================================================================
+
+    #[test]
+    fn test_dirty_region_tracking() {
+        let mut list = DisplayList::new(test_element_id());
+
+        // Initially no dirty regions
+        assert!(!list.has_dirty_regions());
+
+        // Invalidate a region
+        let dirty_bounds = Bounds {
+            origin: point(Pixels(10.0), Pixels(10.0)),
+            size: size(Pixels(50.0), Pixels(50.0)),
+        };
+        list.invalidate_region(dirty_bounds);
+
+        assert!(list.has_dirty_regions());
+        assert_eq!(list.dirty_regions().len(), 1);
+
+        // Clear dirty regions
+        list.clear_dirty_regions();
+        assert!(!list.has_dirty_regions());
+    }
+
+    #[test]
+    fn test_intersects_dirty_region() {
+        let mut list = DisplayList::new(test_element_id());
+
+        // Dirty region at (100, 100) to (200, 200)
+        list.invalidate_region(Bounds {
+            origin: point(Pixels(100.0), Pixels(100.0)),
+            size: size(Pixels(100.0), Pixels(100.0)),
+        });
+
+        // Bounds that intersect dirty region
+        let intersecting = Bounds {
+            origin: point(Pixels(150.0), Pixels(150.0)),
+            size: size(Pixels(100.0), Pixels(100.0)),
+        };
+        assert!(list.intersects_dirty_region(&intersecting));
+
+        // Bounds that don't intersect dirty region
+        let non_intersecting = Bounds {
+            origin: point(Pixels(0.0), Pixels(0.0)),
+            size: size(Pixels(50.0), Pixels(50.0)),
+        };
+        assert!(!list.intersects_dirty_region(&non_intersecting));
+    }
+
+    #[test]
+    fn test_invalidate_all() {
+        let mut list = DisplayList::new(test_element_id());
+
+        // Add some content to set content_bounds
+        list.push_quad(DisplayQuad {
+            bounds: Bounds {
+                origin: point(Pixels(0.0), Pixels(0.0)),
+                size: size(Pixels(1000.0), Pixels(1000.0)),
+            },
+            transform_node: TransformNodeId::ROOT,
+            clip_node: ClipNodeId::ROOT,
+            background: Background::default(),
+            border_color: Hsla::default(),
+            border_style: BorderStyle::default(),
+            corner_radii: Corners::default(),
+            border_widths: Edges::default(),
+        });
+
+        // Invalidate all
+        list.invalidate_all();
+
+        // Any bounds within content should intersect dirty
+        let test_bounds = Bounds {
+            origin: point(Pixels(500.0), Pixels(500.0)),
+            size: size(Pixels(50.0), Pixels(50.0)),
+        };
+        assert!(list.intersects_dirty_region(&test_bounds));
+    }
+
+    #[test]
+    fn test_dominated_dirty_region_optimization() {
+        let mut list = DisplayList::new(test_element_id());
+
+        // Add a large dirty region
+        list.invalidate_region(Bounds {
+            origin: point(Pixels(0.0), Pixels(0.0)),
+            size: size(Pixels(500.0), Pixels(500.0)),
+        });
+
+        // Try to add a smaller region fully inside the larger one
+        list.invalidate_region(Bounds {
+            origin: point(Pixels(100.0), Pixels(100.0)),
+            size: size(Pixels(100.0), Pixels(100.0)),
+        });
+
+        // Should still only have 1 dirty region (the smaller was dominated)
+        assert_eq!(list.dirty_regions().len(), 1);
+    }
+
+    #[test]
+    fn test_clear_also_clears_dirty_regions() {
+        let mut list = DisplayList::new(test_element_id());
+
+        list.invalidate_region(Bounds {
+            origin: point(Pixels(0.0), Pixels(0.0)),
+            size: size(Pixels(100.0), Pixels(100.0)),
+        });
+        assert!(list.has_dirty_regions());
+
+        list.clear();
+        assert!(!list.has_dirty_regions());
+    }
+
+    // ========================================================================
+    // Element Item Tracking Tests (Phase 14: Incremental Invalidation)
+    // ========================================================================
+
+    fn test_element_id_2() -> GlobalElementId {
+        GlobalElementId(Arc::from([ElementId::Integer(2)]))
+    }
+
+    fn test_element_id_3() -> GlobalElementId {
+        GlobalElementId(Arc::from([ElementId::Integer(3)]))
+    }
+
+    fn make_test_quad(x: f32, y: f32, w: f32, h: f32) -> DisplayQuad {
+        DisplayQuad {
+            bounds: Bounds {
+                origin: point(Pixels(x), Pixels(y)),
+                size: size(Pixels(w), Pixels(h)),
+            },
+            transform_node: TransformNodeId::ROOT,
+            clip_node: ClipNodeId::ROOT,
+            background: Background::default(),
+            border_color: Hsla::default(),
+            border_style: BorderStyle::default(),
+            corner_radii: Corners::default(),
+            border_widths: Edges::default(),
+        }
+    }
+
+    #[test]
+    fn test_element_tracking_begin_end() {
+        let mut list = DisplayList::new(test_element_id());
+
+        // Begin element 1
+        list.begin_element(test_element_id());
+        list.push_quad(make_test_quad(0.0, 0.0, 100.0, 100.0));
+        list.push_quad(make_test_quad(50.0, 50.0, 100.0, 100.0));
+        let bounds = list.end_element();
+
+        // Should have recorded the element
+        assert!(list.has_element(&test_element_id()));
+        assert_eq!(list.element_count(), 1);
+
+        // Bounds should cover both quads: (0,0) to (150,150)
+        let bounds = bounds.unwrap();
+        assert_eq!(bounds.origin.x, Pixels(0.0));
+        assert_eq!(bounds.origin.y, Pixels(0.0));
+        assert_eq!(bounds.size.width, Pixels(150.0));
+        assert_eq!(bounds.size.height, Pixels(150.0));
+
+        // Should have correct range
+        let range = list.get_element_range(&test_element_id()).unwrap();
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end, 2);
+    }
+
+    #[test]
+    fn test_element_update() {
+        let mut list = DisplayList::new(test_element_id());
+
+        // Add element 1 with 2 items
+        list.begin_element(test_element_id());
+        list.push_quad(make_test_quad(0.0, 0.0, 100.0, 100.0));
+        list.push_quad(make_test_quad(100.0, 0.0, 100.0, 100.0));
+        list.end_element();
+
+        // Add element 2 with 1 item
+        list.begin_element(test_element_id_2());
+        list.push_quad(make_test_quad(0.0, 200.0, 100.0, 100.0));
+        list.end_element();
+
+        assert_eq!(list.items.len(), 3);
+
+        // Update element 1 with different items (1 item instead of 2)
+        let new_items = vec![DisplayItem::Quad(make_test_quad(0.0, 0.0, 50.0, 50.0))];
+        let dirty_bounds = list.update_element(&test_element_id(), new_items);
+
+        // Should have dirty bounds
+        assert!(dirty_bounds.is_some());
+
+        // List should now have 2 items total
+        assert_eq!(list.items.len(), 2);
+
+        // Element 1 range should be updated
+        let range = list.get_element_range(&test_element_id()).unwrap();
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end, 1);
+
+        // Element 2 range should be shifted
+        let range2 = list.get_element_range(&test_element_id_2()).unwrap();
+        assert_eq!(range2.start, 1);
+        assert_eq!(range2.end, 2);
+
+        // Dirty regions should be set
+        assert!(list.has_dirty_regions());
+    }
+
+    #[test]
+    fn test_element_remove() {
+        let mut list = DisplayList::new(test_element_id());
+
+        // Add 3 elements
+        list.begin_element(test_element_id());
+        list.push_quad(make_test_quad(0.0, 0.0, 100.0, 100.0));
+        list.end_element();
+
+        list.begin_element(test_element_id_2());
+        list.push_quad(make_test_quad(100.0, 0.0, 100.0, 100.0));
+        list.end_element();
+
+        list.begin_element(test_element_id_3());
+        list.push_quad(make_test_quad(200.0, 0.0, 100.0, 100.0));
+        list.end_element();
+
+        assert_eq!(list.items.len(), 3);
+        assert_eq!(list.element_count(), 3);
+
+        // Remove element 2
+        let removed_bounds = list.remove_element(&test_element_id_2());
+        assert!(removed_bounds.is_some());
+
+        // Should have 2 items and 2 elements
+        assert_eq!(list.items.len(), 2);
+        assert_eq!(list.element_count(), 2);
+
+        // Element 2 should be gone
+        assert!(!list.has_element(&test_element_id_2()));
+
+        // Element 3 range should be shifted
+        let range3 = list.get_element_range(&test_element_id_3()).unwrap();
+        assert_eq!(range3.start, 1);
+        assert_eq!(range3.end, 2);
+
+        // Dirty regions should be set
+        assert!(list.has_dirty_regions());
     }
 }
