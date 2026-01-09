@@ -2176,10 +2176,10 @@ impl MetalRenderer {
             command_encoder.end_encoding();
         }
 
-        // Commit the RTT command buffer
+        // Commit the RTT command buffer without waiting.
+        // Phase 0.2: Metal guarantees ordering on the same queue - the main pass
+        // command buffer will naturally wait for this prepass to complete.
         command_buffer.commit();
-        // Wait for completion to ensure textures are ready for main pass
-        command_buffer.wait_until_completed();
     }
 
     /// Pre-pass: rasterize display lists to tile textures for scroll containers.
@@ -2240,9 +2240,15 @@ impl MetalRenderer {
         // This is the performance-critical change: multiple tiles rasterize concurrently
         let results = rasterize_tiles_parallel(jobs, scale_factor);
 
-        // Sequential GPU rendering (Metal commands must be submitted from main thread)
+        // Phase 0.2: Sequential GPU encoding, but no synchronous waits.
+        // Each tile gets its own command buffer for better GPU parallelism.
+        // Metal guarantees ordering on the same queue - main pass will wait for these.
         for result in results {
-            self.rasterize_display_list_tile(&result.container_id, result.coord, &result.raster_result);
+            self.rasterize_display_list_tile(
+                &result.container_id,
+                result.coord,
+                &result.raster_result,
+            );
         }
     }
 
@@ -2722,18 +2728,15 @@ impl MetalRenderer {
     /// Rasterize a DisplayList to a tile texture.
     ///
     /// This is the key method for the display list architecture. It takes a
-    /// TileRasterResult (obtained by calling `display_list.rasterize_tile()`)
-    /// and renders its primitives to the tile texture acquired from the tile cache.
-    ///
-    /// The caller is responsible for:
-    /// 1. Calling `tile_cache.acquire_tile()` to get a tile texture
-    /// 2. Calling this method only if `acquire_tile` returned `true` (needs_render)
-    /// 3. Ensuring the TileRasterResult contains primitives offset to tile-local coordinates
-    pub fn rasterize_display_list_tile(
-        &mut self,
+    /// Encodes tile rendering commands to an existing command buffer.
+    /// Phase 0.2: This is the internal method used for batched tile rendering
+    /// to eliminate per-tile GPU stalls.
+    fn encode_tile_to_command_buffer(
+        &self,
         container_id: &crate::GlobalElementId,
         coord: crate::scene::TileCoord,
         raster_result: &crate::display_list::TileRasterResult,
+        command_buffer: &metal::CommandBufferRef,
     ) {
         use crate::scene::TileKey;
 
@@ -2747,7 +2750,7 @@ impl MetalRenderer {
             Some(t) => t.clone(),
             None => {
                 log::warn!(
-                    "rasterize_display_list_tile: tile {:?} not found in cache",
+                    "encode_tile_to_command_buffer: tile {:?} not found in cache",
                     tile_key
                 );
                 return;
@@ -2758,9 +2761,6 @@ impl MetalRenderer {
         if raster_result.is_empty() {
             return;
         }
-
-        // Create command buffer for tile rendering
-        let command_buffer = self.command_queue.new_command_buffer();
 
         let tile_size: Size<DevicePixels> = size(
             DevicePixels(super::tile_cache::TILE_SIZE as i32),
@@ -2863,11 +2863,27 @@ impl MetalRenderer {
         // TODO: Add path and backdrop blur rendering if needed for display list tiles
 
         command_encoder.end_encoding();
+    }
 
-        // Commit the tile rendering command buffer
+    /// Renders a TileRasterResult to the tile texture acquired from the tile cache.
+    ///
+    /// The caller is responsible for:
+    /// 1. Calling `tile_cache.acquire_tile()` to get a tile texture
+    /// 2. Calling this method only if `acquire_tile` returned `true` (needs_render)
+    /// 3. Ensuring the TileRasterResult contains primitives offset to tile-local coordinates
+    ///
+    /// Phase 0.2: Commits without waiting - Metal queue ordering handles correctness.
+    pub fn rasterize_display_list_tile(
+        &self,
+        container_id: &crate::GlobalElementId,
+        coord: crate::scene::TileCoord,
+        raster_result: &crate::display_list::TileRasterResult,
+    ) {
+        // Create command buffer and encode tile rendering.
+        // Phase 0.2: No synchronous wait - Metal queue ordering handles correctness.
+        let command_buffer = self.command_queue.new_command_buffer();
+        self.encode_tile_to_command_buffer(container_id, coord, raster_result, command_buffer);
         command_buffer.commit();
-        // Wait for completion to ensure tile is ready
-        command_buffer.wait_until_completed();
     }
 
     /// Access to the tile cache for registering scroll containers and acquiring tiles.
