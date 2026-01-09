@@ -169,6 +169,24 @@ impl Scene {
         self.display_lists.insert(element_id, (Arc::new(display_list), property_trees));
     }
 
+    /// Insert primitives from a TileRasterResult directly into the Scene.
+    /// This is used for the root layer which doesn't use tiling - its DisplayList
+    /// is rasterized and the primitives are added directly to the Scene.
+    pub fn insert_from_raster_result(&mut self, result: crate::display_list::TileRasterResult) {
+        self.quads.extend(result.quads);
+        self.quad_transforms.extend(result.quad_transforms);
+        self.shadows.extend(result.shadows);
+        self.shadow_transforms.extend(result.shadow_transforms);
+        self.backdrop_blurs.extend(result.backdrop_blurs);
+        self.backdrop_blur_transforms.extend(result.backdrop_blur_transforms);
+        self.underlines.extend(result.underlines);
+        self.underline_transforms.extend(result.underline_transforms);
+        self.monochrome_sprites.extend(result.monochrome_sprites);
+        self.subpixel_sprites.extend(result.subpixel_sprites);
+        self.polychrome_sprites.extend(result.polychrome_sprites);
+        self.polychrome_sprite_transforms.extend(result.polychrome_sprite_transforms);
+    }
+
     /// Begin capturing primitives for a subtree that may be cached to a texture.
     /// Call this before painting the subtree's content.
     pub fn begin_subtree_capture(&mut self, id: GlobalElementId, bounds: Bounds<ScaledPixels>) {

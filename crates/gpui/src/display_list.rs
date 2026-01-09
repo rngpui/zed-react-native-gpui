@@ -35,8 +35,11 @@ use crate::{
     Point, ScaledPixels, scene::TransformationMatrix, scene::BorderStyle, point, size,
     scene::{Quad, Shadow, BackdropBlur, Underline, MonochromeSprite, SubpixelSprite, PolychromeSprite, DrawOrder},
     property_trees::{TransformNodeId, ClipNodeId, PropertyTrees},
+    ImplicitElementId,
 };
 use collections::FxHashMap;
+use smallvec::SmallVec;
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Unique identifier for a display list layer.
@@ -273,19 +276,176 @@ pub(crate) struct PathVertex {
     pub st_position: Point<f32>,
 }
 
-/// Tracks the range of display items owned by an element.
+// ============================================================================
+// Phase 20: Unified Element Identity
+// ============================================================================
+
+/// The local component of an element's identity within its parent.
 ///
-/// Used for incremental updates: when an element's content changes,
-/// we can remove its items and insert new ones without rebuilding
-/// the entire display list.
+/// For most elements, this is their position among siblings (Index).
+/// For elements in dynamic lists that may reorder, an explicit Key
+/// provides stable identity across reorders.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum LocalElementId {
+    /// Position-based identity (default) - index among siblings.
+    /// Stable for static content, but identity shifts if siblings are added/removed.
+    Index(u32),
+    /// Key-based identity (explicit) - for dynamic lists.
+    /// Stable across reorders. Use `.id()` or `.key()` to set.
+    Key(crate::ElementId),
+}
+
+impl Default for LocalElementId {
+    fn default() -> Self {
+        Self::Index(0)
+    }
+}
+
+/// A computed element identifier. Always present for every element.
+///
+/// This is the unified identity system for GPUI elements, inspired by:
+/// - React's reconciliation (position + type + key)
+/// - Chromium's display item identity (object pointer + type)
+///
+/// Every element has a `ComputedElementId`, computed automatically from:
+/// - `path_hash`: Hash of the ancestor chain (parent's identity)
+/// - `local_id`: Position among siblings, or explicit key if provided
+/// - `element_type`: Rust TypeId of the element (for type-based diffing)
+///
+/// ## When to use explicit keys
+///
+/// Most elements don't need explicit keys - position-based identity works for:
+/// - Static UI (headers, footers, sidebars)
+/// - Lists that only append at the end
+/// - UI that doesn't reorder
+///
+/// Use `.id()` or `.key()` when:
+/// - List items can be reordered (drag-and-drop, sorting)
+/// - List items can be inserted/removed in the middle
+/// - You need state to follow a specific item across reorders
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ComputedElementId {
+    /// Hash of the path from root to this element's parent.
+    /// Combined with local_id to form full identity.
+    path_hash: u64,
+    /// Position among siblings (Index) or explicit key hash (Key).
+    /// Stored as hash for uniform size and fast comparison.
+    local_id_hash: u64,
+    /// Type of element. Different types at same position = different identity.
+    element_type: std::any::TypeId,
+}
+
+impl ComputedElementId {
+    /// Create a new computed element ID.
+    pub fn new(path_hash: u64, local_id: &LocalElementId, element_type: std::any::TypeId) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = collections::FxHasher::default();
+        local_id.hash(&mut hasher);
+        let local_id_hash = hasher.finish();
+
+        Self {
+            path_hash,
+            local_id_hash,
+            element_type,
+        }
+    }
+
+    /// Create from an implicit element ID (for migration).
+    pub fn from_implicit(implicit: &ImplicitElementId) -> Self {
+        Self {
+            path_hash: implicit.parent_path_hash,
+            local_id_hash: implicit.child_index as u64,
+            element_type: implicit.element_type,
+        }
+    }
+
+    /// Create from a global element ID and type (for migration).
+    pub fn from_global(global: &GlobalElementId, element_type: std::any::TypeId) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = collections::FxHasher::default();
+        global.hash(&mut hasher);
+        let path_hash = hasher.finish();
+
+        Self {
+            path_hash,
+            local_id_hash: 0, // Global IDs encode the full path
+            element_type,
+        }
+    }
+
+    /// Compute the path hash for a child element.
+    /// The child's path_hash is derived from parent's full identity.
+    pub fn child_path_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = collections::FxHasher::default();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Get a hash suitable for use as a map key.
+    pub fn to_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = collections::FxHasher::default();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// Entry tracking an element's own display items (Phase 20: Per-Element Item Tracking).
+///
+/// Tracks only the element's OWN items - children are tracked separately with their
+/// own `ElementEntry` records. This separation is critical for per-element caching:
+/// when a child changes, we can invalidate just that child's items while preserving
+/// the parent's cached items.
 #[derive(Clone, Debug)]
-pub(crate) struct ElementItemRange {
-    /// Starting index in the items vec (inclusive).
-    pub start: usize,
-    /// Ending index in the items vec (exclusive).
-    pub end: usize,
-    /// Combined bounds of all items in this range.
-    pub bounds: Bounds<Pixels>,
+pub(crate) struct ElementEntry {
+    /// Range of items owned directly by this element (NOT including children).
+    /// Items in this range are the element's own primitives (background, border, etc.).
+    pub own_items: Range<usize>,
+    /// Combined bounds of own items only (not including children).
+    pub own_bounds: Bounds<Pixels>,
+    /// Hash of element inputs (for change detection).
+    /// If the same element at the same position has the same hash, we can reuse items.
+    pub input_hash: u64,
+    /// IDs of child elements painted during this element's paint.
+    /// Used for hierarchical invalidation if needed.
+    pub children: SmallVec<[ComputedElementId; 8]>,
+}
+
+impl ElementEntry {
+    /// Check if this element has any own items.
+    pub fn has_own_items(&self) -> bool {
+        !self.own_items.is_empty()
+    }
+
+    /// Get the number of own items.
+    pub fn own_item_count(&self) -> usize {
+        self.own_items.len()
+    }
+}
+
+/// Stack entry for tracking element painting state during paint phase.
+///
+/// When `begin_element_v2()` is called, an entry is pushed to track the element's
+/// items as they're painted. `end_element_own_items()` marks where the element's
+/// own items end, and `finalize_element()` pops the entry and records the result.
+#[derive(Clone, Debug)]
+struct ElementPaintStackEntry {
+    /// The element's computed identity.
+    id: ComputedElementId,
+    /// Index in items vec where this element's own items start.
+    start_index: usize,
+    /// Index where own items end (set by end_element_own_items).
+    /// None means own items haven't been marked yet.
+    own_items_end: Option<usize>,
+    /// Hash of element inputs for change detection.
+    input_hash: u64,
+    /// Children painted during this element's paint.
+    children: SmallVec<[ComputedElementId; 8]>,
+    /// If true, this element had a cache hit and its own items are being
+    /// copied from the previous frame. New items for this element should
+    /// be skipped (but children still paint normally).
+    cache_hit: bool,
 }
 
 /// Grid-based spatial index for fast item lookup by bounds.
@@ -499,16 +659,24 @@ pub(crate) struct DisplayList {
     /// Dirty regions that need re-rasterization.
     /// Empty means entire display list is valid (or was just cleared).
     dirty_regions: Vec<Bounds<Pixels>>,
-    /// Index mapping element IDs to their item ranges.
-    /// Enables O(1) lookup for partial updates.
-    element_items: FxHashMap<GlobalElementId, ElementItemRange>,
-    /// Stack of element IDs currently being painted.
-    /// Used by begin_element()/end_element() to track nesting.
-    element_stack: Vec<(GlobalElementId, usize)>,
     /// Pre-baked world transforms and clips for each item.
     /// Parallel array to `items` - index i contains the resolved transform/clip for items[i].
     /// Populated by `bake_transforms()` to avoid per-item property tree lookups during rasterization.
     baked_transforms: Vec<(TransformationMatrix, Bounds<Pixels>)>,
+
+    // ========================================================================
+    // Phase 20: Per-Element Item Tracking
+    // ========================================================================
+
+    /// Per-element entry tracking (Phase 20).
+    /// Maps computed element IDs to their entry records, which track:
+    /// - Element's own items (not including children)
+    /// - Input hash for change detection
+    /// - Children IDs for hierarchical operations
+    element_entries: FxHashMap<ComputedElementId, ElementEntry>,
+    /// Stack for tracking element painting state.
+    /// Pushed by begin_element_v2(), popped by finalize_element().
+    element_paint_stack: Vec<ElementPaintStackEntry>,
 }
 
 impl DisplayList {
@@ -522,9 +690,10 @@ impl DisplayList {
             items: Vec::new(),
             spatial_index: SpatialIndex::default(),
             dirty_regions: Vec::new(),
-            element_items: FxHashMap::default(),
-            element_stack: Vec::new(),
             baked_transforms: Vec::new(),
+            // Phase 20: Per-element tracking
+            element_entries: FxHashMap::default(),
+            element_paint_stack: Vec::new(),
         }
     }
 
@@ -537,37 +706,114 @@ impl DisplayList {
         self.spatial_index.clear();
         self.content_bounds = Bounds::default();
         self.dirty_regions.clear();
-        self.element_items.clear();
-        self.element_stack.clear();
         self.baked_transforms.clear();
+        // Phase 20: Clear per-element tracking
+        self.element_entries.clear();
+        self.element_paint_stack.clear();
         self.generation += 1;
     }
 
     // ========================================================================
-    // Element Item Tracking (Phase 14: Incremental Invalidation)
+    // Phase 20: Per-Element Item Tracking
     // ========================================================================
 
-    /// Begin tracking items for an element.
+    /// Begin painting an element with per-element item tracking.
     ///
-    /// Call this before painting an element's items. Call `end_element()`
-    /// when done. Items painted between begin/end are associated with
-    /// the element ID for future partial updates.
-    pub fn begin_element(&mut self, element_id: GlobalElementId) {
-        let start_index = self.items.len();
-        self.element_stack.push((element_id, start_index));
+    /// Tracks element's OWN items separately from children, enabling per-element caching.
+    ///
+    /// Flow:
+    /// 1. `begin_element(id, input_hash)` - start tracking
+    /// 2. Paint element's own content (background, border, etc.)
+    /// 3. `end_element_own_items()` - mark end of own items
+    /// 4. Paint children (each child uses its own begin/end)
+    /// 5. `finalize_element()` - complete and record entry
+    ///
+    /// The `input_hash` is used for change detection: if the same element at
+    /// the same position has the same hash on the next frame, its items can
+    /// potentially be reused.
+    pub fn begin_element(&mut self, id: ComputedElementId, input_hash: u64, cache_hit: bool) {
+        // When a child begins, the parent's own items have ended.
+        // Mark the parent's own_items_end if not already set.
+        if let Some(parent) = self.element_paint_stack.last_mut() {
+            if parent.own_items_end.is_none() {
+                parent.own_items_end = Some(self.items.len());
+            }
+        }
+
+        self.element_paint_stack.push(ElementPaintStackEntry {
+            id,
+            start_index: self.items.len(),
+            own_items_end: None,
+            input_hash,
+            children: SmallVec::new(),
+            cache_hit,
+        });
     }
 
-    /// End tracking items for the current element.
+    /// Check if the current element has a cache hit (Phase 20).
     ///
-    /// Records the item range for the element started with `begin_element()`.
-    /// Returns the bounds of all items painted for this element.
-    pub fn end_element(&mut self) -> Option<Bounds<Pixels>> {
-        let (element_id, start_index) = self.element_stack.pop()?;
-        let end_index = self.items.len();
+    /// When true, primitives for this element's OWN content should be skipped
+    /// (they'll be copied from the previous frame). Children still paint normally.
+    pub fn current_element_has_cache_hit(&self) -> bool {
+        self.element_paint_stack.last().is_some_and(|e| e.cache_hit)
+    }
 
-        // Calculate bounds of items in this range
+    /// Mark the end of an element's own items (Phase 20).
+    ///
+    /// Call this after painting the element's own content (background, border)
+    /// but BEFORE painting children. This allows us to distinguish between
+    /// the element's own items and children's items.
+    ///
+    /// If not called before `finalize_element()`, all items from start to
+    /// finalize are considered "own items" (for leaf elements with no children).
+    pub fn end_element_own_items(&mut self) {
+        if let Some(entry) = self.element_paint_stack.last_mut() {
+            entry.own_items_end = Some(self.items.len());
+        }
+    }
+
+    /// Finalize element painting and record the entry (Phase 20).
+    ///
+    /// Call this after all children have been painted. Returns the bounds
+    /// of the element's own items (not including children).
+    ///
+    /// This method:
+    /// 1. Records the element's own item range and bounds
+    /// 2. Registers this element as a child of the parent (if any)
+    /// 3. Stores the entry for later lookup
+    pub fn finalize_element(&mut self) -> Option<Bounds<Pixels>> {
+        let entry = self.element_paint_stack.pop()?;
+
+        // If end_element_own_items wasn't called, assume all items are own items
+        // (this is the case for leaf elements with no children)
+        let own_items_end = entry.own_items_end.unwrap_or(self.items.len());
+
+        // Calculate bounds of own items only
+        let own_bounds = self.calculate_bounds_for_range(entry.start_index, own_items_end);
+
+        // Register this element as a child of the parent (if any)
+        if let Some(parent) = self.element_paint_stack.last_mut() {
+            parent.children.push(entry.id);
+        }
+
+        // Store the entry
+        self.element_entries.insert(
+            entry.id,
+            ElementEntry {
+                own_items: entry.start_index..own_items_end,
+                own_bounds,
+                input_hash: entry.input_hash,
+                children: entry.children,
+            },
+        );
+
+        Some(own_bounds)
+    }
+
+    /// Calculate bounds for a range of items.
+    fn calculate_bounds_for_range(&self, start: usize, end: usize) -> Bounds<Pixels> {
         let mut bounds: Bounds<Pixels> = Bounds::default();
-        for item in &self.items[start_index..end_index] {
+        for item in &self.items[start..end] {
             if let Some(item_bounds) = item.bounds() {
                 if bounds.size.width.0 == 0.0 && bounds.size.height.0 == 0.0 {
                     bounds = item_bounds;
@@ -576,126 +822,75 @@ impl DisplayList {
                 }
             }
         }
-
-        self.element_items.insert(
-            element_id,
-            ElementItemRange {
-                start: start_index,
-                end: end_index,
-                bounds,
-            },
-        );
-
-        Some(bounds)
+        bounds
     }
 
-    /// Get the item range for an element.
-    pub fn get_element_range(&self, element_id: &GlobalElementId) -> Option<&ElementItemRange> {
-        self.element_items.get(element_id)
+    /// Get the element entry for a computed ID (Phase 20).
+    pub fn get_element_entry(&self, id: &ComputedElementId) -> Option<&ElementEntry> {
+        self.element_entries.get(id)
     }
 
-    /// Get the bounds of items owned by an element.
-    pub fn get_element_bounds(&self, element_id: &GlobalElementId) -> Option<Bounds<Pixels>> {
-        self.element_items.get(element_id).map(|r| r.bounds)
+    /// Check if an element entry exists (Phase 20).
+    pub fn has_element_entry(&self, id: &ComputedElementId) -> bool {
+        self.element_entries.contains_key(id)
     }
 
-    /// Check if an element has items in this display list.
-    pub fn has_element(&self, element_id: &GlobalElementId) -> bool {
-        self.element_items.contains_key(element_id)
+    /// Get the number of tracked element entries (Phase 20).
+    pub fn element_entry_count(&self) -> usize {
+        self.element_entries.len()
     }
 
-    /// Update items for a specific element.
+    /// Get all element entries (Phase 20).
+    /// Used for cache transfer between frames.
+    pub fn element_entries(&self) -> &FxHashMap<ComputedElementId, ElementEntry> {
+        &self.element_entries
+    }
+
+    /// Copy items from a previous frame's entry into this display list (Phase 20).
     ///
-    /// This is the key method for incremental updates:
-    /// 1. Removes the element's existing items
-    /// 2. Inserts new items in their place
-    /// 3. Marks both old and new regions as dirty
+    /// This is the core of per-element caching: when an element's input_hash
+    /// matches the previous frame, we copy its items instead of repainting.
     ///
-    /// Returns the combined dirty region (old bounds + new bounds).
-    pub fn update_element(
+    /// Returns the bounds of the copied items, or None if source_items is empty.
+    pub fn copy_items_from_range(
         &mut self,
-        element_id: &GlobalElementId,
-        new_items: Vec<DisplayItem>,
+        source_display_list: &DisplayList,
+        source_range: Range<usize>,
     ) -> Option<Bounds<Pixels>> {
-        // Get old range and bounds
-        let old_range = self.element_items.remove(element_id)?;
-        let old_bounds = old_range.bounds;
+        if source_range.is_empty() {
+            return None;
+        }
 
-        // Calculate new bounds
-        let mut new_bounds: Bounds<Pixels> = Bounds::default();
-        for item in &new_items {
-            if let Some(item_bounds) = item.bounds() {
-                if new_bounds.size.width.0 == 0.0 && new_bounds.size.height.0 == 0.0 {
-                    new_bounds = item_bounds;
-                } else {
-                    new_bounds = new_bounds.union(&item_bounds);
-                }
+        let start_index = self.items.len();
+
+        // Copy items from source
+        for item in &source_display_list.items[source_range.clone()] {
+            // Clone the item and add to our list
+            // Note: This extends content_bounds and marks spatial index dirty
+            match item {
+                DisplayItem::Quad(q) => self.push_quad(q.clone()),
+                DisplayItem::Shadow(s) => self.push_shadow(s.clone()),
+                DisplayItem::BackdropBlur(b) => self.push_backdrop_blur(b.clone()),
+                DisplayItem::Underline(u) => self.push_underline(u.clone()),
+                DisplayItem::MonochromeSprite(s) => self.push_monochrome_sprite(s.clone()),
+                DisplayItem::SubpixelSprite(s) => self.push_subpixel_sprite(s.clone()),
+                DisplayItem::PolychromeSprite(s) => self.push_polychrome_sprite(s.clone()),
+                DisplayItem::Path(p) => self.push_path(p.clone()),
             }
         }
 
-        // Calculate size difference for index updates
-        let old_count = old_range.end - old_range.start;
-        let new_count = new_items.len();
-        let count_diff = new_count as isize - old_count as isize;
-
-        // Remove old items and insert new ones
-        self.items.splice(old_range.start..old_range.end, new_items);
-
-        // Update element range
-        self.element_items.insert(
-            element_id.clone(),
-            ElementItemRange {
-                start: old_range.start,
-                end: old_range.start + new_count,
-                bounds: new_bounds,
-            },
-        );
-
-        // Update indices for elements that come after this one
-        if count_diff != 0 {
-            for range in self.element_items.values_mut() {
-                if range.start > old_range.start {
-                    range.start = (range.start as isize + count_diff) as usize;
-                    range.end = (range.end as isize + count_diff) as usize;
-                }
-            }
-        }
-
-        // Mark both old and new bounds as dirty
-        let dirty_bounds = old_bounds.union(&new_bounds);
-        self.invalidate_region(dirty_bounds);
-
-        Some(dirty_bounds)
+        let end_index = self.items.len();
+        Some(self.calculate_bounds_for_range(start_index, end_index))
     }
 
-    /// Remove all items for an element.
-    ///
-    /// Marks the element's bounds as dirty.
-    pub fn remove_element(&mut self, element_id: &GlobalElementId) -> Option<Bounds<Pixels>> {
-        let range = self.element_items.remove(element_id)?;
-        let bounds = range.bounds;
-
-        // Remove items
-        self.items.drain(range.start..range.end);
-
-        // Update indices for elements that come after
-        let count_diff = range.end - range.start;
-        for r in self.element_items.values_mut() {
-            if r.start > range.start {
-                r.start -= count_diff;
-                r.end -= count_diff;
-            }
-        }
-
-        // Mark as dirty
-        self.invalidate_region(bounds);
-
-        Some(bounds)
+    /// Check if we're currently inside an element paint operation (Phase 20).
+    pub fn is_painting_element(&self) -> bool {
+        !self.element_paint_stack.is_empty()
     }
 
-    /// Get the number of tracked elements.
-    pub fn element_count(&self) -> usize {
-        self.element_items.len()
+    /// Get the current element being painted (Phase 20).
+    pub fn current_element(&self) -> Option<ComputedElementId> {
+        self.element_paint_stack.last().map(|e| e.id)
     }
 
     // ========================================================================
@@ -927,6 +1122,83 @@ impl DisplayList {
         let mut draw_order: DrawOrder = 0;
 
         for (index, item) in self.items_intersecting_with_index(tile_bounds) {
+            draw_order += 1;
+
+            // Get pre-baked world transform and clip
+            let &(world_transform, world_clip) = &self.baked_transforms[index];
+
+            match item {
+                DisplayItem::Quad(q) => {
+                    if let Some((quad, transform)) = self.rasterize_quad(q, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                        result.quads.push(quad);
+                        result.quad_transforms.push(transform);
+                    }
+                }
+                DisplayItem::Shadow(s) => {
+                    if let Some((shadow, transform)) = self.rasterize_shadow(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                        result.shadows.push(shadow);
+                        result.shadow_transforms.push(transform);
+                    }
+                }
+                DisplayItem::BackdropBlur(b) => {
+                    if let Some((blur, transform)) = self.rasterize_backdrop_blur(b, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                        result.backdrop_blurs.push(blur);
+                        result.backdrop_blur_transforms.push(transform);
+                    }
+                }
+                DisplayItem::Underline(u) => {
+                    if let Some((underline, transform)) = self.rasterize_underline(u, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                        result.underlines.push(underline);
+                        result.underline_transforms.push(transform);
+                    }
+                }
+                DisplayItem::MonochromeSprite(s) => {
+                    if let Some(sprite) = self.rasterize_monochrome_sprite(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                        result.monochrome_sprites.push(sprite);
+                    }
+                }
+                DisplayItem::SubpixelSprite(s) => {
+                    if let Some(sprite) = self.rasterize_subpixel_sprite(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                        result.subpixel_sprites.push(sprite);
+                    }
+                }
+                DisplayItem::PolychromeSprite(s) => {
+                    if let Some((sprite, transform)) = self.rasterize_polychrome_sprite(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                        result.polychrome_sprites.push(sprite);
+                        result.polychrome_sprite_transforms.push(transform);
+                    }
+                }
+                DisplayItem::Path(_) => {
+                    // TODO: Path rasterization requires more complex handling
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Rasterize the entire display list to primitives.
+    /// This is used for the root layer which doesn't use tiling.
+    /// Items are converted to window-coordinate primitives for direct Scene insertion.
+    pub fn rasterize_all(&self, scale_factor: f32) -> TileRasterResult {
+        debug_assert!(
+            !self.baked_transforms.is_empty() || self.items.is_empty(),
+            "bake_transforms() must be called before rasterize_all()"
+        );
+
+        let mut result = TileRasterResult::default();
+        let mut draw_order: DrawOrder = 0;
+
+        // Use a very large tile bounds to include all items (origin is implicitly 0,0)
+        let tile_bounds = Bounds {
+            origin: Point::default(),
+            size: crate::Size {
+                width: Pixels(100000.0),
+                height: Pixels(100000.0),
+            },
+        };
+
+        for (index, item) in self.items.iter().enumerate() {
             draw_order += 1;
 
             // Get pre-baked world transform and clip
@@ -1751,142 +2023,6 @@ mod tests {
     }
 
     // ========================================================================
-    // Element Item Tracking Tests (Phase 14: Incremental Invalidation)
-    // ========================================================================
-
-    fn test_element_id_2() -> GlobalElementId {
-        GlobalElementId(Arc::from([ElementId::Integer(2)]))
-    }
-
-    fn test_element_id_3() -> GlobalElementId {
-        GlobalElementId(Arc::from([ElementId::Integer(3)]))
-    }
-
-    fn make_test_quad(x: f32, y: f32, w: f32, h: f32) -> DisplayQuad {
-        DisplayQuad {
-            bounds: Bounds {
-                origin: point(Pixels(x), Pixels(y)),
-                size: size(Pixels(w), Pixels(h)),
-            },
-            transform_node: TransformNodeId::ROOT,
-            clip_node: ClipNodeId::ROOT,
-            background: Background::default(),
-            border_color: Hsla::default(),
-            border_style: BorderStyle::default(),
-            corner_radii: Corners::default(),
-            border_widths: Edges::default(),
-        }
-    }
-
-    #[test]
-    fn test_element_tracking_begin_end() {
-        let mut list = DisplayList::new(test_element_id());
-
-        // Begin element 1
-        list.begin_element(test_element_id());
-        list.push_quad(make_test_quad(0.0, 0.0, 100.0, 100.0));
-        list.push_quad(make_test_quad(50.0, 50.0, 100.0, 100.0));
-        let bounds = list.end_element();
-
-        // Should have recorded the element
-        assert!(list.has_element(&test_element_id()));
-        assert_eq!(list.element_count(), 1);
-
-        // Bounds should cover both quads: (0,0) to (150,150)
-        let bounds = bounds.unwrap();
-        assert_eq!(bounds.origin.x, Pixels(0.0));
-        assert_eq!(bounds.origin.y, Pixels(0.0));
-        assert_eq!(bounds.size.width, Pixels(150.0));
-        assert_eq!(bounds.size.height, Pixels(150.0));
-
-        // Should have correct range
-        let range = list.get_element_range(&test_element_id()).unwrap();
-        assert_eq!(range.start, 0);
-        assert_eq!(range.end, 2);
-    }
-
-    #[test]
-    fn test_element_update() {
-        let mut list = DisplayList::new(test_element_id());
-
-        // Add element 1 with 2 items
-        list.begin_element(test_element_id());
-        list.push_quad(make_test_quad(0.0, 0.0, 100.0, 100.0));
-        list.push_quad(make_test_quad(100.0, 0.0, 100.0, 100.0));
-        list.end_element();
-
-        // Add element 2 with 1 item
-        list.begin_element(test_element_id_2());
-        list.push_quad(make_test_quad(0.0, 200.0, 100.0, 100.0));
-        list.end_element();
-
-        assert_eq!(list.items.len(), 3);
-
-        // Update element 1 with different items (1 item instead of 2)
-        let new_items = vec![DisplayItem::Quad(make_test_quad(0.0, 0.0, 50.0, 50.0))];
-        let dirty_bounds = list.update_element(&test_element_id(), new_items);
-
-        // Should have dirty bounds
-        assert!(dirty_bounds.is_some());
-
-        // List should now have 2 items total
-        assert_eq!(list.items.len(), 2);
-
-        // Element 1 range should be updated
-        let range = list.get_element_range(&test_element_id()).unwrap();
-        assert_eq!(range.start, 0);
-        assert_eq!(range.end, 1);
-
-        // Element 2 range should be shifted
-        let range2 = list.get_element_range(&test_element_id_2()).unwrap();
-        assert_eq!(range2.start, 1);
-        assert_eq!(range2.end, 2);
-
-        // Dirty regions should be set
-        assert!(list.has_dirty_regions());
-    }
-
-    #[test]
-    fn test_element_remove() {
-        let mut list = DisplayList::new(test_element_id());
-
-        // Add 3 elements
-        list.begin_element(test_element_id());
-        list.push_quad(make_test_quad(0.0, 0.0, 100.0, 100.0));
-        list.end_element();
-
-        list.begin_element(test_element_id_2());
-        list.push_quad(make_test_quad(100.0, 0.0, 100.0, 100.0));
-        list.end_element();
-
-        list.begin_element(test_element_id_3());
-        list.push_quad(make_test_quad(200.0, 0.0, 100.0, 100.0));
-        list.end_element();
-
-        assert_eq!(list.items.len(), 3);
-        assert_eq!(list.element_count(), 3);
-
-        // Remove element 2
-        let removed_bounds = list.remove_element(&test_element_id_2());
-        assert!(removed_bounds.is_some());
-
-        // Should have 2 items and 2 elements
-        assert_eq!(list.items.len(), 2);
-        assert_eq!(list.element_count(), 2);
-
-        // Element 2 should be gone
-        assert!(!list.has_element(&test_element_id_2()));
-
-        // Element 3 range should be shifted
-        let range3 = list.get_element_range(&test_element_id_3()).unwrap();
-        assert_eq!(range3.start, 1);
-        assert_eq!(range3.end, 2);
-
-        // Dirty regions should be set
-        assert!(list.has_dirty_regions());
-    }
-
-    // ========================================================================
     // Spatial Index Tests
     // ========================================================================
 
@@ -1949,7 +2085,19 @@ mod tests {
         let mut list = DisplayList::new(test_element_id());
 
         // Add items and build index
-        list.push_quad(make_test_quad(0.0, 0.0, 100.0, 100.0));
+        list.push_quad(DisplayQuad {
+            bounds: Bounds {
+                origin: point(Pixels(0.0), Pixels(0.0)),
+                size: size(Pixels(100.0), Pixels(100.0)),
+            },
+            transform_node: TransformNodeId::ROOT,
+            clip_node: ClipNodeId::ROOT,
+            background: Background::default(),
+            border_color: Hsla::default(),
+            border_style: BorderStyle::default(),
+            corner_radii: Corners::default(),
+            border_widths: Edges::default(),
+        });
         list.ensure_spatial_index_built();
         assert!(!list.spatial_index.is_dirty());
 

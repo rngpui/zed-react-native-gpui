@@ -161,6 +161,11 @@ pub struct Layer {
     /// Content rendered to this layer (None for root layer).
     pub(crate) display_list: Option<DisplayList>,
 
+    /// Previous frame's display list (for per-element cache lookup).
+    /// At frame start, current display_list is swapped here, then cleared.
+    /// Elements can then look up their previous items and copy if unchanged.
+    pub(crate) previous_display_list: Option<DisplayList>,
+
     /// Property trees for transforms and clips.
     /// Used by DisplayItems to reference transforms/clips by node ID.
     pub property_trees: PropertyTrees,
@@ -206,7 +211,7 @@ pub struct Layer {
 impl Layer {
     /// Create a new layer.
     fn new(id: LayerId, element_id: Option<GlobalElementId>, reason: LayerReason) -> Self {
-        // Non-root layers get a display list; root layer doesn't need one
+        // All layers with an element_id get a display list
         let display_list = element_id.clone().map(DisplayList::new);
         Self {
             id,
@@ -220,6 +225,7 @@ impl Layer {
             content_origin: Point::default(),
             clip: None,
             display_list,
+            previous_display_list: None,
             property_trees: PropertyTrees::new(),
             content_bounds: Bounds::default(),
             content_size: Size::default(),
@@ -235,8 +241,9 @@ impl Layer {
     }
 
     /// Create the root layer.
+    /// The root layer now gets a DisplayList so all primitives flow through DisplayList.
     fn root() -> Self {
-        Self::new(LayerId::ROOT, None, LayerReason::Root)
+        Self::new(LayerId::ROOT, Some(GlobalElementId::root()), LayerReason::Root)
     }
 
     /// Clear retained hitboxes and listeners (used when content changes).
@@ -250,6 +257,35 @@ impl Layer {
     /// Check if this layer has retained hitboxes available for reuse.
     pub fn has_retained_hitboxes(&self) -> bool {
         !self.retained_hitboxes.is_empty()
+    }
+
+    /// Prepare layer for a new frame (Phase 20e: Retained DisplayList).
+    ///
+    /// NOTE: This does NOT clear the display list. That only happens when
+    /// `prepare_for_repaint()` is called, which indicates we're actually repainting.
+    /// This allows layers that don't need repaint to keep their display list intact.
+    pub fn begin_frame(&mut self) {
+        // Clear previous_display_list - it's only needed during repaint for cache lookup
+        self.previous_display_list = None;
+    }
+
+    /// Prepare layer for repainting (Phase 20e: Retained DisplayList).
+    ///
+    /// Call this when the layer needs to be repainted. Moves current display_list
+    /// to previous_display_list for cache lookup, then clears current for new items.
+    pub fn prepare_for_repaint(&mut self) {
+        // Move current to previous for cache lookup during paint
+        self.previous_display_list = self.display_list.take();
+
+        // Create new display list for new items
+        if let Some(ref element_id) = self.element_id {
+            self.display_list = Some(DisplayList::new(element_id.clone()));
+        }
+    }
+
+    /// Get the previous frame's display list for cache lookup.
+    pub(crate) fn previous_display_list(&self) -> Option<&DisplayList> {
+        self.previous_display_list.as_ref()
     }
 }
 
@@ -301,14 +337,17 @@ impl LayerTree {
 
     /// Reset the layer tree for a new frame.
     ///
-    /// This preserves layers and their display lists across frames, but resets
-    /// the tree structure (parent/children relationships) which gets rebuilt
-    /// during the paint traversal. Property trees are also cleared since transforms
-    /// and clips are rebuilt during paint.
+    /// This preserves layers across frames, but resets the tree structure
+    /// (parent/children relationships) which gets rebuilt during the paint traversal.
+    /// Property trees are also cleared since transforms and clips are rebuilt during paint.
+    ///
+    /// Phase 20e: Also swaps each layer's display_list to previous_display_list,
+    /// preserving element entries for cache lookup while building new items.
+    ///
     /// Call this at the start of each frame before painting.
     pub fn begin_frame(&mut self) {
         // Reset tree structure for all layers (will be rebuilt during paint)
-        // but KEEP the layers and their display lists for reuse
+        // but KEEP the layers for reuse
         for layer in self.layers.values_mut() {
             layer.children.clear();
             layer.parent = if layer.id == LayerId::ROOT {
@@ -319,6 +358,9 @@ impl LayerTree {
             };
             // Clear property trees - transforms/clips are rebuilt during paint
             layer.property_trees.clear();
+
+            // Phase 20e: Swap display lists for per-element caching
+            layer.begin_frame();
         }
 
         // Reset layer stack to just root

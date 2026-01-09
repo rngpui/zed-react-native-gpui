@@ -1659,15 +1659,13 @@ impl Div {
             .unwrap_or(false);
 
         if needs_repaint {
-            // Clear the layer's display list and rebuild
+            // Prepare layer for repaint: move display_list to previous_display_list for cache lookup,
+            // create new empty display_list for new items
             window
                 .layer_tree_mut()
                 .get_mut(layer_id)
                 .unwrap()
-                .display_list
-                .as_mut()
-                .expect("Non-root layer should have display list")
-                .clear();
+                .prepare_for_repaint();
 
             // Also clear retained hitboxes since we're repainting
             window
@@ -1925,6 +1923,47 @@ impl Element for Div {
 
     fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
         self.interactivity.source_location()
+    }
+
+    fn content_hash(
+        &self,
+        _id: Option<&GlobalElementId>,
+        bounds: Bounds<Pixels>,
+        window: &Window,
+        _cx: &App,
+    ) -> Option<u64> {
+        // Phase 20: Per-element caching for Div
+        //
+        // We cache the Div's OWN visual output (background, border, shadow) separately
+        // from children. This enables caching even when children change.
+        //
+        // Skip caching for elements with interactive styles (hover, focus, active)
+        // since their output depends on runtime state that changes frequently.
+        if self.interactivity.hover_style.is_some()
+            || self.interactivity.group_hover_style.is_some()
+            || self.interactivity.active_style.is_some()
+            || self.interactivity.group_active_style.is_some()
+            || self.interactivity.focus_style.is_some()
+            || self.interactivity.in_focus_style.is_some()
+            || self.interactivity.focus_visible_style.is_some()
+            || !self.interactivity.drag_over_styles.is_empty()
+            || !self.interactivity.group_drag_over_styles.is_empty()
+        {
+            return None;
+        }
+
+        // Compute hash from base style (visual properties that affect painting)
+        // and bounds (position/size affect rendering)
+        // Uses style_refinement_content_hash to avoid cloning StyleRefinement
+        let rem_size = window.rem_size();
+
+        let mut hasher = ContentHasher::default();
+        hasher.write_u64(crate::style_refinement_content_hash(
+            &self.interactivity.base_style,
+            rem_size,
+        ));
+        hasher.write_u64(bounds.content_hash());
+        Some(hasher.finish())
     }
 
     #[stacksafe]
@@ -2286,16 +2325,6 @@ impl Element for Div {
         }
 
         self.paint_uncached(global_id, inspector_id, bounds, hitbox, window, cx);
-    }
-
-    fn content_hash(
-        &self,
-        _id: Option<&GlobalElementId>,
-        _bounds: Bounds<Pixels>,
-        _window: &Window,
-        _cx: &App,
-    ) -> Option<u64> {
-        self.interactivity.content_hash
     }
 }
 

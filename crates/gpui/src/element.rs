@@ -40,8 +40,9 @@ use crate::{
 };
 use derive_more::{Deref, DerefMut};
 use std::{
-    any::{Any, type_name},
+    any::{Any, TypeId, type_name},
     fmt::{self, Debug, Display},
+    hash::{Hash, Hasher},
     mem, panic,
     sync::Arc,
 };
@@ -94,6 +95,16 @@ pub trait Element: 'static + IntoElement {
 
     /// Once layout has been completed, this method will be called to paint the element to the screen.
     /// The state argument is the same state that was returned from [`Element::request_layout()`].
+    ///
+    /// ## Per-Element Caching (Phase 20)
+    ///
+    /// The framework automatically handles per-element caching. When an element's
+    /// `paint_inputs_hash()` matches the previous frame, its own primitives are
+    /// copied from cache and new primitive insertions are automatically skipped.
+    /// Children still paint normally with their own cache checks.
+    ///
+    /// To enable caching for your element, implement `paint_inputs_hash()` to return
+    /// a non-zero hash of the element's paint inputs (style, content, etc.).
     fn paint(
         &mut self,
         id: Option<&GlobalElementId>,
@@ -115,6 +126,28 @@ pub trait Element: 'static + IntoElement {
         _cx: &App,
     ) -> Option<u64> {
         None
+    }
+
+    /// Compute a hash of the element's paint inputs (state that affects paint output).
+    ///
+    /// This is used by the implicit element identity system (Phase 20) to memoize paint
+    /// outputs based on element position + input hash. If the same element at the same
+    /// position has the same input hash as the previous frame, its paint output can be reused.
+    ///
+    /// ## What to include in the hash:
+    /// - Style properties (background, border, padding, etc.)
+    /// - Text content
+    /// - Any state that affects what primitives are generated
+    ///
+    /// ## What NOT to include:
+    /// - Bounds (handled separately by the memoization system)
+    /// - Transient state that doesn't affect rendering
+    /// - Children (they have their own implicit IDs and hashes)
+    ///
+    /// Returns 0 by default, which means the element will always be repainted.
+    /// Implement this method to enable paint memoization for your element.
+    fn paint_inputs_hash(&self) -> u64 {
+        0
     }
 
     /// Configure whether primitive caching is allowed for this element.
@@ -294,6 +327,14 @@ impl<C: RenderOnce> IntoElement for Component<C> {
 #[derive(Deref, DerefMut, Clone, Default, Debug, Eq, PartialEq, Hash)]
 pub struct GlobalElementId(pub(crate) Arc<[ElementId]>);
 
+impl GlobalElementId {
+    /// Create a GlobalElementId for the root layer.
+    /// This uses a special "__root__" name that won't conflict with user-provided IDs.
+    pub fn root() -> Self {
+        Self(Arc::from([ElementId::Name("__root__".into())]))
+    }
+}
+
 impl Display for GlobalElementId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, element_id) in self.0.iter().enumerate() {
@@ -303,6 +344,76 @@ impl Display for GlobalElementId {
             write!(f, "{}", element_id)?;
         }
         Ok(())
+    }
+}
+
+/// An implicit element identifier based on position in the element tree.
+///
+/// Unlike `GlobalElementId` which requires explicit `.id()` calls, `ImplicitElementId`
+/// is automatically computed from:
+/// - Parent path hash (ancestor chain identity)
+/// - Child index (position among siblings)
+/// - Element type (Rust TypeId)
+///
+/// This enables automatic caching without requiring developers to manually annotate elements.
+/// Inspired by React's reconciliation algorithm and Chromium's display item identity.
+///
+/// ## When Position-Based Identity Works
+/// - Static children that don't reorder
+/// - Lists that only append/truncate
+/// - Most UI chrome (headers, footers, sidebars, buttons)
+///
+/// ## When Explicit Keys Are Needed
+/// For lists that reorder dynamically, use explicit `.id()` or `.key()` to maintain identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ImplicitElementId {
+    /// Hash of the ancestor chain (parent's implicit ID).
+    pub parent_path_hash: u64,
+    /// Position among siblings (0-indexed).
+    pub child_index: u32,
+    /// Type of the element.
+    pub element_type: TypeId,
+}
+
+impl ImplicitElementId {
+    /// The root implicit element ID.
+    pub const ROOT: Self = Self {
+        parent_path_hash: 0,
+        child_index: 0,
+        element_type: TypeId::of::<()>(), // Placeholder, will be set properly
+    };
+
+    /// Create a new implicit element ID for a child element.
+    pub fn child<E: 'static>(&self, index: u32) -> Self {
+        // Hash the parent's identity to create the path hash
+        let mut hasher = collections::FxHasher::default();
+        self.hash(&mut hasher);
+        let parent_path_hash = hasher.finish();
+
+        Self {
+            parent_path_hash,
+            child_index: index,
+            element_type: TypeId::of::<E>(),
+        }
+    }
+
+    /// Create a new implicit element ID with a specific type.
+    pub fn with_type(mut self, type_id: TypeId) -> Self {
+        self.element_type = type_id;
+        self
+    }
+
+    /// Compute a combined hash for use as a cache key.
+    pub fn cache_key(&self) -> u64 {
+        let mut hasher = collections::FxHasher::default();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+impl Default for ImplicitElementId {
+    fn default() -> Self {
+        Self::ROOT
     }
 }
 
@@ -483,63 +594,42 @@ impl<E: Element> Drawable<E> {
                     debug_assert_eq!(&*global_id.as_ref().unwrap().0, &*window.element_id_stack);
                 }
 
+                // Phase 20: Per-element caching
+                // Only do the tracking overhead if the element supports caching (non-zero hash)
+                let input_hash = self
+                    .element
+                    .content_hash(global_id.as_ref(), bounds, window, cx)
+                    .unwrap_or(0);
+
                 window.next_frame.dispatch_tree.set_active_node(node_id);
-                let bounds_scaled = bounds.scale(window.scale_factor());
-                let content_hash = if self.element.cache_policy().allows_caching() {
-                    self.element
-                        .content_hash(global_id.as_ref(), bounds, window, cx)
-                } else {
-                    None
-                };
-                let mut cache_key: Option<(GlobalElementId, u64, Bounds<ScaledPixels>)> = None;
-                let scope = if let (Some(global_id), Some(content_hash)) =
-                    (global_id.as_ref(), content_hash)
-                {
-                    let replay = window.lookup_primitive_cache(
-                        global_id,
-                        content_hash,
-                        bounds_scaled,
+
+                if input_hash != 0 {
+                    // Element supports caching - do full per-element tracking
+                    let computed_id = window.compute_element_id::<E>(global_id.as_ref());
+                    window.begin_element_paint(computed_id, input_hash);
+
+                    self.element.paint(
+                        global_id.as_ref(),
+                        inspector_id.as_ref(),
+                        bounds,
+                        &mut request_layout,
+                        &mut prepaint,
+                        window,
+                        cx,
                     );
-                    let key = (global_id.clone(), content_hash, bounds_scaled);
-                    cache_key = Some(key);
-                    if let Some(replay) = replay {
-                        // Cached primitives are stored with coordinates relative to their element
-                        // origin (i.e., coords - original_origin). To replay at the new position,
-                        // we add the new origin to get absolute coordinates.
-                        PaintScope::replay(replay.operations, bounds_scaled.origin)
-                    } else {
-                        PaintScope::capture(bounds_scaled.origin)
-                    }
+
+                    window.finalize_element_paint();
                 } else {
-                    PaintScope::passthrough()
-                };
-                window.push_paint_scope(scope);
-                self.element.paint(
-                    global_id.as_ref(),
-                    inspector_id.as_ref(),
-                    bounds,
-                    &mut request_layout,
-                    &mut prepaint,
-                    window,
-                    cx,
-                );
-                let scope = window.pop_paint_scope().expect("paint scope missing");
-                if let Some((global_id, content_hash, bounds)) = cache_key {
-                    if scope.mode() == PaintScopeMode::Capture {
-                        window.insert_primitive_cache(
-                            global_id,
-                            content_hash,
-                            bounds,
-                            scope.into_operations(),
-                        );
-                    } else if scope.mode() == PaintScopeMode::Replay
-                        && scope.replay_index() != scope.operations_len()
-                    {
-                        log::warn!(
-                            "replay desync: unused cached operations for {}",
-                            global_id
-                        );
-                    }
+                    // No caching - skip tracking overhead, paint directly
+                    self.element.paint(
+                        global_id.as_ref(),
+                        inspector_id.as_ref(),
+                        bounds,
+                        &mut request_layout,
+                        &mut prepaint,
+                        window,
+                        cx,
+                    );
                 }
 
                 if global_id.is_some() {

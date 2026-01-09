@@ -1,9 +1,9 @@
 use crate::{
-    AtlasTextureId, Background, BorderStyle, Bounds, BoxShadow, ColorSpace, Corners, Display,
-    Edges, Fill, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla, ImageId,
-    LinearColorStop, ObjectFit, Overflow, Pixels, Point, Rgba, SharedString, Size,
-    StrikethroughStyle, TextAlign, TextOverflow, TextRun, UnderlineStyle, Visibility, WhiteSpace,
-    Style,
+    AbsoluteLength, AtlasTextureId, Background, BorderStyle, Bounds, BoxShadow, ColorSpace,
+    Corners, Display, Edges, Fill, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla,
+    ImageId, LinearColorStop, ObjectFit, Overflow, Pixels, Point, Rems, Rgba, SharedString, Size,
+    StrikethroughStyle, Style, StyleRefinement, TextAlign, TextOverflow, TextRun, UnderlineStyle,
+    Visibility, WhiteSpace,
 };
 use seahash::SeaHasher;
 use smallvec::SmallVec;
@@ -93,6 +93,29 @@ impl ContentHash for f32 {
 impl ContentHash for Pixels {
     fn content_hash(&self) -> u64 {
         hash_f32(self.0)
+    }
+}
+
+impl ContentHash for Rems {
+    fn content_hash(&self) -> u64 {
+        hash_f32(self.0)
+    }
+}
+
+impl ContentHash for AbsoluteLength {
+    fn content_hash(&self) -> u64 {
+        let mut hasher = ContentHasher::default();
+        match self {
+            AbsoluteLength::Pixels(px) => {
+                hasher.write_u64(0);
+                hasher.write_u64(px.content_hash());
+            }
+            AbsoluteLength::Rems(rems) => {
+                hasher.write_u64(1);
+                hasher.write_u64(rems.content_hash());
+            }
+        }
+        hasher.finish()
     }
 }
 
@@ -387,6 +410,36 @@ pub fn style_content_hash(style: &Style, rem_size: Pixels) -> u64 {
     hasher.write_u64(style.corner_radii.to_pixels(rem_size).content_hash());
     hasher.write_u64(style.box_shadow.content_hash());
     hasher.write_u64(style.opacity.content_hash());
+    hasher.finish()
+}
+
+/// Hash the visual style refinement properties that affect element rendering.
+/// This is more efficient than style_content_hash because it doesn't require
+/// converting StyleRefinement to Style (which involves cloning).
+pub fn style_refinement_content_hash(style: &StyleRefinement, rem_size: Pixels) -> u64 {
+    let mut hasher = ContentHasher::default();
+    // Hash visual properties that affect painting (background, border, shadow, etc.)
+    hasher.write_u64(style.display.content_hash());
+    hasher.write_u64(style.visibility.content_hash());
+    hasher.write_u64(style.overflow.x.content_hash());
+    hasher.write_u64(style.overflow.y.content_hash());
+    hasher.write_u64(style.background.content_hash());
+    hasher.write_u64(style.border_color.content_hash());
+    hasher.write_u64(style.border_style.content_hash());
+    // Hash border_widths fields individually (EdgesRefinement doesn't impl ContentHash)
+    hasher.write_u64(style.border_widths.top.content_hash());
+    hasher.write_u64(style.border_widths.right.content_hash());
+    hasher.write_u64(style.border_widths.bottom.content_hash());
+    hasher.write_u64(style.border_widths.left.content_hash());
+    // Hash corner_radii fields individually (CornersRefinement doesn't impl ContentHash)
+    hasher.write_u64(style.corner_radii.top_left.content_hash());
+    hasher.write_u64(style.corner_radii.top_right.content_hash());
+    hasher.write_u64(style.corner_radii.bottom_right.content_hash());
+    hasher.write_u64(style.corner_radii.bottom_left.content_hash());
+    hasher.write_u64(style.box_shadow.content_hash());
+    hasher.write_u64(style.opacity.content_hash());
+    // Include rem_size since it affects computed pixel values
+    hasher.write_u64(rem_size.content_hash());
     hasher.finish()
 }
 
