@@ -204,6 +204,16 @@ impl TransformTree {
     pub fn is_empty(&self) -> bool {
         self.nodes.len() <= 1
     }
+
+    /// Pre-compute all world transforms for all nodes.
+    ///
+    /// Call this before cloning the tree to ensure all clones have
+    /// populated caches, avoiding redundant recomputation.
+    pub fn compute_all_world_transforms(&mut self) {
+        for i in 0..self.nodes.len() {
+            self.world_transform(TransformNodeId(i as u32));
+        }
+    }
 }
 
 /// A node in the clip tree.
@@ -366,6 +376,16 @@ impl ClipTree {
     pub fn is_empty(&self) -> bool {
         self.nodes.len() <= 1
     }
+
+    /// Pre-compute all world clips for all nodes.
+    ///
+    /// Call this before cloning the tree to ensure all clones have
+    /// populated caches, avoiding redundant recomputation.
+    pub fn compute_all_world_clips(&mut self, transform_tree: &mut TransformTree) {
+        for i in 0..self.nodes.len() {
+            self.world_clip(ClipNodeId(i as u32), transform_tree);
+        }
+    }
 }
 
 /// Container for all property trees used during rendering.
@@ -426,6 +446,16 @@ impl PropertyTrees {
     /// Get the world clip for a node.
     pub fn world_clip(&mut self, id: ClipNodeId) -> Bounds<Pixels> {
         self.clip_tree.world_clip(id, &mut self.transform_tree)
+    }
+
+    /// Pre-compute all world transforms and clips.
+    ///
+    /// Call this before cloning PropertyTrees for parallel rasterization
+    /// to ensure each clone has populated caches, avoiding redundant
+    /// recomputation across tiles.
+    pub fn precompute_all(&mut self) {
+        self.transform_tree.compute_all_world_transforms();
+        self.clip_tree.compute_all_world_clips(&mut self.transform_tree);
     }
 }
 

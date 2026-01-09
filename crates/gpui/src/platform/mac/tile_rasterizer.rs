@@ -33,6 +33,7 @@ use crate::scene::TileCoord;
 use crate::{Bounds, GlobalElementId, Pixels, Point, Size};
 use rayon::prelude::*;
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use super::tile_cache::TileCache;
 
@@ -45,10 +46,11 @@ pub struct TileRasterJob {
     /// The tile coordinate within the container.
     pub coord: TileCoord,
 
-    /// The display list to rasterize (cloned for thread safety).
-    pub display_list: DisplayList,
+    /// The display list to rasterize (Arc for cheap cloning across tiles).
+    pub display_list: Arc<DisplayList>,
 
     /// Property trees for transform/clip resolution (cloned for thread safety).
+    /// PropertyTrees needs to be owned because rasterize_tile takes &mut for caching.
     pub property_trees: PropertyTrees,
 
     /// Priority for scheduling (higher = more important).

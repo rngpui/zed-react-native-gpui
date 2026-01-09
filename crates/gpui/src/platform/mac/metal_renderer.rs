@@ -2223,12 +2223,12 @@ impl MetalRenderer {
             );
 
             if needs_render {
-                // Clone display list and property trees for rasterization (needed for thread safety)
-                // PropertyTrees needs mutable access for caching world transforms/clips
+                // Arc::clone is cheap (just increments reference count)
+                // PropertyTrees needs to be cloned because rasterize_tile takes &mut for caching
                 jobs.push(TileRasterJob {
                     container_id: container_id.clone(),
                     coord,
-                    display_list: display_list.clone(),
+                    display_list: Arc::clone(display_list),
                     property_trees: property_trees.clone(),
                     // All tiles in tile_sprites are visible by definition
                     priority: TilePriority::VISIBLE,

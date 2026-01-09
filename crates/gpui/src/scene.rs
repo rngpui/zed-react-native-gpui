@@ -16,7 +16,7 @@ use std::{
     iter::Peekable,
     ops::{Add, Range, Sub},
     slice,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{atomic::{AtomicU64, Ordering}, Arc},
 };
 
 #[allow(non_camel_case_types, unused)]
@@ -113,8 +113,9 @@ pub(crate) struct Scene {
     pub(crate) completed_subtree_captures: Vec<SubtreeCapture>,
     /// Display lists with property trees for tile rasterization. Keyed by scroll container element ID.
     /// These are populated during the paint phase and used by the renderer for tile rasterization.
-    /// Each entry contains (DisplayList, PropertyTrees) where PropertyTrees provide transform/clip lookups.
-    pub(crate) display_lists: FxHashMap<GlobalElementId, (DisplayList, PropertyTrees)>,
+    /// Each entry contains (Arc<DisplayList>, PropertyTrees) where PropertyTrees provide transform/clip lookups.
+    /// DisplayList is wrapped in Arc to enable cheap cloning for parallel tile rasterization.
+    pub(crate) display_lists: FxHashMap<GlobalElementId, (Arc<DisplayList>, PropertyTrees)>,
 }
 
 impl Scene {
@@ -147,24 +148,21 @@ impl Scene {
     }
 
     /// Get a display list and property trees by element ID.
-    pub fn get_display_list(&self, element_id: &GlobalElementId) -> Option<&(DisplayList, PropertyTrees)> {
+    pub fn get_display_list(&self, element_id: &GlobalElementId) -> Option<&(Arc<DisplayList>, PropertyTrees)> {
         self.display_lists.get(element_id)
-    }
-
-    /// Get a mutable reference to a display list and property trees.
-    /// Used to build spatial index before cloning for rasterization.
-    pub fn get_display_list_mut(&mut self, element_id: &GlobalElementId) -> Option<&mut (DisplayList, PropertyTrees)> {
-        self.display_lists.get_mut(element_id)
     }
 
     /// Insert a display list with property trees for a scroll container.
     ///
-    /// Builds the spatial index before inserting to ensure efficient
-    /// `items_intersecting` queries during rasterization.
-    pub fn insert_display_list(&mut self, element_id: GlobalElementId, mut display_list: DisplayList, property_trees: PropertyTrees) {
+    /// Builds the spatial index and pre-computes property tree caches before inserting
+    /// to ensure efficient rasterization queries and avoid redundant recomputation.
+    /// The DisplayList is wrapped in Arc for cheap cloning during parallel tile rasterization.
+    pub fn insert_display_list(&mut self, element_id: GlobalElementId, mut display_list: DisplayList, mut property_trees: PropertyTrees) {
         // Build spatial index for efficient tile rasterization queries
         display_list.ensure_spatial_index_built();
-        self.display_lists.insert(element_id, (display_list, property_trees));
+        // Pre-compute all world transforms and clips so clones have populated caches
+        property_trees.precompute_all();
+        self.display_lists.insert(element_id, (Arc::new(display_list), property_trees));
     }
 
     /// Begin capturing primitives for a subtree that may be cached to a texture.
