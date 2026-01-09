@@ -2896,6 +2896,15 @@ impl Window {
         stats
     }
 
+    /// Returns scene dirty statistics from the previous rendered frame.
+    ///
+    /// This shows how many primitives were freshly painted vs replayed from cache.
+    /// Useful for understanding cache effectiveness at the scene level.
+    /// When `is_fully_cached()` returns true, the renderer could potentially skip GPU uploads.
+    pub fn scene_dirty_stats(&self) -> crate::scene::SceneDirtyStats {
+        self.rendered_frame.scene.dirty_stats()
+    }
+
     fn replay_next_primitive(&mut self) -> bool {
         let Some(scope) = self.paint_scopes.last_mut() else {
             return false;

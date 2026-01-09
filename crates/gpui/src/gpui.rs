@@ -37,6 +37,7 @@ mod profiler;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod queue;
 mod scene;
+pub use scene::SceneDirtyStats;
 mod shared_string;
 mod shared_uri;
 mod style;

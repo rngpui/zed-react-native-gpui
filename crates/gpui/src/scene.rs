@@ -20,11 +20,57 @@ pub(crate) type PathVertex_ScaledPixels = PathVertex<ScaledPixels>;
 
 pub(crate) type DrawOrder = u32;
 
+/// Statistics about scene dirty state for a single frame.
+/// Used to track which parts of the scene changed and could benefit from partial GPU updates.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct SceneDirtyStats {
+    /// Total number of primitives in the scene
+    pub total_primitives: usize,
+    /// Number of primitives that were freshly painted (not from cache)
+    pub dirty_primitives: usize,
+    /// Number of quads that were freshly painted
+    pub dirty_quads: usize,
+    /// Number of paths that were freshly painted
+    pub dirty_paths: usize,
+    /// Number of shadows that were freshly painted
+    pub dirty_shadows: usize,
+    /// Number of underlines that were freshly painted
+    pub dirty_underlines: usize,
+    /// Number of monochrome sprites that were freshly painted
+    pub dirty_monochrome_sprites: usize,
+    /// Number of subpixel sprites that were freshly painted
+    pub dirty_subpixel_sprites: usize,
+    /// Number of polychrome sprites that were freshly painted
+    pub dirty_polychrome_sprites: usize,
+    /// Number of surfaces that were freshly painted
+    pub dirty_surfaces: usize,
+    /// Number of backdrop blurs that were freshly painted
+    pub dirty_backdrop_blurs: usize,
+}
+
+impl SceneDirtyStats {
+    /// Returns true if no primitives were freshly painted (all from cache)
+    pub fn is_fully_cached(&self) -> bool {
+        self.dirty_primitives == 0
+    }
+
+    /// Returns the cache hit rate as a percentage (0.0 to 100.0)
+    pub fn cache_hit_rate(&self) -> f32 {
+        if self.total_primitives == 0 {
+            100.0
+        } else {
+            let cached = self.total_primitives.saturating_sub(self.dirty_primitives);
+            (cached as f32 / self.total_primitives as f32) * 100.0
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
     generation: u64,
     dirty_ranges: Vec<Range<usize>>,
+    dirty_stats: SceneDirtyStats,
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<DrawOrder>,
     pub(crate) shadows: Vec<Shadow>,
@@ -48,6 +94,7 @@ impl Scene {
         self.paint_operations.clear();
         self.generation = self.generation.wrapping_add(1);
         self.dirty_ranges.clear();
+        self.dirty_stats = SceneDirtyStats::default();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
         self.paths.clear();
@@ -118,6 +165,7 @@ impl Scene {
     ///
     /// Note: This method DOES add to paint_operations because SubtreeCache
     /// needs complete paint_operations to replay entire subtrees correctly.
+    /// These primitives are from PrimitiveCache, so they count as cached (not dirty).
     pub fn insert_primitive_with_offset(
         &mut self,
         primitive: &Primitive,
@@ -136,6 +184,9 @@ impl Scene {
             .last()
             .copied()
             .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
+
+        // Track total primitives (but not dirty - these are from PrimitiveCache)
+        self.dirty_stats.total_primitives += 1;
 
         // Clone with offset and content_mask applied in one pass
         // Also add to paint_operations for SubtreeCache replay support
@@ -272,47 +323,81 @@ impl Scene {
             .last()
             .copied()
             .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
+
+        // Track total and dirty primitives by type
+        self.dirty_stats.total_primitives += 1;
+        if !from_cache {
+            self.dirty_stats.dirty_primitives += 1;
+        }
+
         match &mut primitive {
             Primitive::Shadow(shadow, transform) => {
                 shadow.order = order;
+                if !from_cache {
+                    self.dirty_stats.dirty_shadows += 1;
+                }
                 self.shadows.push(shadow.clone());
                 self.shadow_transforms.push(*transform);
             }
             Primitive::Quad(quad, transform) => {
                 quad.order = order;
+                if !from_cache {
+                    self.dirty_stats.dirty_quads += 1;
+                }
                 self.quads.push(quad.clone());
                 self.quad_transforms.push(*transform);
             }
             Primitive::BackdropBlur(blur, transform) => {
                 blur.order = order;
+                if !from_cache {
+                    self.dirty_stats.dirty_backdrop_blurs += 1;
+                }
                 self.backdrop_blurs.push(blur.clone());
                 self.backdrop_blur_transforms.push(*transform);
             }
             Primitive::Path(path) => {
                 path.order = order;
                 path.id = PathId(self.paths.len());
+                if !from_cache {
+                    self.dirty_stats.dirty_paths += 1;
+                }
                 self.paths.push(path.clone());
             }
             Primitive::Underline(underline, transform) => {
                 underline.order = order;
+                if !from_cache {
+                    self.dirty_stats.dirty_underlines += 1;
+                }
                 self.underlines.push(underline.clone());
                 self.underline_transforms.push(*transform);
             }
             Primitive::MonochromeSprite(sprite) => {
                 sprite.order = order;
+                if !from_cache {
+                    self.dirty_stats.dirty_monochrome_sprites += 1;
+                }
                 self.monochrome_sprites.push(sprite.clone());
             }
             Primitive::SubpixelSprite(sprite) => {
                 sprite.order = order;
+                if !from_cache {
+                    self.dirty_stats.dirty_subpixel_sprites += 1;
+                }
                 self.subpixel_sprites.push(sprite.clone());
             }
             Primitive::PolychromeSprite(sprite, transform) => {
                 sprite.order = order;
+                if !from_cache {
+                    self.dirty_stats.dirty_polychrome_sprites += 1;
+                }
                 self.polychrome_sprites.push(sprite.clone());
                 self.polychrome_sprite_transforms.push(*transform);
             }
             Primitive::Surface(surface) => {
                 surface.order = order;
+                if !from_cache {
+                    self.dirty_stats.dirty_surfaces += 1;
+                }
                 self.surfaces.push(surface.clone());
             }
         }
@@ -470,6 +555,12 @@ impl Scene {
 
     pub fn dirty_batch_ranges(&self) -> &[Range<usize>] {
         &self.dirty_ranges
+    }
+
+    /// Returns statistics about which primitives were freshly painted vs from cache.
+    /// Useful for determining whether GPU buffer updates can be skipped or minimized.
+    pub fn dirty_stats(&self) -> SceneDirtyStats {
+        self.dirty_stats
     }
 
     #[cfg_attr(

@@ -27,10 +27,149 @@ use metal::{
 use objc::{self, msg_send, sel, sel_impl};
 use parking_lot::Mutex;
 
-use std::{cell::Cell, ffi::c_void, mem, ptr, sync::Arc};
+use std::{cell::Cell, ffi::c_void, mem, ptr, slice, sync::Arc};
 
 // Exported to metal
 pub(crate) type PointF = crate::Point<f32>;
+
+/// Tracks which typed arrays changed from the previous frame.
+/// Used for partial GPU uploads - unchanged arrays can skip memcpy.
+#[derive(Default, Clone, Copy)]
+struct ArrayDirtyFlags {
+    quads: bool,
+    shadows: bool,
+    underlines: bool,
+    paths: bool,
+    backdrop_blurs: bool,
+    monochrome_sprites: bool,
+    polychrome_sprites: bool,
+    surfaces: bool,
+}
+
+impl ArrayDirtyFlags {
+    fn all_dirty() -> Self {
+        Self {
+            quads: true,
+            shadows: true,
+            underlines: true,
+            paths: true,
+            backdrop_blurs: true,
+            monochrome_sprites: true,
+            polychrome_sprites: true,
+            surfaces: true,
+        }
+    }
+}
+
+/// Stores previous frame's typed arrays for comparison.
+/// Enables skipping GPU uploads for unchanged arrays.
+#[derive(Default)]
+struct PreviousFrameArrays {
+    quads: Vec<Quad>,
+    quad_transforms: Vec<TransformationMatrix>,
+    shadows: Vec<Shadow>,
+    shadow_transforms: Vec<TransformationMatrix>,
+    underlines: Vec<Underline>,
+    underline_transforms: Vec<TransformationMatrix>,
+    paths_len: usize, // Paths contain Vecs, so we just compare length
+    backdrop_blurs: Vec<BackdropBlur>,
+    backdrop_blur_transforms: Vec<TransformationMatrix>,
+    monochrome_sprites: Vec<MonochromeSprite>,
+    polychrome_sprites: Vec<PolychromeSprite>,
+    polychrome_sprite_transforms: Vec<TransformationMatrix>,
+    surfaces_len: usize, // Surfaces contain CVPixelBuffer, not Clone, so we compare length
+}
+
+impl PreviousFrameArrays {
+    /// Compare typed arrays with current scene and return dirty flags.
+    /// Uses byte-wise comparison for repr(C) structs.
+    fn compare_with_scene(&self, scene: &Scene) -> ArrayDirtyFlags {
+        ArrayDirtyFlags {
+            quads: !Self::slices_equal(&self.quads, &scene.quads)
+                || !Self::slices_equal(&self.quad_transforms, &scene.quad_transforms),
+            shadows: !Self::slices_equal(&self.shadows, &scene.shadows)
+                || !Self::slices_equal(&self.shadow_transforms, &scene.shadow_transforms),
+            underlines: !Self::slices_equal(&self.underlines, &scene.underlines)
+                || !Self::slices_equal(&self.underline_transforms, &scene.underline_transforms),
+            paths: self.paths_len != scene.paths.len(), // Conservative: any length change = dirty
+            backdrop_blurs: !Self::slices_equal(&self.backdrop_blurs, &scene.backdrop_blurs)
+                || !Self::slices_equal(
+                    &self.backdrop_blur_transforms,
+                    &scene.backdrop_blur_transforms,
+                ),
+            monochrome_sprites: !Self::slices_equal(
+                &self.monochrome_sprites,
+                &scene.monochrome_sprites,
+            ),
+            polychrome_sprites: !Self::slices_equal(
+                &self.polychrome_sprites,
+                &scene.polychrome_sprites,
+            ) || !Self::slices_equal(
+                &self.polychrome_sprite_transforms,
+                &scene.polychrome_sprite_transforms,
+            ),
+            surfaces: self.surfaces_len != scene.surfaces.len(), // Conservative: CVPixelBuffer not comparable
+        }
+    }
+
+    /// Byte-wise comparison of two slices of repr(C) structs.
+    /// Returns true if slices are identical.
+    fn slices_equal<T>(a: &[T], b: &[T]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        if a.is_empty() {
+            return true;
+        }
+        let bytes_a = unsafe {
+            slice::from_raw_parts(a.as_ptr() as *const u8, a.len() * mem::size_of::<T>())
+        };
+        let bytes_b = unsafe {
+            slice::from_raw_parts(b.as_ptr() as *const u8, b.len() * mem::size_of::<T>())
+        };
+        bytes_a == bytes_b
+    }
+
+    /// Clone arrays from the scene for next frame comparison.
+    fn update_from_scene(&mut self, scene: &Scene) {
+        self.quads.clear();
+        self.quads.extend_from_slice(&scene.quads);
+        self.quad_transforms.clear();
+        self.quad_transforms.extend_from_slice(&scene.quad_transforms);
+
+        self.shadows.clear();
+        self.shadows.extend_from_slice(&scene.shadows);
+        self.shadow_transforms.clear();
+        self.shadow_transforms.extend_from_slice(&scene.shadow_transforms);
+
+        self.underlines.clear();
+        self.underlines.extend_from_slice(&scene.underlines);
+        self.underline_transforms.clear();
+        self.underline_transforms
+            .extend_from_slice(&scene.underline_transforms);
+
+        self.paths_len = scene.paths.len();
+
+        self.backdrop_blurs.clear();
+        self.backdrop_blurs.extend_from_slice(&scene.backdrop_blurs);
+        self.backdrop_blur_transforms.clear();
+        self.backdrop_blur_transforms
+            .extend_from_slice(&scene.backdrop_blur_transforms);
+
+        self.monochrome_sprites.clear();
+        self.monochrome_sprites
+            .extend_from_slice(&scene.monochrome_sprites);
+
+        self.polychrome_sprites.clear();
+        self.polychrome_sprites
+            .extend_from_slice(&scene.polychrome_sprites);
+        self.polychrome_sprite_transforms.clear();
+        self.polychrome_sprite_transforms
+            .extend_from_slice(&scene.polychrome_sprite_transforms);
+
+        self.surfaces_len = scene.surfaces.len();
+    }
+}
 
 #[cfg(not(feature = "runtime_shaders"))]
 const SHADERS_METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shaders.metallib"));
@@ -104,6 +243,10 @@ pub(crate) struct MetalRenderer {
     last_scene_len: usize,
     #[allow(clippy::arc_with_non_send_sync)]
     cached_instance_buffer: Arc<Mutex<Option<InstanceBuffer>>>,
+    /// Previous frame's typed arrays for per-array dirty tracking.
+    previous_frame_arrays: PreviousFrameArrays,
+    /// Per-array dirty flags computed by comparing with previous frame.
+    array_dirty_flags: ArrayDirtyFlags,
     device: metal::Device,
     layer: metal::MetalLayer,
     presents_with_transaction: bool,
@@ -291,6 +434,8 @@ impl MetalRenderer {
             incremental_draw: false,
             last_scene_len: 0,
             cached_instance_buffer: Arc::new(Mutex::new(None)),
+            previous_frame_arrays: PreviousFrameArrays::default(),
+            array_dirty_flags: ArrayDirtyFlags::all_dirty(),
             device,
             layer,
             presents_with_transaction: false,
@@ -651,15 +796,41 @@ impl MetalRenderer {
     }
 
     /// Incremental draw; reuses instance buffers when nothing changed.
+    ///
+    /// This method compares typed arrays with the previous frame to determine
+    /// if buffer reuse is possible. Because batches are interleaved in the
+    /// instance buffer, we can only skip writes when ALL arrays are unchanged.
+    /// If any array differs, the buffer layout changes and we must rewrite all.
     pub fn draw_incremental(
         &mut self,
         scene: &Scene,
         dirty_ranges: &[std::ops::Range<usize>],
     ) {
+        // Compare current scene's typed arrays with previous frame.
+        // We need ALL arrays to be unchanged to safely reuse the buffer.
+        self.array_dirty_flags = self.previous_frame_arrays.compare_with_scene(scene);
+
+        // Check if ALL arrays are unchanged (can reuse entire buffer).
+        // Due to interleaved buffer layout, we can't do partial updates.
+        let all_arrays_clean = !self.array_dirty_flags.quads
+            && !self.array_dirty_flags.shadows
+            && !self.array_dirty_flags.underlines
+            && !self.array_dirty_flags.paths
+            && !self.array_dirty_flags.backdrop_blurs
+            && !self.array_dirty_flags.monochrome_sprites
+            && !self.array_dirty_flags.polychrome_sprites
+            && !self.array_dirty_flags.surfaces;
+
         self.pending_dirty_ranges.clear();
-        self.pending_dirty_ranges.extend_from_slice(dirty_ranges);
+        // If all arrays are byte-identical to previous frame, we can skip all uploads
+        if !all_arrays_clean {
+            self.pending_dirty_ranges.extend_from_slice(dirty_ranges);
+        }
         self.incremental_draw = true;
         self.draw(scene);
+
+        // Update previous frame arrays for next frame comparison.
+        self.previous_frame_arrays.update_from_scene(scene);
     }
 
     fn draw_primitives(
