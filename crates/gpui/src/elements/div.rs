@@ -1521,18 +1521,12 @@ impl Div {
         let use_tiled_rendering = self.interactivity.is_tiled_scroll_container(bounds);
         let tiled_data = if use_tiled_rendering {
             // Extract data from interactivity before the closure captures self
-            let scroll_offset_option = self
+            let scroll_offset = self
                 .interactivity
                 .scroll_offset
                 .as_ref()
-                .map(|r| *r.borrow());
-            log::trace!(
-                "[TILE-SETUP] scroll_offset_option={:?}, content_size=({}, {})",
-                scroll_offset_option,
-                self.interactivity.content_size.width.0,
-                self.interactivity.content_size.height.0
-            );
-            let scroll_offset = scroll_offset_option.unwrap_or_default();
+                .map(|r| *r.borrow())
+                .unwrap_or_default();
             let content_size = self.interactivity.content_size;
             let global_id_owned = global_id.cloned();
             Some((scroll_offset, content_size, global_id_owned))
@@ -1681,17 +1675,10 @@ impl Div {
                     x: bounds.origin.x + scroll_offset.x,
                     y: bounds.origin.y + scroll_offset.y,
                 };
-                let item_count = window.populate_display_list_from_paint_range(
+                window.populate_display_list_from_paint_range(
                     global_id,
                     primitive_range.clone(),
                     content_origin,
-                );
-
-                log::trace!(
-                    "Display list for {:?}: {} items, generation {}",
-                    global_id,
-                    item_count,
-                    generation
                 );
 
                 // Move the display list from DisplayListManager to Scene for renderer access
@@ -1710,11 +1697,16 @@ impl Div {
                 window.next_frame.scene.insert_display_list(global_id.clone(), display_list);
             }
 
-            // Still need to paint children for immediate rendering (non-tiled path)
-            // But since we're in the tiled path, children will be rendered from the display list
+            // Children still need to go through paint lifecycle for hit testing, mouse listeners,
+            // etc. to work correctly. However, their visual primitives would cause double rendering
+            // since we're already rendering via tiles. We record the scene position and truncate
+            // after painting to remove the duplicate primitives.
+            let paint_start = window.next_frame.scene.len();
             for child in children.iter_mut() {
                 child.paint(window, cx);
             }
+            // Truncate scene to remove child primitives - they'll be rendered via tiles
+            window.next_frame.scene.truncate_paint_operations(paint_start);
         }
 
         // Calculate visible tile range based on scroll offset and viewport
@@ -1725,13 +1717,6 @@ impl Div {
         // -scroll_offset is the content position at viewport top-left
         let content_top_left_x = -scroll_offset.x.0;
         let content_top_left_y = -scroll_offset.y.0;
-
-        log::trace!(
-            "[TILE-DIV] scroll_offset=({}, {}), content_top_left=({}, {}), tile_size_px={}",
-            scroll_offset.x.0, scroll_offset.y.0,
-            content_top_left_x, content_top_left_y,
-            tile_size_px
-        );
 
         let min_tile = TileCoord {
             x: (content_top_left_x / tile_size_px).floor() as i32,
@@ -2380,25 +2365,16 @@ impl Interactivity {
 
                 if let Some(scroll_handle) = self.tracked_scroll_handle.as_ref() {
                     self.scroll_offset = Some(scroll_handle.0.borrow().offset.clone());
-                    if let Some(ref rc) = self.scroll_offset {
-                        log::trace!("[PREPAINT-SCROLL] From scroll_handle, ptr={:p}, val=({}, {})",
-                            std::rc::Rc::as_ptr(rc), rc.borrow().x.0, rc.borrow().y.0);
-                    }
                 } else if (self.base_style.overflow.x == Some(Overflow::Scroll)
                     || self.base_style.overflow.y == Some(Overflow::Scroll))
                     && let Some(element_state) = element_state.as_mut()
                 {
-                    let was_some = element_state.scroll_offset.is_some();
                     self.scroll_offset = Some(
                         element_state
                             .scroll_offset
                             .get_or_insert_with(Rc::default)
                             .clone(),
                     );
-                    if let Some(ref rc) = self.scroll_offset {
-                        log::trace!("[PREPAINT-SCROLL] From element_state (was_some={}), id={:?}, ptr={:p}, val=({}, {})",
-                            was_some, global_id, std::rc::Rc::as_ptr(rc), rc.borrow().x.0, rc.borrow().y.0);
-                    }
                 }
 
                 let mut style = self.compute_style_internal(None, element_state.as_mut(), window, cx);
@@ -3282,8 +3258,6 @@ impl Interactivity {
         _cx: &mut App,
     ) {
         if let Some(scroll_offset) = self.scroll_offset.clone() {
-            log::trace!("[SCROLL-REGISTER] Registering scroll listener, current offset=({}, {}), ptr={:p}",
-                scroll_offset.borrow().x.0, scroll_offset.borrow().y.0, std::rc::Rc::as_ptr(&scroll_offset));
             let overflow = style.overflow;
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
             let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
@@ -3291,14 +3265,7 @@ impl Interactivity {
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-                let should_handle = hitbox.should_handle_scroll(window);
-                log::trace!("[SCROLL-RAW] phase={:?}, should_handle={}, delta=({}, {})",
-                    phase, should_handle,
-                    event.delta.pixel_delta(line_height).x.0, event.delta.pixel_delta(line_height).y.0);
-                if phase == DispatchPhase::Bubble && should_handle {
-                    log::trace!("[SCROLL-EVENT] Got scroll event, delta=({}, {}), ptr={:p}",
-                        event.delta.pixel_delta(line_height).x.0, event.delta.pixel_delta(line_height).y.0,
-                        std::rc::Rc::as_ptr(&scroll_offset));
+                if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
                     let mut scroll_offset = scroll_offset.borrow_mut();
                     let old_scroll_offset = *scroll_offset;
                     let delta = event.delta.pixel_delta(line_height);
@@ -3328,11 +3295,6 @@ impl Interactivity {
                     }
                     scroll_offset.y += delta_y;
                     scroll_offset.x += delta_x;
-                    log::trace!("[SCROLL-MODIFY] overflow=({:?},{:?}), delta=({}, {}), old=({}, {}), new=({}, {})",
-                        overflow.x, overflow.y,
-                        delta_x.0, delta_y.0,
-                        old_scroll_offset.x.0, old_scroll_offset.y.0,
-                        scroll_offset.x.0, scroll_offset.y.0);
                     if *scroll_offset != old_scroll_offset {
                         cx.notify(current_view);
                     }

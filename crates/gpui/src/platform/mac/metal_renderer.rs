@@ -2188,9 +2188,6 @@ impl MetalRenderer {
         use crate::platform::mac::tile_cache::TileCache;
 
         let tile_sprites = &scene.tile_sprites;
-        eprintln!("[TILE] rasterize_tiles_from_display_lists: {} tile sprites, {} display lists",
-            tile_sprites.len(), scene.display_lists.len());
-
         if tile_sprites.is_empty() {
             return;
         }
@@ -2206,8 +2203,6 @@ impl MetalRenderer {
 
             // Look up the display list for this container
             let Some(display_list) = scene.get_display_list(container_id) else {
-                eprintln!("[TILE] No display list for container {:?}, skipping tile {:?}",
-                    container_id, coord);
                 continue;
             };
 
@@ -2221,20 +2216,10 @@ impl MetalRenderer {
                 content_generation,
             );
 
-            eprintln!("[TILE] Tile {:?} needs_render={}, display_list has {} items",
-                coord, needs_render, display_list.items.len());
-
             if needs_render {
                 // Rasterize the display list to this tile
                 let tile_bounds = TileCache::tile_content_bounds(coord, scale_factor);
                 let raster_result = display_list.rasterize_tile(tile_bounds, scale_factor);
-
-                eprintln!(
-                    "[TILE] Rasterizing tile {:?}: {} quads, {} shadows",
-                    coord,
-                    raster_result.quads.len(),
-                    raster_result.shadows.len(),
-                );
 
                 // Render to the tile texture
                 self.rasterize_display_list_tile(container_id, coord, &raster_result);
@@ -2867,6 +2852,7 @@ impl MetalRenderer {
     }
 
     /// Access to the tile cache for registering scroll containers and acquiring tiles.
+    #[allow(dead_code)]
     pub fn tile_cache_mut(&mut self) -> &mut TileCache {
         &mut self.tile_cache
     }

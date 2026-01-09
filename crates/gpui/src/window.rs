@@ -2948,6 +2948,7 @@ impl Window {
     /// Display lists are used for browser-like tiled rendering of scroll containers.
     /// Elements paint to a display list instead of directly to the scene, and the
     /// display list is then rasterized to tiles on demand.
+    #[allow(dead_code)]
     pub(crate) fn display_list_for(
         &mut self,
         element_id: &GlobalElementId,
@@ -3062,6 +3063,7 @@ impl Window {
     }
 
     /// Calculate visible tile range for a scroll container.
+    #[allow(dead_code)]
     pub(crate) fn visible_tile_range(
         &self,
         scroll_offset: Point<Pixels>,
@@ -3092,6 +3094,7 @@ impl Window {
     }
 
     /// Calculate content-space bounds for a tile (in logical pixels).
+    #[allow(dead_code)]
     pub(crate) fn tile_content_bounds(
         &self,
         coord: crate::scene::TileCoord,
@@ -3111,6 +3114,7 @@ impl Window {
     }
 
     /// Acquire a tile for rendering. Returns true if the tile needs to be rendered.
+    #[allow(dead_code)]
     pub(crate) fn acquire_tile(
         &mut self,
         container_id: &GlobalElementId,
@@ -3122,6 +3126,7 @@ impl Window {
     }
 
     /// Begin capturing primitives for a specific tile.
+    #[allow(dead_code)]
     pub(crate) fn begin_tile_capture(
         &mut self,
         _container_id: GlobalElementId,
@@ -3133,12 +3138,14 @@ impl Window {
     }
 
     /// End tile capture.
+    #[allow(dead_code)]
     pub(crate) fn end_tile_capture(&mut self) {
         // TODO: Finalize tile capture
         // For now, this is a no-op
     }
 
     /// Insert a tile sprite primitive for compositing.
+    #[allow(dead_code)]
     pub(crate) fn insert_tile_sprite(
         &mut self,
         container_id: GlobalElementId,
@@ -5001,15 +5008,6 @@ impl Window {
         if hit_test != self.mouse_hit_test {
             self.mouse_hit_test = hit_test;
             self.reset_cursor_style(cx);
-        }
-
-        // Debug logging for scroll events
-        if event.is::<crate::ScrollWheelEvent>() {
-            log::trace!(
-                "[DISPATCH-SCROLL] Got ScrollWheelEvent, {} mouse_listeners, {} hitbox ids",
-                self.rendered_frame.mouse_listeners.len(),
-                self.mouse_hit_test.ids.len()
-            );
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]

@@ -1,3 +1,7 @@
+// Many methods in this module are infrastructure for future use.
+// The tile cache architecture is incrementally being integrated.
+#![allow(dead_code)]
+
 //! Tiled Texture Cache for Scroll Container Rendering
 //!
 //! This module provides infrastructure for caching scroll container content as fixed-size tiles,

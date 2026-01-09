@@ -549,6 +549,7 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
 
     /// Get or create a tile. Returns true if the tile needs rendering.
+    #[allow(dead_code)]
     fn acquire_tile(
         &self,
         _container_id: &GlobalElementId,

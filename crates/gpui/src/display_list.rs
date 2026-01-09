@@ -1,3 +1,7 @@
+// Many methods in this module are infrastructure for future use.
+// The display list architecture is incrementally being integrated.
+#![allow(dead_code)]
+
 //! Display list for deferred rendering.
 //!
 //! This module implements a browser-like display list architecture that separates
