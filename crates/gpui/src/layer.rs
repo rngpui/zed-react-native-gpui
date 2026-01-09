@@ -22,7 +22,8 @@
 use crate::display_list::DisplayList;
 use crate::property_trees::PropertyTrees;
 use crate::scene::TransformationMatrix;
-use crate::{Bounds, GlobalElementId, Pixels, Point, Size};
+use crate::window::{AnyMouseListener, Hitbox};
+use crate::{Bounds, ContentMask, GlobalElementId, HitboxBehavior, HitboxId, Pixels, Point, Size};
 use collections::FxHashMap;
 
 /// Unique identifier for a layer.
@@ -47,6 +48,75 @@ pub enum LayerReason {
     Opacity,
     /// Explicit will-change hint.
     WillChange,
+}
+
+/// A hitbox stored in layer-local coordinates for retention across frames.
+///
+/// When a layer's content is unchanged (no repaint needed), we skip painting
+/// children entirely and instead replay these retained hitboxes. The coordinates
+/// are stored relative to the layer's content (0,0), then transformed to window
+/// coordinates using the current scroll offset during replay.
+#[derive(Clone, Debug)]
+pub struct RetainedHitbox {
+    /// The original hitbox ID (preserved so existing mouse listeners work).
+    pub id: HitboxId,
+    /// Bounds in layer-local (content) coordinates.
+    /// To get window coordinates: origin + layer.content_origin
+    pub bounds: Bounds<Pixels>,
+    /// The content mask when the hitbox was created (in layer-local coordinates).
+    pub content_mask: ContentMask<Pixels>,
+    /// Hitbox behavior flags.
+    pub behavior: HitboxBehavior,
+}
+
+impl RetainedHitbox {
+    /// Create a retained hitbox from a window-space hitbox and layer content origin.
+    pub fn from_hitbox(hitbox: &Hitbox, content_origin: Point<Pixels>) -> Self {
+        Self {
+            id: hitbox.id,
+            bounds: Bounds {
+                origin: Point {
+                    x: hitbox.bounds.origin.x - content_origin.x,
+                    y: hitbox.bounds.origin.y - content_origin.y,
+                },
+                size: hitbox.bounds.size,
+            },
+            content_mask: ContentMask {
+                bounds: Bounds {
+                    origin: Point {
+                        x: hitbox.content_mask.bounds.origin.x - content_origin.x,
+                        y: hitbox.content_mask.bounds.origin.y - content_origin.y,
+                    },
+                    size: hitbox.content_mask.bounds.size,
+                },
+            },
+            behavior: hitbox.behavior,
+        }
+    }
+
+    /// Convert back to a window-space Hitbox using the current content origin.
+    pub fn to_hitbox(&self, content_origin: Point<Pixels>) -> Hitbox {
+        Hitbox {
+            id: self.id,
+            bounds: Bounds {
+                origin: Point {
+                    x: self.bounds.origin.x + content_origin.x,
+                    y: self.bounds.origin.y + content_origin.y,
+                },
+                size: self.bounds.size,
+            },
+            content_mask: ContentMask {
+                bounds: Bounds {
+                    origin: Point {
+                        x: self.content_mask.bounds.origin.x + content_origin.x,
+                        y: self.content_mask.bounds.origin.y + content_origin.y,
+                    },
+                    size: self.content_mask.bounds.size,
+                },
+            },
+            behavior: self.behavior,
+        }
+    }
 }
 
 /// A compositing layer with its own DisplayList.
@@ -112,6 +182,25 @@ pub struct Layer {
 
     /// Transform/opacity/scroll changed, re-composite.
     pub needs_composite: bool,
+
+    /// Retained hitboxes from previous paint (in layer-local coordinates).
+    /// These are captured during initial paint and replayed during reuse
+    /// without needing to run paint() on children again.
+    pub retained_hitboxes: Vec<RetainedHitbox>,
+
+    /// Retained mouse listeners from previous paint.
+    /// These are moved from Frame during initial paint and moved back
+    /// during reuse. Unlike hitboxes (which are cloneable data), listeners
+    /// are moved because they're Box<dyn FnMut>.
+    pub retained_mouse_listeners: Vec<Option<AnyMouseListener>>,
+
+    /// Index range of hitboxes in the frame that belong to this layer.
+    /// Used during capture to identify which hitboxes to retain.
+    pub(crate) hitbox_range: Option<std::ops::Range<usize>>,
+
+    /// Index range of mouse listeners in the frame that belong to this layer.
+    /// Used during capture to identify which listeners to retain.
+    pub(crate) listener_range: Option<std::ops::Range<usize>>,
 }
 
 impl Layer {
@@ -138,12 +227,29 @@ impl Layer {
             needs_repaint: true,
             needs_rasterize: false,
             needs_composite: false,
+            retained_hitboxes: Vec::new(),
+            retained_mouse_listeners: Vec::new(),
+            hitbox_range: None,
+            listener_range: None,
         }
     }
 
     /// Create the root layer.
     fn root() -> Self {
         Self::new(LayerId::ROOT, None, LayerReason::Root)
+    }
+
+    /// Clear retained hitboxes and listeners (used when content changes).
+    pub fn clear_retained(&mut self) {
+        self.retained_hitboxes.clear();
+        self.retained_mouse_listeners.clear();
+        self.hitbox_range = None;
+        self.listener_range = None;
+    }
+
+    /// Check if this layer has retained hitboxes available for reuse.
+    pub fn has_retained_hitboxes(&self) -> bool {
+        !self.retained_hitboxes.is_empty()
     }
 }
 
@@ -488,5 +594,149 @@ mod tests {
         assert!(!tree.is_inside_layer());
         // And tree structure (children) is cleared
         assert!(tree.root_layer().children.is_empty());
+    }
+
+    #[test]
+    fn test_retained_hitbox_coordinate_transform() {
+        use crate::px;
+
+        // Test that coordinate transforms work correctly
+        // We create a retained hitbox directly with layer-local coordinates
+        // and verify to_hitbox transforms them correctly
+        let retained = RetainedHitbox {
+            id: HitboxId::default(), // Uses default ID
+            bounds: Bounds {
+                origin: Point {
+                    x: px(50.0),  // layer-local
+                    y: px(100.0), // layer-local
+                },
+                size: Size {
+                    width: px(50.0),
+                    height: px(30.0),
+                },
+            },
+            content_mask: ContentMask {
+                bounds: Bounds {
+                    origin: Point {
+                        x: px(-50.0),  // relative to content origin
+                        y: px(-100.0),
+                    },
+                    size: Size {
+                        width: px(1000.0),
+                        height: px(800.0),
+                    },
+                },
+            },
+            behavior: HitboxBehavior::Normal,
+        };
+
+        // Content origin at (50, 100)
+        let content_origin = Point {
+            x: px(50.0),
+            y: px(100.0),
+        };
+
+        // Convert to window coordinates
+        let restored = retained.to_hitbox(content_origin);
+
+        // Window coordinates = layer-local + content_origin
+        assert_eq!(restored.bounds.origin.x.0, 100.0); // 50 + 50
+        assert_eq!(restored.bounds.origin.y.0, 200.0); // 100 + 100
+        assert_eq!(restored.bounds.size.width.0, 50.0);
+        assert_eq!(restored.bounds.size.height.0, 30.0);
+    }
+
+    #[test]
+    fn test_retained_hitbox_with_scroll() {
+        use crate::px;
+
+        // Create a retained hitbox in layer-local (content) coordinates
+        // This represents a hitbox at (100, 500) in content space
+        let retained = RetainedHitbox {
+            id: HitboxId::default(),
+            bounds: Bounds {
+                origin: Point {
+                    x: px(100.0),
+                    y: px(500.0),
+                },
+                size: Size {
+                    width: px(100.0),
+                    height: px(50.0),
+                },
+            },
+            content_mask: ContentMask {
+                bounds: Bounds::default(),
+            },
+            behavior: HitboxBehavior::Normal,
+        };
+
+        // Initial content origin (no scroll)
+        let initial_content_origin = Point {
+            x: px(0.0),
+            y: px(0.0),
+        };
+
+        // With no scroll, window position = content position
+        let restored = retained.to_hitbox(initial_content_origin);
+        assert_eq!(restored.bounds.origin.x.0, 100.0);
+        assert_eq!(restored.bounds.origin.y.0, 500.0);
+
+        // Now scroll down by 200px (scroll_offset becomes (0, -200))
+        // Content origin = bounds.origin + scroll_offset = (0, -200)
+        let scrolled_content_origin = Point {
+            x: px(0.0),
+            y: px(-200.0),
+        };
+
+        // Restore hitbox with new scroll position
+        let restored_scrolled = retained.to_hitbox(scrolled_content_origin);
+
+        // The hitbox now appears at y = 500 + (-200) = 300 in window
+        assert_eq!(restored_scrolled.bounds.origin.x.0, 100.0);
+        assert_eq!(restored_scrolled.bounds.origin.y.0, 300.0); // Scrolled up by 200
+    }
+
+    #[test]
+    fn test_layer_retained_hitboxes_storage() {
+        use crate::px;
+
+        let mut tree = LayerTree::new();
+
+        let element_id = test_element_id(1);
+        let layer_id = tree.push_layer(element_id, LayerReason::ScrollContainer);
+
+        // Initially no retained hitboxes
+        assert!(!tree.get(layer_id).unwrap().has_retained_hitboxes());
+
+        // Manually add some retained hitboxes
+        {
+            let layer = tree.get_mut(layer_id).unwrap();
+            layer.retained_hitboxes.push(RetainedHitbox {
+                id: HitboxId::default(),
+                bounds: Bounds {
+                    origin: Point {
+                        x: px(0.0),
+                        y: px(0.0),
+                    },
+                    size: Size {
+                        width: px(100.0),
+                        height: px(50.0),
+                    },
+                },
+                content_mask: ContentMask {
+                    bounds: Bounds::default(),
+                },
+                behavior: HitboxBehavior::Normal,
+            });
+        }
+
+        // Now has retained hitboxes
+        assert!(tree.get(layer_id).unwrap().has_retained_hitboxes());
+
+        // Clear retained
+        tree.get_mut(layer_id).unwrap().clear_retained();
+
+        // No longer has retained hitboxes
+        assert!(!tree.get(layer_id).unwrap().has_retained_hitboxes());
     }
 }

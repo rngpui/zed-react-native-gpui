@@ -1651,6 +1651,13 @@ impl Div {
             needs_repaint, // content_changed if needs_repaint
         );
 
+        // Check if we have retained hitboxes for reuse
+        let has_retained = window
+            .layer_tree()
+            .get(layer_id)
+            .map(|l| l.has_retained_hitboxes())
+            .unwrap_or(false);
+
         if needs_repaint {
             // Clear the layer's display list and rebuild
             window
@@ -1661,6 +1668,16 @@ impl Div {
                 .as_mut()
                 .expect("Non-root layer should have display list")
                 .clear();
+
+            // Also clear retained hitboxes since we're repainting
+            window
+                .layer_tree_mut()
+                .get_mut(layer_id)
+                .unwrap()
+                .clear_retained();
+
+            // Begin capturing hitboxes and listeners for this layer
+            window.begin_layer_hitbox_capture(layer_id);
 
             // CRITICAL: For tiled rendering, paint ALL content, not just visible viewport.
             // Push a full-content mask so all content is rendered.
@@ -1685,15 +1702,25 @@ impl Div {
             // Pop the full-content mask
             window.content_mask_stack.pop();
 
+            // Capture hitboxes and listeners for future reuse
+            window.capture_layer_hitboxes(layer_id);
+
             // Mark layer as no longer needing repaint, but needs rasterization
             let layer = window.layer_tree_mut().get_mut(layer_id).unwrap();
             layer.needs_repaint = false;
             layer.needs_rasterize = true;
+        } else if has_retained {
+            // Layer content is valid AND we have retained hitboxes - skip paint entirely!
+            // This is the key optimization: O(1) instead of O(N) child elements.
+            window.replay_retained_hitboxes(layer_id);
         } else {
-            // Layer content is valid - reuse existing DisplayList.
+            // Layer content is valid but no retained hitboxes (first frame after content stabilized).
             // Still need to run paint for hit testing, event handlers, but primitives
             // should NOT go to the layer's DisplayList (would cause duplicates).
             //
+            // Begin capture so we can retain for next frame.
+            window.begin_layer_hitbox_capture(layer_id);
+
             // Pop the layer from stack so is_inside_layer() returns false during paint.
             // Primitives will go to Scene, which we truncate after.
             window.pop_layer();
@@ -1705,8 +1732,10 @@ impl Div {
             // Truncate scene - these primitives are just for event handling, not rendering
             window.next_frame.scene.truncate_paint_operations(paint_start);
 
-            // Re-activate the layer so we can pop it at the end
+            // Capture hitboxes and listeners for future reuse
+            // Re-activate the layer first so capture can access it
             window.layer_tree_mut().reactivate_layer(layer_id);
+            window.capture_layer_hitboxes(layer_id);
         }
 
         // Copy layer's DisplayList and PropertyTrees to Scene for renderer access

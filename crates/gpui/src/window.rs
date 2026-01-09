@@ -22,6 +22,7 @@ use crate::{
     size, transparent_black,
     display_list::convert_primitive_to_display_item,
     property_trees::{TransformNodeId, ClipNodeId},
+    layer::{LayerId, RetainedHitbox},
 };
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
@@ -532,6 +533,12 @@ impl HitboxId {
 
     fn next(mut self) -> HitboxId {
         HitboxId(self.0.wrapping_add(1))
+    }
+}
+
+impl Default for HitboxId {
+    fn default() -> Self {
+        HitboxId(0)
     }
 }
 
@@ -4684,6 +4691,126 @@ impl Window {
     pub fn insert_window_control_hitbox(&mut self, area: WindowControlArea, hitbox: Hitbox) {
         self.invalidator.debug_assert_paint();
         self.next_frame.window_control_hitboxes.push((area, hitbox));
+    }
+
+    /// Begin capturing hitboxes and mouse listeners for a layer.
+    ///
+    /// Call this before painting a layer's children. It records the current
+    /// indices of hitboxes and mouse listeners so that after paint, we can
+    /// identify which ones belong to this layer.
+    pub fn begin_layer_hitbox_capture(&mut self, layer_id: LayerId) {
+        let hitbox_start = self.next_frame.hitboxes.len();
+        let listener_start = self.next_frame.mouse_listeners.len();
+
+        if let Some(layer) = self.layer_tree.get_mut(layer_id) {
+            layer.hitbox_range = Some(hitbox_start..hitbox_start);
+            layer.listener_range = Some(listener_start..listener_start);
+        }
+    }
+
+    /// Capture hitboxes and mouse listeners created since begin_layer_hitbox_capture.
+    ///
+    /// Call this after painting a layer's children. The hitboxes are converted
+    /// to layer-local coordinates and stored in the layer for reuse. Mouse
+    /// listeners are moved from the frame to the layer.
+    pub fn capture_layer_hitboxes(&mut self, layer_id: LayerId) {
+        let hitbox_end = self.next_frame.hitboxes.len();
+        let listener_end = self.next_frame.mouse_listeners.len();
+
+        // Get the content origin for coordinate conversion
+        let content_origin = self
+            .layer_tree
+            .get(layer_id)
+            .map(|l| l.content_origin)
+            .unwrap_or_default();
+
+        // Update ranges and capture hitboxes
+        if let Some(layer) = self.layer_tree.get_mut(layer_id) {
+            // Update the end of the ranges
+            if let Some(ref mut range) = layer.hitbox_range {
+                range.end = hitbox_end;
+            }
+            if let Some(ref mut range) = layer.listener_range {
+                range.end = listener_end;
+            }
+
+            // Clear previous retained data
+            layer.retained_hitboxes.clear();
+            layer.retained_mouse_listeners.clear();
+
+            // Capture hitboxes in layer-local coordinates
+            if let Some(range) = &layer.hitbox_range {
+                for hitbox in &self.next_frame.hitboxes[range.clone()] {
+                    layer
+                        .retained_hitboxes
+                        .push(RetainedHitbox::from_hitbox(hitbox, content_origin));
+                }
+            }
+
+            // Move mouse listeners from frame to layer
+            // We take them from the frame and store them in the layer
+            if let Some(range) = &layer.listener_range {
+                for i in range.clone() {
+                    if let Some(listener) = self.next_frame.mouse_listeners.get_mut(i) {
+                        layer.retained_mouse_listeners.push(listener.take());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Replay retained hitboxes and mouse listeners from a layer.
+    ///
+    /// Call this when reusing a layer's DisplayList instead of painting children.
+    /// The retained hitboxes are transformed to current window coordinates and
+    /// added to the frame. The retained mouse listeners are moved back to the frame.
+    ///
+    /// Returns the highest hitbox ID used (for updating next_hitbox_id).
+    pub fn replay_retained_hitboxes(&mut self, layer_id: LayerId) -> Option<HitboxId> {
+        // Get the current content origin for coordinate conversion
+        let content_origin = self
+            .layer_tree
+            .get(layer_id)
+            .map(|l| l.content_origin)
+            .unwrap_or_default();
+
+        let mut max_hitbox_id: Option<HitboxId> = None;
+
+        // Need to extract data from layer to avoid borrow conflicts
+        let (retained_hitboxes, retained_listeners): (Vec<_>, Vec<_>) = {
+            if let Some(layer) = self.layer_tree.get_mut(layer_id) {
+                // Clone hitboxes (they're small) and take listeners (move them out)
+                let hitboxes = layer.retained_hitboxes.clone();
+                let listeners = std::mem::take(&mut layer.retained_mouse_listeners);
+                (hitboxes, listeners)
+            } else {
+                return None;
+            }
+        };
+
+        // Replay hitboxes
+        for retained in &retained_hitboxes {
+            let hitbox = retained.to_hitbox(content_origin);
+
+            // Track the highest hitbox ID
+            if max_hitbox_id.map_or(true, |max| hitbox.id.0 > max.0) {
+                max_hitbox_id = Some(hitbox.id);
+            }
+
+            self.next_frame.hitboxes.push(hitbox);
+        }
+
+        // Replay mouse listeners
+        for listener in retained_listeners {
+            self.next_frame.mouse_listeners.push(listener);
+        }
+
+        // Store the hitboxes back (we only borrowed them as clones for the loop)
+        if let Some(layer) = self.layer_tree.get_mut(layer_id) {
+            layer.retained_hitboxes = retained_hitboxes;
+        }
+
+        max_hitbox_id
     }
 
     /// Sets the key context for the current element. This context will be used to translate
