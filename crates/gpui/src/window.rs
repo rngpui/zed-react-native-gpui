@@ -911,6 +911,11 @@ pub struct Window {
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
+    /// Stack of (LayerId, ClipNodeId) pairs parallel to content_mask_stack.
+    /// Each entry tracks which layer the clip node belongs to, since different layers
+    /// have separate PropertyTrees and clip node IDs are only valid within their layer.
+    /// Phase 0.1: Avoids creating O(primitives) clip nodes by reusing per-mask clip nodes.
+    pub(crate) clip_node_stack: Vec<(LayerId, ClipNodeId)>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
@@ -1405,6 +1410,7 @@ impl Window {
             rendered_entity_stack: Vec::new(),
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
+            clip_node_stack: Vec::new(),
             element_opacity: 1.0,
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
@@ -3028,8 +3034,18 @@ impl Window {
         let scale_factor = self.scale_factor;
         let inv_scale = 1.0 / scale_factor;
 
-        // Get current content mask (already intersected) for creating clip node
-        let content_mask = self.content_mask();
+        // Phase 0.1: Use clip node from stack (created by with_content_mask/push_content_mask)
+        // instead of creating per-primitive. This reduces O(primitives) to O(masks) clip nodes.
+        // Only use clip nodes from the SAME layer - different layers have separate PropertyTrees.
+        let current_layer_id = self.layer_tree.current_layer().id;
+        let clip_node = self
+            .clip_node_stack
+            .iter()
+            .rev()
+            .find(|(lid, _)| *lid == current_layer_id)
+            .map(|(_, cid)| *cid)
+            .unwrap_or(ClipNodeId::ROOT);
+        let transform_node = TransformNodeId::ROOT;
 
         // content_origin is where content (0,0) appears in window space (bounds.origin + scroll_offset)
         let layer = self.layer_tree.current_layer_mut();
@@ -3047,23 +3063,6 @@ impl Window {
             x: ScaledPixels(layer.content_origin.x.0 * scale_factor),
             y: ScaledPixels(layer.content_origin.y.0 * scale_factor),
         };
-
-        // Create a clip node for the current content_mask in the layer's property trees.
-        // For Phase 13, we use ROOT transform node (transform integration comes later).
-        // The clip bounds are converted to content-local coordinates by subtracting content_origin.
-        let clip_bounds_in_content = Bounds {
-            origin: Point {
-                x: content_mask.bounds.origin.x - layer.content_origin.x,
-                y: content_mask.bounds.origin.y - layer.content_origin.y,
-            },
-            size: content_mask.bounds.size,
-        };
-        let clip_node = layer.property_trees.push_clip(
-            ClipNodeId::ROOT,
-            clip_bounds_in_content,
-            TransformNodeId::ROOT,
-        );
-        let transform_node = TransformNodeId::ROOT;
 
         if let Some(item) = convert_primitive_to_display_item(
             &primitive,
@@ -3169,13 +3168,95 @@ impl Window {
         self.invalidator.debug_assert_paint_or_prepaint();
         if let Some(mask) = mask {
             let mask = mask.intersect(&self.content_mask());
+
+            // Phase 0.1: Create clip node for this mask in the current layer's property trees.
+            // This avoids creating O(primitives) clip nodes by reusing one clip node per mask.
+            let (layer_id, clip_node) = {
+                let layer = self.layer_tree.current_layer_mut();
+                let current_layer_id = layer.id;
+                let clip_bounds_in_content = Bounds {
+                    origin: Point {
+                        x: mask.bounds.origin.x - layer.content_origin.x,
+                        y: mask.bounds.origin.y - layer.content_origin.y,
+                    },
+                    size: mask.bounds.size,
+                };
+                // Only use parent clip nodes from the SAME layer - different layers have
+                // separate PropertyTrees and clip node IDs are not transferable.
+                let parent_clip = self
+                    .clip_node_stack
+                    .iter()
+                    .rev()
+                    .find(|(lid, _)| *lid == current_layer_id)
+                    .map(|(_, cid)| *cid)
+                    .unwrap_or(ClipNodeId::ROOT);
+                let clip_node = layer.property_trees.push_clip(
+                    parent_clip,
+                    clip_bounds_in_content,
+                    TransformNodeId::ROOT,
+                );
+                (current_layer_id, clip_node)
+            };
+            self.clip_node_stack.push((layer_id, clip_node));
             self.content_mask_stack.push(mask);
+
             let result = f(self);
+
+            self.clip_node_stack.pop();
             self.content_mask_stack.pop();
             result
         } else {
             f(self)
         }
+    }
+
+    /// Push a content mask onto the stack directly (without closure).
+    /// Use this when you need manual control over mask lifetime.
+    /// Must be paired with `pop_content_mask`.
+    ///
+    /// Phase 0.1: Also creates and pushes a clip node for O(masks) instead of O(primitives).
+    pub(crate) fn push_content_mask(&mut self, mask: ContentMask<Pixels>) {
+        self.invalidator.debug_assert_paint_or_prepaint();
+        let mask = mask.intersect(&self.content_mask());
+
+        // Create clip node for this mask in the current layer's property trees.
+        let (layer_id, clip_node) = {
+            let layer = self.layer_tree.current_layer_mut();
+            let current_layer_id = layer.id;
+            let clip_bounds_in_content = Bounds {
+                origin: Point {
+                    x: mask.bounds.origin.x - layer.content_origin.x,
+                    y: mask.bounds.origin.y - layer.content_origin.y,
+                },
+                size: mask.bounds.size,
+            };
+            // Only use parent clip nodes from the SAME layer - different layers have
+            // separate PropertyTrees and clip node IDs are not transferable.
+            let parent_clip = self
+                .clip_node_stack
+                .iter()
+                .rev()
+                .find(|(lid, _)| *lid == current_layer_id)
+                .map(|(_, cid)| *cid)
+                .unwrap_or(ClipNodeId::ROOT);
+            let clip_node = layer.property_trees.push_clip(
+                parent_clip,
+                clip_bounds_in_content,
+                TransformNodeId::ROOT,
+            );
+            (current_layer_id, clip_node)
+        };
+        self.clip_node_stack.push((layer_id, clip_node));
+        self.content_mask_stack.push(mask);
+    }
+
+    /// Pop a content mask from the stack.
+    /// Must be paired with a previous `push_content_mask`.
+    ///
+    /// Phase 0.1: Also pops the associated clip node.
+    pub(crate) fn pop_content_mask(&mut self) {
+        self.clip_node_stack.pop();
+        self.content_mask_stack.pop();
     }
 
     /// Updates the global element offset relative to the current offset. This is used to implement

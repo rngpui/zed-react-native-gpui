@@ -1689,7 +1689,8 @@ impl Div {
                     size: content_size,
                 },
             };
-            window.content_mask_stack.push(full_content_mask);
+            // Phase 0.1: Use push_content_mask which also creates clip nodes
+            window.push_content_mask(full_content_mask);
 
             // Paint all children - primitives go to layer's DisplayList via insert_primitive_internal
             // (because layer is on the stack, is_inside_layer() returns true)
@@ -1697,8 +1698,8 @@ impl Div {
                 child.paint(window, cx);
             }
 
-            // Pop the full-content mask
-            window.content_mask_stack.pop();
+            // Pop the full-content mask and its clip node
+            window.pop_content_mask();
 
             // Capture hitboxes and listeners for future reuse
             window.capture_layer_hitboxes(layer_id);
