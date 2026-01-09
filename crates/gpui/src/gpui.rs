@@ -39,6 +39,8 @@ mod queue;
 mod scene;
 pub use scene::SceneDirtyStats;
 mod display_list;
+mod layer;
+pub use layer::{LayerId, LayerReason, LayerTree};
 mod shared_string;
 mod shared_uri;
 mod style;

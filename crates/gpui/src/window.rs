@@ -1011,6 +1011,8 @@ pub struct Window {
     /// True when inside a tiled scroll container's paint_children_tiled.
     /// When true, SubtreeCache is disabled because scene indices would be invalid.
     inside_tiled_scroll_container: bool,
+    /// The layer tree for compositing. Manages scroll containers, transforms, and opacity layers.
+    layer_tree: crate::layer::LayerTree,
     /// True if the last frame was completely stable (all cache hits at same positions).
     /// When true, we can potentially skip drawing if nothing has changed.
     last_frame_was_stable: bool,
@@ -1502,6 +1504,7 @@ impl Window {
             display_list_manager: DisplayListManager::new(),
             current_scroll_container: None,
             inside_tiled_scroll_container: false,
+            layer_tree: crate::layer::LayerTree::new(),
             last_frame_was_stable: false,
             paint_scopes: Vec::new(),
             next_frame_callbacks,
@@ -3260,7 +3263,47 @@ impl Window {
             }
         }
 
-        // If we're in direct-to-DisplayList mode, convert and add to DisplayList
+        // Check if we're inside a non-root layer in the layer tree (Phase 12 approach)
+        if self.layer_tree.is_inside_layer() {
+            let scale_factor = self.scale_factor;
+            let inv_scale = 1.0 / scale_factor;
+            // content_origin is where content (0,0) appears in window space (bounds.origin + scroll_offset)
+            let layer = self.layer_tree.current_layer_mut();
+            let content_origin = Point {
+                x: ScaledPixels(layer.content_origin.x.0 * scale_factor),
+                y: ScaledPixels(layer.content_origin.y.0 * scale_factor),
+            };
+
+            if let Some(item) = convert_primitive_to_display_item(
+                &primitive,
+                inv_scale,
+                content_origin,
+            ) {
+                // Non-root layers always have a display list
+                let display_list = layer
+                    .display_list
+                    .as_mut()
+                    .expect("Non-root layer should have display list");
+                // Extend display list bounds based on item type
+                use crate::display_list::DisplayItem;
+                match &item {
+                    DisplayItem::Quad(q) => display_list.extend_bounds(q.bounds),
+                    DisplayItem::Shadow(s) => display_list.extend_bounds(s.bounds),
+                    DisplayItem::BackdropBlur(b) => display_list.extend_bounds(b.bounds),
+                    DisplayItem::Underline(u) => display_list.extend_bounds(u.bounds),
+                    DisplayItem::MonochromeSprite(s) => display_list.extend_bounds(s.bounds),
+                    DisplayItem::SubpixelSprite(s) => display_list.extend_bounds(s.bounds),
+                    DisplayItem::PolychromeSprite(s) => display_list.extend_bounds(s.bounds),
+                    DisplayItem::Path(p) => display_list.extend_bounds(p.bounds),
+                    DisplayItem::PushClip(_) | DisplayItem::PopClip => {}
+                }
+                display_list.items.push(item);
+            }
+            // Don't add to Scene when in layer mode
+            return;
+        }
+
+        // Legacy: If we're in direct-to-DisplayList mode via ScrollContainerContext
         if let Some(ctx) = &mut self.current_scroll_container {
             if let Some(item) = convert_primitive_to_display_item(
                 &primitive,
@@ -3507,6 +3550,56 @@ impl Window {
     /// When true, SubtreeCache should be disabled.
     pub(crate) fn is_inside_tiled_scroll_container(&self) -> bool {
         self.inside_tiled_scroll_container
+    }
+
+    // ==================== Layer Tree API ====================
+
+    /// Push a new layer onto the layer tree stack.
+    ///
+    /// Creates a new compositing layer as a child of the current layer.
+    /// While inside a non-root layer, primitives are routed to the layer's DisplayList.
+    pub(crate) fn push_layer(
+        &mut self,
+        element_id: GlobalElementId,
+        reason: crate::layer::LayerReason,
+    ) -> crate::layer::LayerId {
+        self.layer_tree.push_layer(element_id, reason)
+    }
+
+    /// Pop the current layer from the layer tree stack.
+    ///
+    /// Returns to the parent layer. Panics if trying to pop the root layer.
+    pub(crate) fn pop_layer(&mut self) {
+        self.layer_tree.pop_layer()
+    }
+
+    /// Check if we're inside any non-root layer.
+    ///
+    /// When true, primitives should be routed to the layer's DisplayList.
+    pub(crate) fn is_inside_layer(&self) -> bool {
+        self.layer_tree.is_inside_layer()
+    }
+
+    /// Get a reference to the layer tree.
+    pub(crate) fn layer_tree(&self) -> &crate::layer::LayerTree {
+        &self.layer_tree
+    }
+
+    /// Get a mutable reference to the layer tree.
+    pub(crate) fn layer_tree_mut(&mut self) -> &mut crate::layer::LayerTree {
+        &mut self.layer_tree
+    }
+
+    /// Get a mutable reference to the current layer's DisplayList.
+    ///
+    /// This is used for direct-to-DisplayList painting in layers.
+    /// Panics if called on the root layer (which doesn't have a display list).
+    pub(crate) fn current_layer_display_list(&mut self) -> &mut DisplayList {
+        self.layer_tree
+            .current_layer_mut()
+            .display_list
+            .as_mut()
+            .expect("Only non-root layers have display lists")
     }
 
     /// Perform prepaint on child elements in a "retryable" manner, so that any side effects

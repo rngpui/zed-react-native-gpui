@@ -1535,8 +1535,10 @@ impl Div {
         // With the display list architecture, children are painted ONCE to the scene,
         // and the display list is used for tile rasterization. This respects the
         // prepaint/paint contract while enabling O(visible_tiles) compositing.
-        let use_tiled_rendering = self.interactivity.is_tiled_scroll_container(bounds);
-        let tiled_data = if use_tiled_rendering {
+        // Phase 12: Use layer-based rendering for scroll containers with large content
+        let content_size = self.interactivity.content_size;
+        let layer_reason = self.interactivity.should_create_layer(bounds, content_size);
+        let layer_data = if layer_reason.is_some() {
             // Extract data from interactivity before the closure captures self
             let scroll_offset = self
                 .interactivity
@@ -1544,9 +1546,8 @@ impl Div {
                 .as_ref()
                 .map(|r| *r.borrow())
                 .unwrap_or_default();
-            let content_size = self.interactivity.content_size;
             let global_id_owned = global_id.cloned();
-            Some((scroll_offset, content_size, global_id_owned))
+            Some((scroll_offset, content_size, global_id_owned, layer_reason.unwrap()))
         } else {
             None
         };
@@ -1565,11 +1566,12 @@ impl Div {
                         return;
                     }
 
-                    // Use tiled rendering for large scroll containers
-                    if let Some((scroll_offset, content_size, Some(gid))) = tiled_data.as_ref() {
-                        Self::paint_children_tiled(
+                    // Phase 12: Use layer-based rendering for large scroll containers
+                    if let Some((scroll_offset, content_size, Some(gid), reason)) = layer_data.as_ref() {
+                        Self::paint_as_layer(
                             &mut self.children,
                             gid,
+                            *reason,
                             *scroll_offset,
                             *content_size,
                             bounds,
@@ -1788,6 +1790,216 @@ impl Div {
         window.exit_tiled_scroll_container();
 
         let _ = generation; // Suppress unused warning
+    }
+
+    /// Paint children using the Layer Tree (Phase 12 approach).
+    ///
+    /// This is the new layer-based approach that generalizes scroll container handling.
+    /// It uses the LayerTree to manage compositing layers instead of ad-hoc scroll container code.
+    #[allow(dead_code)]
+    fn paint_as_layer(
+        children: &mut SmallVec<[StackSafe<AnyElement>; 2]>,
+        global_id: &GlobalElementId,
+        layer_reason: crate::layer::LayerReason,
+        scroll_offset: Point<Pixels>,
+        content_size: Size<Pixels>,
+        bounds: Bounds<Pixels>,
+        style: &Style,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        use crate::scene::{TileCoord, TileKey, TileSprite};
+
+        // Tile size in device pixels (must match tile_cache::TILE_SIZE)
+        const TILE_SIZE: u32 = 512;
+
+        let scale_factor = window.scale_factor();
+
+        // Get content mask for clipping tiles at viewport edges
+        let Some(content_mask) = style.overflow_mask(bounds, window.rem_size()) else {
+            // No content mask means no overflow clipping - fall back to normal painting
+            for child in children.iter_mut() {
+                child.paint(window, cx);
+            }
+            return;
+        };
+
+        // Enter tiled scroll container mode - disables SubtreeCache for children
+        // since scene indices would be invalid (primitives go to layer's DisplayList)
+        window.enter_tiled_scroll_container();
+
+        // Push a new layer onto the layer tree
+        let layer_id = window.push_layer(global_id.clone(), layer_reason);
+
+        // Set layer properties
+        {
+            let layer = window.layer_tree_mut().get_mut(layer_id).unwrap();
+            layer.scroll_offset = scroll_offset;
+            layer.content_size = content_size;
+            layer.viewport_size = bounds.size;
+            // content_origin is where content (0,0) appears in window space
+            layer.content_origin = Point {
+                x: bounds.origin.x + scroll_offset.x,
+                y: bounds.origin.y + scroll_offset.y,
+            };
+        }
+
+        // Check if the layer needs repaint (content changed)
+        let needs_repaint = window.layer_tree().get(layer_id).unwrap().needs_repaint;
+
+        // Register with tile cache so tiles can be acquired
+        let _generation = window.register_scroll_container_tiles(
+            global_id,
+            content_size,
+            needs_repaint, // content_changed if needs_repaint
+        );
+
+        if needs_repaint {
+            // Clear the layer's display list and rebuild
+            window
+                .layer_tree_mut()
+                .get_mut(layer_id)
+                .unwrap()
+                .display_list
+                .as_mut()
+                .expect("Non-root layer should have display list")
+                .clear();
+
+            // CRITICAL: For tiled rendering, paint ALL content, not just visible viewport.
+            // Push a full-content mask so all content is rendered.
+            let content_origin = Point {
+                x: bounds.origin.x + scroll_offset.x,
+                y: bounds.origin.y + scroll_offset.y,
+            };
+            let full_content_mask = ContentMask {
+                bounds: Bounds {
+                    origin: content_origin,
+                    size: content_size,
+                },
+            };
+            window.content_mask_stack.push(full_content_mask);
+
+            // Paint all children - primitives go to layer's DisplayList via insert_primitive_internal
+            // (because layer is on the stack, is_inside_layer() returns true)
+            for child in children.iter_mut() {
+                child.paint(window, cx);
+            }
+
+            // Pop the full-content mask
+            window.content_mask_stack.pop();
+
+            // Mark layer as no longer needing repaint, but needs rasterization
+            let layer = window.layer_tree_mut().get_mut(layer_id).unwrap();
+            layer.needs_repaint = false;
+            layer.needs_rasterize = true;
+        } else {
+            // Layer content is valid - reuse existing DisplayList.
+            // Still need to run paint for hit testing, event handlers, but primitives
+            // should NOT go to the layer's DisplayList (would cause duplicates).
+            //
+            // Pop the layer from stack so is_inside_layer() returns false during paint.
+            // Primitives will go to Scene, which we truncate after.
+            window.pop_layer();
+
+            let paint_start = window.next_frame.scene.len();
+            for child in children.iter_mut() {
+                child.paint(window, cx);
+            }
+            // Truncate scene - these primitives are just for event handling, not rendering
+            window.next_frame.scene.truncate_paint_operations(paint_start);
+
+            // Re-activate the layer so we can pop it at the end
+            window.layer_tree_mut().reactivate_layer(layer_id);
+        }
+
+        // Copy layer's DisplayList to Scene for renderer access
+        if let Some(display_list) = &window.layer_tree().get(layer_id).unwrap().display_list {
+            if !display_list.items.is_empty() {
+                window
+                    .next_frame
+                    .scene
+                    .insert_display_list(global_id.clone(), display_list.clone());
+            }
+        }
+
+        // Calculate visible tile range based on scroll offset and viewport
+        let tile_size_px = TILE_SIZE as f32 / scale_factor;
+
+        // scroll_offset is negative (scroll down = negative y)
+        let content_top_left_x = -scroll_offset.x.0;
+        let content_top_left_y = -scroll_offset.y.0;
+
+        let min_tile = TileCoord {
+            x: (content_top_left_x / tile_size_px).floor() as i32,
+            y: (content_top_left_y / tile_size_px).floor() as i32,
+        };
+
+        let max_tile = TileCoord {
+            x: ((content_top_left_x + bounds.size.width.0) / tile_size_px).ceil() as i32 - 1,
+            y: ((content_top_left_y + bounds.size.height.0) / tile_size_px).ceil() as i32 - 1,
+        };
+
+        // Insert TileSprite primitives for visible tiles
+        for tile_y in min_tile.y..=max_tile.y {
+            for tile_x in min_tile.x..=max_tile.x {
+                let coord = TileCoord { x: tile_x, y: tile_y };
+
+                // Calculate content-space bounds for this tile
+                let tile_content_origin = Point {
+                    x: Pixels(coord.x as f32 * tile_size_px),
+                    y: Pixels(coord.y as f32 * tile_size_px),
+                };
+                let tile_content_size = Size {
+                    width: Pixels(tile_size_px),
+                    height: Pixels(tile_size_px),
+                };
+
+                // Calculate where this tile should appear on screen
+                let screen_origin = Point {
+                    x: bounds.origin.x + tile_content_origin.x + scroll_offset.x,
+                    y: bounds.origin.y + tile_content_origin.y + scroll_offset.y,
+                };
+
+                let tile_sprite = TileSprite {
+                    order: 0, // Will be set by insert_primitive
+                    _pad: 0,
+                    bounds: crate::Bounds {
+                        origin: crate::point(
+                            crate::ScaledPixels(screen_origin.x.0 * scale_factor),
+                            crate::ScaledPixels(screen_origin.y.0 * scale_factor),
+                        ),
+                        size: crate::size(
+                            crate::ScaledPixels(tile_content_size.width.0 * scale_factor),
+                            crate::ScaledPixels(tile_content_size.height.0 * scale_factor),
+                        ),
+                    },
+                    content_mask: ContentMask {
+                        bounds: crate::Bounds {
+                            origin: crate::point(
+                                crate::ScaledPixels(content_mask.bounds.origin.x.0 * scale_factor),
+                                crate::ScaledPixels(content_mask.bounds.origin.y.0 * scale_factor),
+                            ),
+                            size: crate::size(
+                                crate::ScaledPixels(content_mask.bounds.size.width.0 * scale_factor),
+                                crate::ScaledPixels(content_mask.bounds.size.height.0 * scale_factor),
+                            ),
+                        },
+                    },
+                    tile_key: TileKey {
+                        container_id: global_id.clone(),
+                        coord,
+                    },
+                };
+
+                window.next_frame.scene.insert_primitive(tile_sprite);
+            }
+        }
+
+        // Pop the layer from the layer tree
+        window.pop_layer();
+
+        // Exit tiled scroll container mode
+        window.exit_tiled_scroll_container();
     }
 }
 
@@ -2708,26 +2920,8 @@ impl Interactivity {
         bounds: Bounds<Pixels>,
         content_size: Size<Pixels>,
     ) -> bool {
-        // Must have an ID for cache keying
-        if self.element_id.is_none() {
-            return false;
-        }
-
-        // Must be a scroll container
-        let is_scroll_x = self.base_style.overflow.x == Some(Overflow::Scroll);
-        let is_scroll_y = self.base_style.overflow.y == Some(Overflow::Scroll);
-        if !is_scroll_x && !is_scroll_y {
-            return false;
-        }
-
-        // Content should be larger than viewport for tiling to be worthwhile
-        // Only tile if content exceeds viewport by at least one tile size (512 device pixels ~= 256 logical pixels)
-        let min_excess = Pixels(256.0);
-        let content_exceeds_x = content_size.width > bounds.size.width + min_excess;
-        let content_exceeds_y = content_size.height > bounds.size.height + min_excess;
-
-        // Must have excess content in at least one scrollable direction
-        (is_scroll_x && content_exceeds_x) || (is_scroll_y && content_exceeds_y)
+        // Delegate to should_create_layer - tiled rendering is used for any layer
+        self.should_create_layer(bounds, content_size).is_some()
     }
 
     /// Check if this element is a scroll container eligible for tiled rendering.
@@ -2737,6 +2931,35 @@ impl Interactivity {
     /// 3. Content size exceeds the viewport by a significant margin
     pub fn is_tiled_scroll_container(&self, bounds: Bounds<Pixels>) -> bool {
         self.will_use_tiled_rendering(bounds, self.content_size)
+    }
+
+    /// Determine if this element should create a compositing layer.
+    ///
+    /// Returns Some(LayerReason) if this element should become a layer, None otherwise.
+    /// Currently supports ScrollContainer; future phases will add Transform, Opacity, WillChange.
+    pub fn should_create_layer(
+        &self,
+        bounds: Bounds<Pixels>,
+        content_size: Size<Pixels>,
+    ) -> Option<crate::layer::LayerReason> {
+        // Scroll container with large content
+        if self.element_id.is_some() {
+            let is_scroll = self.base_style.overflow.x == Some(Overflow::Scroll)
+                || self.base_style.overflow.y == Some(Overflow::Scroll);
+            let min_excess = Pixels(256.0);
+            let large_content = content_size.width > bounds.size.width + min_excess
+                || content_size.height > bounds.size.height + min_excess;
+            if is_scroll && large_content {
+                return Some(crate::layer::LayerReason::ScrollContainer);
+            }
+        }
+
+        // TODO Phase 12+: Add checks for:
+        // - Transform animations → LayerReason::Transform
+        // - Opacity animations → LayerReason::Opacity
+        // - will-change style → LayerReason::WillChange
+
+        None
     }
 
     #[cfg(debug_assertions)]
