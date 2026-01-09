@@ -1,6 +1,6 @@
 use super::metal_atlas::MetalAtlas;
 use super::tile_cache::TileCache;
-use super::tile_rasterizer::{TileRasterJob, TileRasterizer, TilePriority};
+use super::tile_rasterizer::{rasterize_tiles_parallel, TilePriority, TileRasterJob};
 use crate::{
     AtlasTextureId, BackdropBlur, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite,
     PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow,
@@ -2242,7 +2242,7 @@ impl MetalRenderer {
 
         // Parallel CPU rasterization using rayon
         // This is the performance-critical change: multiple tiles rasterize concurrently
-        let results = TileRasterizer::rasterize_parallel(jobs, scale_factor);
+        let results = rasterize_tiles_parallel(jobs, scale_factor);
 
         // Sequential GPU rendering (Metal commands must be submitted from main thread)
         for result in results {

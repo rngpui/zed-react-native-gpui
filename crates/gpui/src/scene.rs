@@ -154,14 +154,18 @@ impl Scene {
 
     /// Insert a display list with property trees for a scroll container.
     ///
-    /// Builds the spatial index and pre-computes property tree caches before inserting
-    /// to ensure efficient rasterization queries and avoid redundant recomputation.
+    /// Builds the spatial index, pre-computes property tree caches, and bakes transforms
+    /// into the display list before inserting. This ensures:
+    /// - Efficient spatial queries via spatial index
+    /// - No per-item property tree lookups during rasterization (baked transforms)
     /// The DisplayList is wrapped in Arc for cheap cloning during parallel tile rasterization.
     pub fn insert_display_list(&mut self, element_id: GlobalElementId, mut display_list: DisplayList, mut property_trees: PropertyTrees) {
         // Build spatial index for efficient tile rasterization queries
         display_list.ensure_spatial_index_built();
-        // Pre-compute all world transforms and clips so clones have populated caches
+        // Pre-compute all world transforms and clips
         property_trees.precompute_all();
+        // Bake transforms into display list to avoid per-item lookups during rasterization
+        display_list.bake_transforms(&mut property_trees);
         self.display_lists.insert(element_id, (Arc::new(display_list), property_trees));
     }
 

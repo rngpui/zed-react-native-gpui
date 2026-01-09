@@ -98,6 +98,34 @@ impl DisplayItem {
             None => true, // Clip operations always apply
         }
     }
+
+    /// Returns the transform node ID for this item.
+    pub fn transform_node(&self) -> TransformNodeId {
+        match self {
+            DisplayItem::Quad(q) => q.transform_node,
+            DisplayItem::Shadow(s) => s.transform_node,
+            DisplayItem::BackdropBlur(b) => b.transform_node,
+            DisplayItem::Underline(u) => u.transform_node,
+            DisplayItem::MonochromeSprite(s) => s.transform_node,
+            DisplayItem::SubpixelSprite(s) => s.transform_node,
+            DisplayItem::PolychromeSprite(s) => s.transform_node,
+            DisplayItem::Path(p) => p.transform_node,
+        }
+    }
+
+    /// Returns the clip node ID for this item.
+    pub fn clip_node(&self) -> ClipNodeId {
+        match self {
+            DisplayItem::Quad(q) => q.clip_node,
+            DisplayItem::Shadow(s) => s.clip_node,
+            DisplayItem::BackdropBlur(b) => b.clip_node,
+            DisplayItem::Underline(u) => u.clip_node,
+            DisplayItem::MonochromeSprite(s) => s.clip_node,
+            DisplayItem::SubpixelSprite(s) => s.clip_node,
+            DisplayItem::PolychromeSprite(s) => s.clip_node,
+            DisplayItem::Path(p) => p.clip_node,
+        }
+    }
 }
 
 /// A quad (filled rectangle) in the display list.
@@ -467,6 +495,10 @@ pub(crate) struct DisplayList {
     /// Stack of element IDs currently being painted.
     /// Used by begin_element()/end_element() to track nesting.
     element_stack: Vec<(GlobalElementId, usize)>,
+    /// Pre-baked world transforms and clips for each item.
+    /// Parallel array to `items` - index i contains the resolved transform/clip for items[i].
+    /// Populated by `bake_transforms()` to avoid per-item property tree lookups during rasterization.
+    baked_transforms: Vec<(TransformationMatrix, Bounds<Pixels>)>,
 }
 
 impl DisplayList {
@@ -482,6 +514,7 @@ impl DisplayList {
             dirty_regions: Vec::new(),
             element_items: FxHashMap::default(),
             element_stack: Vec::new(),
+            baked_transforms: Vec::new(),
         }
     }
 
@@ -496,6 +529,7 @@ impl DisplayList {
         self.dirty_regions.clear();
         self.element_items.clear();
         self.element_stack.clear();
+        self.baked_transforms.clear();
         self.generation += 1;
     }
 
@@ -735,6 +769,30 @@ impl DisplayList {
         }
     }
 
+    /// Pre-bake world transforms and clips for all items.
+    ///
+    /// Call this after property trees are finalized to avoid per-item lookups
+    /// during rasterization. The baked values are stored in a parallel array
+    /// and can be accessed via `get_baked_transform()`.
+    pub fn bake_transforms(&mut self, property_trees: &mut PropertyTrees) {
+        self.baked_transforms.clear();
+        self.baked_transforms.reserve(self.items.len());
+
+        for item in &self.items {
+            let world_transform = property_trees.world_transform(item.transform_node());
+            let world_clip = property_trees.world_clip(item.clip_node());
+            self.baked_transforms.push((world_transform, world_clip));
+        }
+    }
+
+    /// Get the pre-baked world transform and clip for an item by index.
+    ///
+    /// Returns None if transforms haven't been baked or index is out of bounds.
+    #[inline]
+    pub fn get_baked_transform(&self, index: usize) -> Option<&(TransformationMatrix, Bounds<Pixels>)> {
+        self.baked_transforms.get(index)
+    }
+
     /// Iterate over items that intersect the given bounds.
     ///
     /// Uses spatial index for O(cells × items_per_cell) performance.
@@ -754,6 +812,30 @@ impl DisplayList {
             indices: self.spatial_index.query(bounds).collect::<Vec<_>>().into_iter(),
             query_bounds: bounds,
         }
+    }
+
+    /// Iterate over items that intersect the given bounds, with their indices.
+    ///
+    /// Returns (index, &item) pairs so callers can also look up baked transforms
+    /// via `get_baked_transform(index)`.
+    pub fn items_intersecting_with_index(&self, bounds: Bounds<Pixels>) -> impl Iterator<Item = (usize, &DisplayItem)> + '_ {
+        debug_assert!(
+            !self.spatial_index.is_dirty(),
+            "Spatial index not built before items_intersecting_with_index() - call ensure_spatial_index_built() first"
+        );
+
+        self.spatial_index
+            .query(bounds)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(move |index| {
+                let item = self.items.get(index)?;
+                if item.intersects(&bounds) {
+                    Some((index, item))
+                } else {
+                    None
+                }
+            })
     }
 
     /// Extend content_bounds to include the given bounds.
@@ -818,60 +900,69 @@ impl DisplayList {
 
     /// Rasterize items intersecting the tile bounds to Scene primitives.
     ///
-    /// This converts DisplayItems to Scene primitives, looking up transforms and
-    /// clips from the PropertyTrees at render time. Coordinates are offset so that
-    /// the tile's origin is at (0, 0) in the output. The scale factor converts
-    /// from logical Pixels to device ScaledPixels.
+    /// Uses pre-baked transforms from `bake_transforms()` for efficient rasterization.
+    /// Falls back to property tree lookups if transforms are not baked.
+    /// Coordinates are offset so that the tile's origin is at (0, 0) in the output.
+    /// The scale factor converts from logical Pixels to device ScaledPixels.
     ///
     /// Returns vectors of primitives ready for GPU rendering.
     pub fn rasterize_tile(
         &self,
         tile_bounds: Bounds<Pixels>,
         scale_factor: f32,
-        property_trees: &mut PropertyTrees,
+        _property_trees: &mut PropertyTrees,
     ) -> TileRasterResult {
+        debug_assert!(
+            !self.baked_transforms.is_empty() || self.items.is_empty(),
+            "bake_transforms() must be called before rasterize_tile()"
+        );
+
         let mut result = TileRasterResult::default();
         let mut draw_order: DrawOrder = 0;
 
-        for item in self.items_intersecting(tile_bounds) {
+        for (index, item) in self.items_intersecting_with_index(tile_bounds) {
             draw_order += 1;
+
+            // Get pre-baked world transform and clip
+            let &(world_transform, world_clip) = &self.baked_transforms[index];
+
             match item {
                 DisplayItem::Quad(q) => {
-                    if let Some((quad, transform)) = self.rasterize_quad(q, tile_bounds, scale_factor, draw_order, property_trees) {
+                    if let Some((quad, transform)) = self.rasterize_quad(q, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
                         result.quads.push(quad);
                         result.quad_transforms.push(transform);
                     }
                 }
                 DisplayItem::Shadow(s) => {
-                    if let Some((shadow, transform)) = self.rasterize_shadow(s, tile_bounds, scale_factor, draw_order, property_trees) {
+                    if let Some((shadow, transform)) = self.rasterize_shadow(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
                         result.shadows.push(shadow);
                         result.shadow_transforms.push(transform);
                     }
                 }
                 DisplayItem::BackdropBlur(b) => {
-                    if let Some((blur, transform)) = self.rasterize_backdrop_blur(b, tile_bounds, scale_factor, draw_order, property_trees) {
+                    if let Some((blur, transform)) = self.rasterize_backdrop_blur(b, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
                         result.backdrop_blurs.push(blur);
                         result.backdrop_blur_transforms.push(transform);
                     }
                 }
                 DisplayItem::Underline(u) => {
-                    if let Some((underline, transform)) = self.rasterize_underline(u, tile_bounds, scale_factor, draw_order, property_trees) {
+                    if let Some((underline, transform)) = self.rasterize_underline(u, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
                         result.underlines.push(underline);
                         result.underline_transforms.push(transform);
                     }
                 }
                 DisplayItem::MonochromeSprite(s) => {
-                    if let Some(sprite) = self.rasterize_monochrome_sprite(s, tile_bounds, scale_factor, draw_order, property_trees) {
+                    if let Some(sprite) = self.rasterize_monochrome_sprite(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
                         result.monochrome_sprites.push(sprite);
                     }
                 }
                 DisplayItem::SubpixelSprite(s) => {
-                    if let Some(sprite) = self.rasterize_subpixel_sprite(s, tile_bounds, scale_factor, draw_order, property_trees) {
+                    if let Some(sprite) = self.rasterize_subpixel_sprite(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
                         result.subpixel_sprites.push(sprite);
                     }
                 }
                 DisplayItem::PolychromeSprite(s) => {
-                    if let Some((sprite, transform)) = self.rasterize_polychrome_sprite(s, tile_bounds, scale_factor, draw_order, property_trees) {
+                    if let Some((sprite, transform)) = self.rasterize_polychrome_sprite(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
                         result.polychrome_sprites.push(sprite);
                         result.polychrome_sprite_transforms.push(transform);
                     }
@@ -940,17 +1031,16 @@ impl DisplayList {
         }
     }
 
+    #[inline]
     fn rasterize_quad(
         &self,
         q: &DisplayQuad,
         tile_bounds: Bounds<Pixels>,
         scale_factor: f32,
         order: DrawOrder,
-        property_trees: &mut PropertyTrees,
+        world_transform: TransformationMatrix,
+        world_clip: Bounds<Pixels>,
     ) -> Option<(Quad, TransformationMatrix)> {
-        // Look up world transform and clip from property trees
-        let world_transform = property_trees.world_transform(q.transform_node);
-        let world_clip = property_trees.world_clip(q.clip_node);
         let content_mask = ContentMask { bounds: world_clip };
 
         Some((Quad {
@@ -965,16 +1055,16 @@ impl DisplayList {
         }, world_transform))
     }
 
+    #[inline]
     fn rasterize_shadow(
         &self,
         s: &DisplayShadow,
         tile_bounds: Bounds<Pixels>,
         scale_factor: f32,
         order: DrawOrder,
-        property_trees: &mut PropertyTrees,
+        world_transform: TransformationMatrix,
+        world_clip: Bounds<Pixels>,
     ) -> Option<(Shadow, TransformationMatrix)> {
-        let world_transform = property_trees.world_transform(s.transform_node);
-        let world_clip = property_trees.world_clip(s.clip_node);
         let content_mask = ContentMask { bounds: world_clip };
 
         Some((Shadow {
@@ -987,16 +1077,16 @@ impl DisplayList {
         }, world_transform))
     }
 
+    #[inline]
     fn rasterize_backdrop_blur(
         &self,
         b: &DisplayBackdropBlur,
         tile_bounds: Bounds<Pixels>,
         scale_factor: f32,
         order: DrawOrder,
-        property_trees: &mut PropertyTrees,
+        world_transform: TransformationMatrix,
+        world_clip: Bounds<Pixels>,
     ) -> Option<(BackdropBlur, TransformationMatrix)> {
-        let world_transform = property_trees.world_transform(b.transform_node);
-        let world_clip = property_trees.world_clip(b.clip_node);
         let content_mask = ContentMask { bounds: world_clip };
 
         Some((BackdropBlur {
@@ -1009,16 +1099,16 @@ impl DisplayList {
         }, world_transform))
     }
 
+    #[inline]
     fn rasterize_underline(
         &self,
         u: &DisplayUnderline,
         tile_bounds: Bounds<Pixels>,
         scale_factor: f32,
         order: DrawOrder,
-        property_trees: &mut PropertyTrees,
+        world_transform: TransformationMatrix,
+        world_clip: Bounds<Pixels>,
     ) -> Option<(Underline, TransformationMatrix)> {
-        let world_transform = property_trees.world_transform(u.transform_node);
-        let world_clip = property_trees.world_clip(u.clip_node);
         let content_mask = ContentMask { bounds: world_clip };
 
         Some((Underline {
@@ -1032,16 +1122,16 @@ impl DisplayList {
         }, world_transform))
     }
 
+    #[inline]
     fn rasterize_monochrome_sprite(
         &self,
         s: &DisplayMonochromeSprite,
         tile_bounds: Bounds<Pixels>,
         scale_factor: f32,
         order: DrawOrder,
-        property_trees: &mut PropertyTrees,
+        world_transform: TransformationMatrix,
+        world_clip: Bounds<Pixels>,
     ) -> Option<MonochromeSprite> {
-        let world_transform = property_trees.world_transform(s.transform_node);
-        let world_clip = property_trees.world_clip(s.clip_node);
         let content_mask = ContentMask { bounds: world_clip };
 
         Some(MonochromeSprite {
@@ -1055,16 +1145,16 @@ impl DisplayList {
         })
     }
 
+    #[inline]
     fn rasterize_subpixel_sprite(
         &self,
         s: &DisplaySubpixelSprite,
         tile_bounds: Bounds<Pixels>,
         scale_factor: f32,
         order: DrawOrder,
-        property_trees: &mut PropertyTrees,
+        world_transform: TransformationMatrix,
+        world_clip: Bounds<Pixels>,
     ) -> Option<SubpixelSprite> {
-        let world_transform = property_trees.world_transform(s.transform_node);
-        let world_clip = property_trees.world_clip(s.clip_node);
         let content_mask = ContentMask { bounds: world_clip };
 
         Some(SubpixelSprite {
@@ -1078,16 +1168,16 @@ impl DisplayList {
         })
     }
 
+    #[inline]
     fn rasterize_polychrome_sprite(
         &self,
         s: &DisplayPolychromeSprite,
         tile_bounds: Bounds<Pixels>,
         scale_factor: f32,
         order: DrawOrder,
-        property_trees: &mut PropertyTrees,
+        world_transform: TransformationMatrix,
+        world_clip: Bounds<Pixels>,
     ) -> Option<(PolychromeSprite, TransformationMatrix)> {
-        let world_transform = property_trees.world_transform(s.transform_node);
-        let world_clip = property_trees.world_clip(s.clip_node);
         let content_mask = ContentMask { bounds: world_clip };
 
         Some((PolychromeSprite {
