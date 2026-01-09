@@ -34,7 +34,6 @@ use crate::{
     AtlasTile, Background, Bounds, ContentMask, Corners, Edges, GlobalElementId, Hsla, Pixels,
     Point, ScaledPixels, scene::TransformationMatrix, scene::BorderStyle, point, size,
     scene::{Quad, Shadow, BackdropBlur, Underline, MonochromeSprite, SubpixelSprite, PolychromeSprite, DrawOrder},
-    property_trees::{TransformNodeId, ClipNodeId, PropertyTrees},
 };
 use collections::FxHashMap;
 use smallvec::SmallVec;
@@ -101,31 +100,31 @@ impl DisplayItem {
         }
     }
 
-    /// Returns the transform node ID for this item.
-    pub fn transform_node(&self) -> TransformNodeId {
+    /// Returns the baked world-space transform for this item.
+    pub fn world_transform(&self) -> TransformationMatrix {
         match self {
-            DisplayItem::Quad(q) => q.transform_node,
-            DisplayItem::Shadow(s) => s.transform_node,
-            DisplayItem::BackdropBlur(b) => b.transform_node,
-            DisplayItem::Underline(u) => u.transform_node,
-            DisplayItem::MonochromeSprite(s) => s.transform_node,
-            DisplayItem::SubpixelSprite(s) => s.transform_node,
-            DisplayItem::PolychromeSprite(s) => s.transform_node,
-            DisplayItem::Path(p) => p.transform_node,
+            DisplayItem::Quad(q) => q.world_transform,
+            DisplayItem::Shadow(s) => s.world_transform,
+            DisplayItem::BackdropBlur(b) => b.world_transform,
+            DisplayItem::Underline(u) => u.world_transform,
+            DisplayItem::MonochromeSprite(s) => s.world_transform,
+            DisplayItem::SubpixelSprite(s) => s.world_transform,
+            DisplayItem::PolychromeSprite(s) => s.world_transform,
+            DisplayItem::Path(p) => p.world_transform,
         }
     }
 
-    /// Returns the clip node ID for this item.
-    pub fn clip_node(&self) -> ClipNodeId {
+    /// Returns the baked world-space clip bounds for this item.
+    pub fn world_clip(&self) -> Bounds<Pixels> {
         match self {
-            DisplayItem::Quad(q) => q.clip_node,
-            DisplayItem::Shadow(s) => s.clip_node,
-            DisplayItem::BackdropBlur(b) => b.clip_node,
-            DisplayItem::Underline(u) => u.clip_node,
-            DisplayItem::MonochromeSprite(s) => s.clip_node,
-            DisplayItem::SubpixelSprite(s) => s.clip_node,
-            DisplayItem::PolychromeSprite(s) => s.clip_node,
-            DisplayItem::Path(p) => p.clip_node,
+            DisplayItem::Quad(q) => q.world_clip,
+            DisplayItem::Shadow(s) => s.world_clip,
+            DisplayItem::BackdropBlur(b) => b.world_clip,
+            DisplayItem::Underline(u) => u.world_clip,
+            DisplayItem::MonochromeSprite(s) => s.world_clip,
+            DisplayItem::SubpixelSprite(s) => s.world_clip,
+            DisplayItem::PolychromeSprite(s) => s.world_clip,
+            DisplayItem::Path(p) => p.world_clip,
         }
     }
 }
@@ -135,10 +134,10 @@ impl DisplayItem {
 pub(crate) struct DisplayQuad {
     /// Bounds in logical pixels (local coordinates, not transformed).
     pub bounds: Bounds<Pixels>,
-    /// Reference to transform tree node (enables O(1) transform updates).
-    pub transform_node: TransformNodeId,
-    /// Reference to clip tree node (enables O(1) clip updates).
-    pub clip_node: ClipNodeId,
+    /// Baked world-space clip bounds (computed at insert time).
+    pub world_clip: Bounds<Pixels>,
+    /// Baked world-space transform (computed at insert time).
+    pub world_transform: TransformationMatrix,
     /// Background fill (solid color or gradient).
     pub background: Background,
     /// Border color.
@@ -156,10 +155,10 @@ pub(crate) struct DisplayQuad {
 pub(crate) struct DisplayShadow {
     /// Bounds in logical pixels (local coordinates, not transformed).
     pub bounds: Bounds<Pixels>,
-    /// Reference to transform tree node.
-    pub transform_node: TransformNodeId,
-    /// Reference to clip tree node.
-    pub clip_node: ClipNodeId,
+    /// Baked world-space clip bounds (computed at insert time).
+    pub world_clip: Bounds<Pixels>,
+    /// Baked world-space transform (computed at insert time).
+    pub world_transform: TransformationMatrix,
     /// Shadow color.
     pub color: Hsla,
     /// Blur radius in logical pixels.
@@ -173,10 +172,10 @@ pub(crate) struct DisplayShadow {
 pub(crate) struct DisplayBackdropBlur {
     /// Bounds in logical pixels (local coordinates, not transformed).
     pub bounds: Bounds<Pixels>,
-    /// Reference to transform tree node.
-    pub transform_node: TransformNodeId,
-    /// Reference to clip tree node.
-    pub clip_node: ClipNodeId,
+    /// Baked world-space clip bounds (computed at insert time).
+    pub world_clip: Bounds<Pixels>,
+    /// Baked world-space transform (computed at insert time).
+    pub world_transform: TransformationMatrix,
     /// Blur radius in logical pixels.
     pub blur_radius: Pixels,
     /// Corner radii.
@@ -190,10 +189,10 @@ pub(crate) struct DisplayBackdropBlur {
 pub(crate) struct DisplayUnderline {
     /// Bounds in logical pixels (local coordinates, not transformed).
     pub bounds: Bounds<Pixels>,
-    /// Reference to transform tree node.
-    pub transform_node: TransformNodeId,
-    /// Reference to clip tree node.
-    pub clip_node: ClipNodeId,
+    /// Baked world-space clip bounds (computed at insert time).
+    pub world_clip: Bounds<Pixels>,
+    /// Baked world-space transform (computed at insert time).
+    pub world_transform: TransformationMatrix,
     /// Line color.
     pub color: Hsla,
     /// Line thickness in logical pixels.
@@ -207,10 +206,10 @@ pub(crate) struct DisplayUnderline {
 pub(crate) struct DisplayMonochromeSprite {
     /// Bounds in logical pixels (local coordinates, not transformed).
     pub bounds: Bounds<Pixels>,
-    /// Reference to transform tree node.
-    pub transform_node: TransformNodeId,
-    /// Reference to clip tree node.
-    pub clip_node: ClipNodeId,
+    /// Baked world-space clip bounds (computed at insert time).
+    pub world_clip: Bounds<Pixels>,
+    /// Baked world-space transform (computed at insert time).
+    pub world_transform: TransformationMatrix,
     /// Glyph color.
     pub color: Hsla,
     /// Atlas tile containing the glyph.
@@ -222,10 +221,10 @@ pub(crate) struct DisplayMonochromeSprite {
 pub(crate) struct DisplaySubpixelSprite {
     /// Bounds in logical pixels (local coordinates, not transformed).
     pub bounds: Bounds<Pixels>,
-    /// Reference to transform tree node.
-    pub transform_node: TransformNodeId,
-    /// Reference to clip tree node.
-    pub clip_node: ClipNodeId,
+    /// Baked world-space clip bounds (computed at insert time).
+    pub world_clip: Bounds<Pixels>,
+    /// Baked world-space transform (computed at insert time).
+    pub world_transform: TransformationMatrix,
     /// Glyph color.
     pub color: Hsla,
     /// Atlas tile containing the glyph.
@@ -237,10 +236,10 @@ pub(crate) struct DisplaySubpixelSprite {
 pub(crate) struct DisplayPolychromeSprite {
     /// Bounds in logical pixels (local coordinates, not transformed).
     pub bounds: Bounds<Pixels>,
-    /// Reference to transform tree node.
-    pub transform_node: TransformNodeId,
-    /// Reference to clip tree node.
-    pub clip_node: ClipNodeId,
+    /// Baked world-space clip bounds (computed at insert time).
+    pub world_clip: Bounds<Pixels>,
+    /// Baked world-space transform (computed at insert time).
+    pub world_transform: TransformationMatrix,
     /// Whether to render in grayscale.
     pub grayscale: bool,
     /// Opacity (0.0 to 1.0).
@@ -256,10 +255,10 @@ pub(crate) struct DisplayPolychromeSprite {
 pub(crate) struct DisplayPath {
     /// Bounds in logical pixels (local coordinates, not transformed).
     pub bounds: Bounds<Pixels>,
-    /// Reference to transform tree node.
-    pub transform_node: TransformNodeId,
-    /// Reference to clip tree node.
-    pub clip_node: ClipNodeId,
+    /// Baked world-space clip bounds (computed at insert time).
+    pub world_clip: Bounds<Pixels>,
+    /// Baked world-space transform (computed at insert time).
+    pub world_transform: TransformationMatrix,
     /// Path fill color.
     pub color: Background,
     /// Path vertices (in local coordinates).
@@ -649,10 +648,6 @@ pub(crate) struct DisplayList {
     /// Dirty regions that need re-rasterization.
     /// Empty means entire display list is valid (or was just cleared).
     dirty_regions: Vec<Bounds<Pixels>>,
-    /// Pre-baked world transforms and clips for each item.
-    /// Parallel array to `items` - index i contains the resolved transform/clip for items[i].
-    /// Populated by `bake_transforms()` to avoid per-item property tree lookups during rasterization.
-    baked_transforms: Vec<(TransformationMatrix, Bounds<Pixels>)>,
 
     // ========================================================================
     // Phase 20: Per-Element Item Tracking
@@ -680,7 +675,6 @@ impl DisplayList {
             items: Vec::new(),
             spatial_index: SpatialIndex::default(),
             dirty_regions: Vec::new(),
-            baked_transforms: Vec::new(),
             // Phase 20: Per-element tracking
             element_entries: FxHashMap::default(),
             element_paint_stack: Vec::new(),
@@ -696,7 +690,6 @@ impl DisplayList {
         self.spatial_index.clear();
         self.content_bounds = Bounds::default();
         self.dirty_regions.clear();
-        self.baked_transforms.clear();
         // Phase 20: Clear per-element tracking
         self.element_entries.clear();
         self.element_paint_stack.clear();
@@ -964,30 +957,6 @@ impl DisplayList {
         }
     }
 
-    /// Pre-bake world transforms and clips for all items.
-    ///
-    /// Call this after property trees are finalized to avoid per-item lookups
-    /// during rasterization. The baked values are stored in a parallel array
-    /// and can be accessed via `get_baked_transform()`.
-    pub fn bake_transforms(&mut self, property_trees: &mut PropertyTrees) {
-        self.baked_transforms.clear();
-        self.baked_transforms.reserve(self.items.len());
-
-        for item in &self.items {
-            let world_transform = property_trees.world_transform(item.transform_node());
-            let world_clip = property_trees.world_clip(item.clip_node());
-            self.baked_transforms.push((world_transform, world_clip));
-        }
-    }
-
-    /// Get the pre-baked world transform and clip for an item by index.
-    ///
-    /// Returns None if transforms haven't been baked or index is out of bounds.
-    #[inline]
-    pub fn get_baked_transform(&self, index: usize) -> Option<&(TransformationMatrix, Bounds<Pixels>)> {
-        self.baked_transforms.get(index)
-    }
-
     /// Iterate over items that intersect the given bounds.
     ///
     /// Uses spatial index for O(cells × items_per_cell) performance.
@@ -1009,8 +978,7 @@ impl DisplayList {
 
     /// Iterate over items that intersect the given bounds, with their indices.
     ///
-    /// Returns (index, &item) pairs so callers can also look up baked transforms
-    /// via `get_baked_transform(index)`.
+    /// Returns (index, &item) pairs for callers that need item indices.
     pub fn items_intersecting_with_index(&self, bounds: Bounds<Pixels>) -> impl Iterator<Item = (usize, &DisplayItem)> + '_ {
         debug_assert!(
             !self.spatial_index.is_dirty(),
@@ -1092,8 +1060,7 @@ impl DisplayList {
 
     /// Rasterize items intersecting the tile bounds to Scene primitives.
     ///
-    /// Uses pre-baked transforms from `bake_transforms()` for efficient rasterization.
-    /// Falls back to property tree lookups if transforms are not baked.
+    /// Each item contains baked world-space clip and transform from insert time.
     /// Coordinates are offset so that the tile's origin is at (0, 0) in the output.
     /// The scale factor converts from logical Pixels to device ScaledPixels.
     ///
@@ -1103,57 +1070,49 @@ impl DisplayList {
         tile_bounds: Bounds<Pixels>,
         scale_factor: f32,
     ) -> TileRasterResult {
-        debug_assert!(
-            !self.baked_transforms.is_empty() || self.items.is_empty(),
-            "bake_transforms() must be called before rasterize_tile()"
-        );
-
         let mut result = TileRasterResult::default();
         let mut draw_order: DrawOrder = 0;
 
-        for (index, item) in self.items_intersecting_with_index(tile_bounds) {
+        for (_index, item) in self.items_intersecting_with_index(tile_bounds) {
             draw_order += 1;
-
-            // Get pre-baked world transform and clip
-            let &(world_transform, world_clip) = &self.baked_transforms[index];
 
             match item {
                 DisplayItem::Quad(q) => {
-                    if let Some((quad, transform)) = self.rasterize_quad(q, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                    if let Some((quad, transform)) = self.rasterize_quad(q, tile_bounds, scale_factor, draw_order, q.world_transform, q.world_clip) {
                         result.quads.push(quad);
                         result.quad_transforms.push(transform);
                     }
                 }
                 DisplayItem::Shadow(s) => {
-                    if let Some((shadow, transform)) = self.rasterize_shadow(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                    if let Some((shadow, transform)) = self.rasterize_shadow(s, tile_bounds, scale_factor, draw_order, s.world_transform, s.world_clip) {
                         result.shadows.push(shadow);
                         result.shadow_transforms.push(transform);
                     }
                 }
                 DisplayItem::BackdropBlur(b) => {
-                    if let Some((blur, transform)) = self.rasterize_backdrop_blur(b, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                    if let Some((blur, transform)) = self.rasterize_backdrop_blur(b, tile_bounds, scale_factor, draw_order, b.world_transform, b.world_clip) {
                         result.backdrop_blurs.push(blur);
                         result.backdrop_blur_transforms.push(transform);
                     }
                 }
                 DisplayItem::Underline(u) => {
-                    if let Some((underline, transform)) = self.rasterize_underline(u, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                    if let Some((underline, transform)) = self.rasterize_underline(u, tile_bounds, scale_factor, draw_order, u.world_transform, u.world_clip) {
                         result.underlines.push(underline);
                         result.underline_transforms.push(transform);
                     }
                 }
                 DisplayItem::MonochromeSprite(s) => {
-                    if let Some(sprite) = self.rasterize_monochrome_sprite(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                    if let Some(sprite) = self.rasterize_monochrome_sprite(s, tile_bounds, scale_factor, draw_order, s.world_transform, s.world_clip) {
                         result.monochrome_sprites.push(sprite);
                     }
                 }
                 DisplayItem::SubpixelSprite(s) => {
-                    if let Some(sprite) = self.rasterize_subpixel_sprite(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                    if let Some(sprite) = self.rasterize_subpixel_sprite(s, tile_bounds, scale_factor, draw_order, s.world_transform, s.world_clip) {
                         result.subpixel_sprites.push(sprite);
                     }
                 }
                 DisplayItem::PolychromeSprite(s) => {
-                    if let Some((sprite, transform)) = self.rasterize_polychrome_sprite(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                    if let Some((sprite, transform)) = self.rasterize_polychrome_sprite(s, tile_bounds, scale_factor, draw_order, s.world_transform, s.world_clip) {
                         result.polychrome_sprites.push(sprite);
                         result.polychrome_sprite_transforms.push(transform);
                     }
@@ -1171,11 +1130,6 @@ impl DisplayList {
     /// This is used for the root layer which doesn't use tiling.
     /// Items are converted to window-coordinate primitives for direct Scene insertion.
     pub fn rasterize_all(&self, scale_factor: f32) -> TileRasterResult {
-        debug_assert!(
-            !self.baked_transforms.is_empty() || self.items.is_empty(),
-            "bake_transforms() must be called before rasterize_all()"
-        );
-
         let mut result = TileRasterResult::default();
         let mut draw_order: DrawOrder = 0;
 
@@ -1188,49 +1142,46 @@ impl DisplayList {
             },
         };
 
-        for (index, item) in self.items.iter().enumerate() {
+        for item in self.items.iter() {
             draw_order += 1;
-
-            // Get pre-baked world transform and clip
-            let &(world_transform, world_clip) = &self.baked_transforms[index];
 
             match item {
                 DisplayItem::Quad(q) => {
-                    if let Some((quad, transform)) = self.rasterize_quad(q, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                    if let Some((quad, transform)) = self.rasterize_quad(q, tile_bounds, scale_factor, draw_order, q.world_transform, q.world_clip) {
                         result.quads.push(quad);
                         result.quad_transforms.push(transform);
                     }
                 }
                 DisplayItem::Shadow(s) => {
-                    if let Some((shadow, transform)) = self.rasterize_shadow(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                    if let Some((shadow, transform)) = self.rasterize_shadow(s, tile_bounds, scale_factor, draw_order, s.world_transform, s.world_clip) {
                         result.shadows.push(shadow);
                         result.shadow_transforms.push(transform);
                     }
                 }
                 DisplayItem::BackdropBlur(b) => {
-                    if let Some((blur, transform)) = self.rasterize_backdrop_blur(b, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                    if let Some((blur, transform)) = self.rasterize_backdrop_blur(b, tile_bounds, scale_factor, draw_order, b.world_transform, b.world_clip) {
                         result.backdrop_blurs.push(blur);
                         result.backdrop_blur_transforms.push(transform);
                     }
                 }
                 DisplayItem::Underline(u) => {
-                    if let Some((underline, transform)) = self.rasterize_underline(u, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                    if let Some((underline, transform)) = self.rasterize_underline(u, tile_bounds, scale_factor, draw_order, u.world_transform, u.world_clip) {
                         result.underlines.push(underline);
                         result.underline_transforms.push(transform);
                     }
                 }
                 DisplayItem::MonochromeSprite(s) => {
-                    if let Some(sprite) = self.rasterize_monochrome_sprite(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                    if let Some(sprite) = self.rasterize_monochrome_sprite(s, tile_bounds, scale_factor, draw_order, s.world_transform, s.world_clip) {
                         result.monochrome_sprites.push(sprite);
                     }
                 }
                 DisplayItem::SubpixelSprite(s) => {
-                    if let Some(sprite) = self.rasterize_subpixel_sprite(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                    if let Some(sprite) = self.rasterize_subpixel_sprite(s, tile_bounds, scale_factor, draw_order, s.world_transform, s.world_clip) {
                         result.subpixel_sprites.push(sprite);
                     }
                 }
                 DisplayItem::PolychromeSprite(s) => {
-                    if let Some((sprite, transform)) = self.rasterize_polychrome_sprite(s, tile_bounds, scale_factor, draw_order, world_transform, world_clip) {
+                    if let Some((sprite, transform)) = self.rasterize_polychrome_sprite(s, tile_bounds, scale_factor, draw_order, s.world_transform, s.world_clip) {
                         result.polychrome_sprites.push(sprite);
                         result.polychrome_sprite_transforms.push(transform);
                     }
@@ -1572,18 +1523,18 @@ impl DisplayListManager {
 /// Convert a Scene Primitive to a DisplayItem.
 ///
 /// This is a legacy conversion function used during the transition to direct-to-DisplayList
-/// painting. New code should create DisplayItems directly with property tree node references.
+/// painting. New code should create DisplayItems directly.
 ///
 /// `content_origin` is the window-space origin of the scroll container in ScaledPixels.
 /// This is subtracted from all bounds to convert from window coordinates to content coordinates.
 /// `inv_scale` is 1.0 / scale_factor to convert from ScaledPixels to Pixels.
-/// `transform_node` and `clip_node` are the property tree node IDs to reference.
+/// `world_transform` and `world_clip` are the baked world-space values from property trees.
 pub fn convert_primitive_to_display_item(
     primitive: &crate::scene::Primitive,
     inv_scale: f32,
     content_origin: Point<crate::ScaledPixels>,
-    transform_node: TransformNodeId,
-    clip_node: ClipNodeId,
+    world_transform: TransformationMatrix,
+    world_clip: Bounds<Pixels>,
 ) -> Option<DisplayItem> {
     use crate::scene::Primitive;
 
@@ -1591,8 +1542,8 @@ pub fn convert_primitive_to_display_item(
         Primitive::Quad(quad, _transform) => {
             Some(DisplayItem::Quad(DisplayQuad {
                 bounds: offset_and_scale_bounds_to_pixels(&quad.bounds, content_origin, inv_scale),
-                transform_node,
-                clip_node,
+                world_clip,
+                world_transform,
                 background: quad.background.clone(),
                 border_color: quad.border_color,
                 border_style: quad.border_style,
@@ -1603,8 +1554,8 @@ pub fn convert_primitive_to_display_item(
         Primitive::Shadow(shadow, _transform) => {
             Some(DisplayItem::Shadow(DisplayShadow {
                 bounds: offset_and_scale_bounds_to_pixels(&shadow.bounds, content_origin, inv_scale),
-                transform_node,
-                clip_node,
+                world_clip,
+                world_transform,
                 color: shadow.color,
                 blur_radius: Pixels(shadow.blur_radius.0 * inv_scale),
                 corner_radii: scale_corners_to_pixels(&shadow.corner_radii, inv_scale),
@@ -1613,8 +1564,8 @@ pub fn convert_primitive_to_display_item(
         Primitive::BackdropBlur(blur, _transform) => {
             Some(DisplayItem::BackdropBlur(DisplayBackdropBlur {
                 bounds: offset_and_scale_bounds_to_pixels(&blur.bounds, content_origin, inv_scale),
-                transform_node,
-                clip_node,
+                world_clip,
+                world_transform,
                 blur_radius: Pixels(blur.blur_radius.0 * inv_scale),
                 corner_radii: scale_corners_to_pixels(&blur.corner_radii, inv_scale),
                 tint: blur.tint,
@@ -1623,8 +1574,8 @@ pub fn convert_primitive_to_display_item(
         Primitive::Underline(underline, _transform) => {
             Some(DisplayItem::Underline(DisplayUnderline {
                 bounds: offset_and_scale_bounds_to_pixels(&underline.bounds, content_origin, inv_scale),
-                transform_node,
-                clip_node,
+                world_clip,
+                world_transform,
                 color: underline.color,
                 thickness: Pixels(underline.thickness.0 * inv_scale),
                 wavy: underline.wavy != 0,
@@ -1633,8 +1584,8 @@ pub fn convert_primitive_to_display_item(
         Primitive::MonochromeSprite(sprite) => {
             Some(DisplayItem::MonochromeSprite(DisplayMonochromeSprite {
                 bounds: offset_and_scale_bounds_to_pixels(&sprite.bounds, content_origin, inv_scale),
-                transform_node,
-                clip_node,
+                world_clip,
+                world_transform,
                 color: sprite.color,
                 tile: sprite.tile.clone(),
             }))
@@ -1642,8 +1593,8 @@ pub fn convert_primitive_to_display_item(
         Primitive::SubpixelSprite(sprite) => {
             Some(DisplayItem::SubpixelSprite(DisplaySubpixelSprite {
                 bounds: offset_and_scale_bounds_to_pixels(&sprite.bounds, content_origin, inv_scale),
-                transform_node,
-                clip_node,
+                world_clip,
+                world_transform,
                 color: sprite.color,
                 tile: sprite.tile.clone(),
             }))
@@ -1651,8 +1602,8 @@ pub fn convert_primitive_to_display_item(
         Primitive::PolychromeSprite(sprite, _transform) => {
             Some(DisplayItem::PolychromeSprite(DisplayPolychromeSprite {
                 bounds: offset_and_scale_bounds_to_pixels(&sprite.bounds, content_origin, inv_scale),
-                transform_node,
-                clip_node,
+                world_clip,
+                world_transform,
                 grayscale: sprite.grayscale,
                 opacity: sprite.opacity,
                 corner_radii: scale_corners_to_pixels(&sprite.corner_radii, inv_scale),
@@ -1674,8 +1625,8 @@ pub fn convert_primitive_to_display_item(
 
             Some(DisplayItem::Path(DisplayPath {
                 bounds: offset_and_scale_bounds_to_pixels(&path.bounds, content_origin, inv_scale),
-                transform_node,
-                clip_node,
+                world_clip,
+                world_transform,
                 color: path.color.clone(),
                 vertices,
             }))
@@ -1799,8 +1750,8 @@ mod tests {
                 origin: point(Pixels(10.0), Pixels(10.0)),
                 size: size(Pixels(100.0), Pixels(100.0)),
             },
-            transform_node: TransformNodeId::ROOT,
-            clip_node: ClipNodeId::ROOT,
+            world_clip: Bounds::default(),
+            world_transform: TransformationMatrix::unit(),
             background: Background::default(),
             border_color: Hsla::default(),
             border_style: BorderStyle::default(),
@@ -1819,8 +1770,8 @@ mod tests {
                 origin: point(Pixels(50.0), Pixels(50.0)),
                 size: size(Pixels(200.0), Pixels(200.0)),
             },
-            transform_node: TransformNodeId::ROOT,
-            clip_node: ClipNodeId::ROOT,
+            world_clip: Bounds::default(),
+            world_transform: TransformationMatrix::unit(),
             background: Background::default(),
             border_color: Hsla::default(),
             border_style: BorderStyle::default(),
@@ -1845,8 +1796,8 @@ mod tests {
                 origin: point(Pixels(0.0), Pixels(0.0)),
                 size: size(Pixels(100.0), Pixels(100.0)),
             },
-            transform_node: TransformNodeId::ROOT,
-            clip_node: ClipNodeId::ROOT,
+            world_clip: Bounds::default(),
+            world_transform: TransformationMatrix::unit(),
             background: Background::default(),
             border_color: Hsla::default(),
             border_style: BorderStyle::default(),
@@ -1860,8 +1811,8 @@ mod tests {
                 origin: point(Pixels(200.0), Pixels(200.0)),
                 size: size(Pixels(100.0), Pixels(100.0)),
             },
-            transform_node: TransformNodeId::ROOT,
-            clip_node: ClipNodeId::ROOT,
+            world_clip: Bounds::default(),
+            world_transform: TransformationMatrix::unit(),
             background: Background::default(),
             border_color: Hsla::default(),
             border_style: BorderStyle::default(),
@@ -1958,8 +1909,8 @@ mod tests {
                 origin: point(Pixels(0.0), Pixels(0.0)),
                 size: size(Pixels(1000.0), Pixels(1000.0)),
             },
-            transform_node: TransformNodeId::ROOT,
-            clip_node: ClipNodeId::ROOT,
+            world_clip: Bounds::default(),
+            world_transform: TransformationMatrix::unit(),
             background: Background::default(),
             border_color: Hsla::default(),
             border_style: BorderStyle::default(),
@@ -2028,8 +1979,8 @@ mod tests {
                         origin: point(Pixels(col as f32 * 100.0), Pixels(row as f32 * 100.0)),
                         size: size(Pixels(80.0), Pixels(80.0)),
                     },
-                    transform_node: TransformNodeId::ROOT,
-                    clip_node: ClipNodeId::ROOT,
+                    world_clip: Bounds::default(),
+                    world_transform: TransformationMatrix::unit(),
                     background: Background::default(),
                     border_color: Hsla::default(),
                     border_style: BorderStyle::default(),
@@ -2080,8 +2031,8 @@ mod tests {
                 origin: point(Pixels(0.0), Pixels(0.0)),
                 size: size(Pixels(100.0), Pixels(100.0)),
             },
-            transform_node: TransformNodeId::ROOT,
-            clip_node: ClipNodeId::ROOT,
+            world_clip: Bounds::default(),
+            world_transform: TransformationMatrix::unit(),
             background: Background::default(),
             border_color: Hsla::default(),
             border_style: BorderStyle::default(),

@@ -2486,11 +2486,8 @@ impl Window {
         if let Some(layer) = root_layer {
             if let Some(ref mut display_list) = layer.display_list {
                 if !display_list.items.is_empty() {
-                    // Prepare the display list (bake transforms)
-                    layer.property_trees.precompute_all();
-                    display_list.bake_transforms(&mut layer.property_trees);
-
                     // Rasterize all items to primitives
+                    // (transforms are baked at insert time, no separate bake pass needed)
                     let result = display_list.rasterize_all(scale_factor);
 
                     // Insert primitives into Scene
@@ -3059,6 +3056,12 @@ impl Window {
             }
         }
 
+        // Phase 0.3: Bake world transform and clip at insert time.
+        // This makes items self-contained so they can be copied across frames without
+        // referencing property trees (which may be cleared).
+        let world_transform = layer.property_trees.world_transform(transform_node);
+        let world_clip = layer.property_trees.world_clip(clip_node);
+
         let content_origin = Point {
             x: ScaledPixels(layer.content_origin.x.0 * scale_factor),
             y: ScaledPixels(layer.content_origin.y.0 * scale_factor),
@@ -3068,8 +3071,8 @@ impl Window {
             &primitive,
             inv_scale,
             content_origin,
-            transform_node,
-            clip_node,
+            world_transform,
+            world_clip,
         ) {
             // All layers now have a display list (including root)
             let display_list = layer
