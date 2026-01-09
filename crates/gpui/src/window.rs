@@ -2846,15 +2846,6 @@ impl Window {
         self.measure_cache.take_stats()
     }
 
-    /// Returns scene dirty statistics from the previous rendered frame.
-    ///
-    /// This shows how many primitives were freshly painted vs replayed from cache.
-    /// Useful for understanding cache effectiveness at the scene level.
-    /// When `is_fully_cached()` returns true, the renderer could potentially skip GPU uploads.
-    pub fn scene_dirty_stats(&self) -> crate::scene::SceneDirtyStats {
-        self.rendered_frame.scene.dirty_stats()
-    }
-
     /// Begin capturing primitives for a subtree that may be cached to a texture.
     /// Call this before painting the subtree's content.
     pub(crate) fn begin_subtree_capture(&mut self, id: GlobalElementId, bounds: Bounds<Pixels>) {

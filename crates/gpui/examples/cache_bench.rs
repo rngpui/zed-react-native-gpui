@@ -22,7 +22,7 @@ use std::time::Instant;
 
 use gpui::{
     Application, Bounds, Context, LayoutCacheStats, MeasureCacheStats, Render,
-    SceneDirtyStats, TextShapeCacheStats, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    TextShapeCacheStats, TitlebarOptions, Window, WindowBounds, WindowOptions,
     div, prelude::*, px, rgb, size,
 };
 
@@ -51,7 +51,6 @@ struct CacheBench {
     text_cache_stats: TextShapeCacheStats,
     measure_cache_stats: MeasureCacheStats,
     layout_cache_stats: LayoutCacheStats,
-    scene_dirty_stats: SceneDirtyStats,
     frame_count: u64,
 }
 
@@ -63,7 +62,6 @@ impl CacheBench {
             text_cache_stats: TextShapeCacheStats::default(),
             measure_cache_stats: MeasureCacheStats::default(),
             layout_cache_stats: LayoutCacheStats::default(),
-            scene_dirty_stats: SceneDirtyStats::default(),
             frame_count: 0,
         }
     }
@@ -87,7 +85,6 @@ impl CacheBench {
         self.text_cache_stats = window.take_text_shape_cache_stats();
         self.measure_cache_stats = window.take_measure_cache_stats();
         self.layout_cache_stats = window.take_layout_cache_stats();
-        self.scene_dirty_stats = window.scene_dirty_stats();
         self.frame_count += 1;
 
         (fps, avg_frame_time)
@@ -103,7 +100,6 @@ impl Render for CacheBench {
         let text_stats = self.text_cache_stats;
         let measure_stats = self.measure_cache_stats;
         let layout_stats = self.layout_cache_stats;
-        let scene_stats = self.scene_dirty_stats;
         let frame_count = self.frame_count;
 
         // Calculate hit rates
@@ -204,26 +200,6 @@ impl Render for CacheBench {
                             .child(stat_box("Misses", format!("{}", layout_stats.misses), rgb(0xf38ba8)))
                             .child(stat_box("Hit Rate", format!("{:.1}%", layout_hit_rate), rgb(0xf9e2af)))
                             .child(stat_box("Pruned", format!("{}", layout_stats.pruned), rgb(0x89dceb))),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(0x9399b2))
-                            .text_sm()
-                            .mt_2()
-                            .child("Scene Dirty Stats"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_4()
-                            .child(stat_box("Total", format!("{}", scene_stats.total_primitives), rgb(0xcdd6f4)))
-                            .child(stat_box("Dirty", format!("{}", scene_stats.dirty_primitives), rgb(0xf38ba8)))
-                            .child(stat_box("Hit Rate", format!("{:.1}%", scene_stats.cache_hit_rate()), rgb(0xf9e2af)))
-                            .child(stat_box(
-                                "Cached",
-                                if scene_stats.is_fully_cached() { "Yes" } else { "No" }.to_string(),
-                                if scene_stats.is_fully_cached() { rgb(0xa6e3a1) } else { rgb(0xf38ba8) },
-                            )),
                     ),
             )
             .child(

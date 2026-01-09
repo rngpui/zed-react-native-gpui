@@ -35,7 +35,6 @@ mod profiler;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod queue;
 mod scene;
-pub use scene::SceneDirtyStats;
 mod display_list;
 mod layer;
 pub use layer::{LayerId, LayerReason, LayerTree};

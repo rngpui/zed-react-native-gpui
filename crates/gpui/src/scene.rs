@@ -24,50 +24,6 @@ pub(crate) type PathVertex_ScaledPixels = PathVertex<ScaledPixels>;
 
 pub(crate) type DrawOrder = u32;
 
-/// Statistics about scene dirty state for a single frame.
-/// Used to track which parts of the scene changed and could benefit from partial GPU updates.
-#[derive(Default, Clone, Copy, Debug)]
-pub struct SceneDirtyStats {
-    /// Total number of primitives in the scene
-    pub total_primitives: usize,
-    /// Number of primitives that were freshly painted (not from cache)
-    pub dirty_primitives: usize,
-    /// Number of quads that were freshly painted
-    pub dirty_quads: usize,
-    /// Number of paths that were freshly painted
-    pub dirty_paths: usize,
-    /// Number of shadows that were freshly painted
-    pub dirty_shadows: usize,
-    /// Number of underlines that were freshly painted
-    pub dirty_underlines: usize,
-    /// Number of monochrome sprites that were freshly painted
-    pub dirty_monochrome_sprites: usize,
-    /// Number of subpixel sprites that were freshly painted
-    pub dirty_subpixel_sprites: usize,
-    /// Number of polychrome sprites that were freshly painted
-    pub dirty_polychrome_sprites: usize,
-    /// Number of surfaces that were freshly painted
-    pub dirty_surfaces: usize,
-    /// Number of backdrop blurs that were freshly painted
-    pub dirty_backdrop_blurs: usize,
-}
-
-impl SceneDirtyStats {
-    /// Returns true if no primitives were freshly painted (all from cache)
-    pub fn is_fully_cached(&self) -> bool {
-        self.dirty_primitives == 0
-    }
-
-    /// Returns the cache hit rate as a percentage (0.0 to 100.0)
-    pub fn cache_hit_rate(&self) -> f32 {
-        if self.total_primitives == 0 {
-            100.0
-        } else {
-            let cached = self.total_primitives.saturating_sub(self.dirty_primitives);
-            (cached as f32 / self.total_primitives as f32) * 100.0
-        }
-    }
-}
 
 /// Represents a captured subtree that should be rendered to a texture.
 /// Used for render-to-texture caching of subtrees during scrolling.
@@ -88,7 +44,6 @@ pub(crate) struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
     generation: u64,
     dirty_ranges: Vec<Range<usize>>,
-    dirty_stats: SceneDirtyStats,
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<DrawOrder>,
     pub(crate) shadows: Vec<Shadow>,
@@ -123,7 +78,6 @@ impl Scene {
         self.paint_operations.clear();
         self.generation = self.generation.wrapping_add(1);
         self.dirty_ranges.clear();
-        self.dirty_stats = SceneDirtyStats::default();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
         self.paths.clear();
@@ -366,177 +320,6 @@ impl Scene {
         self.insert_primitive_internal(primitive, true);
     }
 
-    /// Insert a primitive with an offset applied during insertion.
-    /// This avoids the need to clone+translate the primitive before insertion,
-    /// reducing the total clone count from 2 to 1 for cached primitives.
-    ///
-    /// Note: This method DOES add to paint_operations because SubtreeCache
-    /// needs complete paint_operations to replay entire subtrees correctly.
-    /// These primitives are from PrimitiveCache, so they count as cached (not dirty).
-    pub fn insert_primitive_with_offset(
-        &mut self,
-        primitive: &Primitive,
-        offset: Point<ScaledPixels>,
-        content_mask: ContentMask<ScaledPixels>,
-    ) {
-        let transformed_bounds = self.offset_bounds(primitive, offset);
-        let clipped_bounds = transformed_bounds.intersect(&content_mask.bounds);
-
-        if clipped_bounds.is_empty() {
-            return;
-        }
-
-        let order = self
-            .layer_stack
-            .last()
-            .copied()
-            .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
-
-        // Track total primitives (but not dirty - these are from PrimitiveCache)
-        self.dirty_stats.total_primitives += 1;
-
-        // Clone with offset and content_mask applied in one pass
-        // Also add to paint_operations for SubtreeCache replay support
-        match primitive {
-            Primitive::Shadow(shadow, transform) => {
-                let mut shadow = shadow.clone();
-                shadow.order = order;
-                shadow.bounds = Self::apply_offset(shadow.bounds, offset);
-                shadow.content_mask = content_mask;
-                self.paint_operations
-                    .push(PaintOperation::Primitive(Primitive::Shadow(shadow.clone(), *transform)));
-                self.shadows.push(shadow);
-                self.shadow_transforms.push(*transform);
-            }
-            Primitive::Quad(quad, transform) => {
-                let mut quad = quad.clone();
-                quad.order = order;
-                quad.bounds = Self::apply_offset(quad.bounds, offset);
-                quad.content_mask = content_mask;
-                self.paint_operations
-                    .push(PaintOperation::Primitive(Primitive::Quad(quad.clone(), *transform)));
-                self.quads.push(quad);
-                self.quad_transforms.push(*transform);
-            }
-            Primitive::BackdropBlur(blur, transform) => {
-                let mut blur = blur.clone();
-                blur.order = order;
-                blur.bounds = Self::apply_offset(blur.bounds, offset);
-                blur.content_mask = content_mask;
-                self.paint_operations
-                    .push(PaintOperation::Primitive(Primitive::BackdropBlur(blur.clone(), *transform)));
-                self.backdrop_blurs.push(blur);
-                self.backdrop_blur_transforms.push(*transform);
-            }
-            Primitive::Path(path) => {
-                let mut path = path.clone();
-                path.order = order;
-                path.id = PathId(self.paths.len());
-                path.bounds = Self::apply_offset(path.bounds, offset);
-                path.content_mask = content_mask.clone();
-                for vertex in &mut path.vertices {
-                    vertex.xy_position = Point {
-                        x: vertex.xy_position.x + offset.x,
-                        y: vertex.xy_position.y + offset.y,
-                    };
-                    vertex.content_mask = content_mask.clone();
-                }
-                self.paint_operations
-                    .push(PaintOperation::Primitive(Primitive::Path(path.clone())));
-                self.paths.push(path);
-            }
-            Primitive::Underline(underline, transform) => {
-                let mut underline = underline.clone();
-                underline.order = order;
-                underline.bounds = Self::apply_offset(underline.bounds, offset);
-                underline.content_mask = content_mask;
-                self.paint_operations
-                    .push(PaintOperation::Primitive(Primitive::Underline(underline.clone(), *transform)));
-                self.underlines.push(underline);
-                self.underline_transforms.push(*transform);
-            }
-            Primitive::MonochromeSprite(sprite) => {
-                let mut sprite = sprite.clone();
-                sprite.order = order;
-                sprite.bounds = Self::apply_offset(sprite.bounds, offset);
-                sprite.content_mask = content_mask;
-                self.paint_operations
-                    .push(PaintOperation::Primitive(Primitive::MonochromeSprite(sprite.clone())));
-                self.monochrome_sprites.push(sprite);
-            }
-            Primitive::SubpixelSprite(sprite) => {
-                let mut sprite = sprite.clone();
-                sprite.order = order;
-                sprite.bounds = Self::apply_offset(sprite.bounds, offset);
-                sprite.content_mask = content_mask;
-                self.paint_operations
-                    .push(PaintOperation::Primitive(Primitive::SubpixelSprite(sprite.clone())));
-                self.subpixel_sprites.push(sprite);
-            }
-            Primitive::PolychromeSprite(sprite, transform) => {
-                let mut sprite = sprite.clone();
-                sprite.order = order;
-                sprite.bounds = Self::apply_offset(sprite.bounds, offset);
-                sprite.content_mask = content_mask;
-                self.paint_operations
-                    .push(PaintOperation::Primitive(Primitive::PolychromeSprite(sprite.clone(), *transform)));
-                self.polychrome_sprites.push(sprite);
-                self.polychrome_sprite_transforms.push(*transform);
-            }
-            Primitive::Surface(surface) => {
-                let mut surface = surface.clone();
-                surface.order = order;
-                surface.bounds = Self::apply_offset(surface.bounds, offset);
-                surface.content_mask = content_mask;
-                self.paint_operations
-                    .push(PaintOperation::Primitive(Primitive::Surface(surface.clone())));
-                self.surfaces.push(surface);
-            }
-            Primitive::CachedTexture(sprite) => {
-                let mut sprite = sprite.clone();
-                sprite.order = order;
-                sprite.bounds = Self::apply_offset(sprite.bounds, offset);
-                sprite.content_mask = content_mask;
-                self.paint_operations
-                    .push(PaintOperation::Primitive(Primitive::CachedTexture(sprite)));
-                // Note: CachedTextureSprites are not collected into a typed array
-                // because each one has its own texture and needs individual draw calls
-            }
-            Primitive::TileSprite(sprite) => {
-                let mut sprite = sprite.clone();
-                sprite.order = order;
-                sprite.bounds = Self::apply_offset(sprite.bounds, offset);
-                sprite.content_mask = content_mask;
-                self.paint_operations
-                    .push(PaintOperation::Primitive(Primitive::TileSprite(sprite.clone())));
-                self.tile_sprites.push(sprite);
-            }
-        }
-    }
-
-    fn apply_offset(mut bounds: Bounds<ScaledPixels>, offset: Point<ScaledPixels>) -> Bounds<ScaledPixels> {
-        bounds.origin.x = bounds.origin.x + offset.x;
-        bounds.origin.y = bounds.origin.y + offset.y;
-        bounds
-    }
-
-    fn offset_bounds(&self, primitive: &Primitive, offset: Point<ScaledPixels>) -> Bounds<ScaledPixels> {
-        let bounds = match primitive {
-            Primitive::Shadow(shadow, _) => shadow.bounds,
-            Primitive::Quad(quad, _) => quad.bounds,
-            Primitive::BackdropBlur(blur, _) => blur.bounds,
-            Primitive::Path(path) => path.bounds,
-            Primitive::Underline(underline, _) => underline.bounds,
-            Primitive::MonochromeSprite(sprite) => sprite.bounds,
-            Primitive::SubpixelSprite(sprite) => sprite.bounds,
-            Primitive::PolychromeSprite(sprite, _) => sprite.bounds,
-            Primitive::Surface(surface) => surface.bounds,
-            Primitive::CachedTexture(sprite) => sprite.bounds,
-            Primitive::TileSprite(sprite) => sprite.bounds,
-        };
-        Self::apply_offset(bounds, offset)
-    }
-
     fn insert_primitive_internal(&mut self, primitive: impl Into<Primitive>, from_cache: bool) {
         let mut primitive = primitive.into();
         let capturing_subtree = !self.pending_subtree_captures.is_empty();
@@ -564,90 +347,55 @@ impl Scene {
             .copied()
             .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
 
-        // Track total and dirty primitives by type
-        self.dirty_stats.total_primitives += 1;
-        if !from_cache {
-            self.dirty_stats.dirty_primitives += 1;
-        }
-
         match &mut primitive {
             Primitive::Shadow(shadow, transform) => {
                 shadow.order = order;
-                if !from_cache {
-                    self.dirty_stats.dirty_shadows += 1;
-                }
                 self.shadows.push(shadow.clone());
                 self.shadow_transforms.push(*transform);
             }
             Primitive::Quad(quad, transform) => {
                 quad.order = order;
-                if !from_cache {
-                    self.dirty_stats.dirty_quads += 1;
-                }
                 self.quads.push(quad.clone());
                 self.quad_transforms.push(*transform);
             }
             Primitive::BackdropBlur(blur, transform) => {
                 blur.order = order;
-                if !from_cache {
-                    self.dirty_stats.dirty_backdrop_blurs += 1;
-                }
                 self.backdrop_blurs.push(blur.clone());
                 self.backdrop_blur_transforms.push(*transform);
             }
             Primitive::Path(path) => {
                 path.order = order;
                 path.id = PathId(self.paths.len());
-                if !from_cache {
-                    self.dirty_stats.dirty_paths += 1;
-                }
                 self.paths.push(path.clone());
             }
             Primitive::Underline(underline, transform) => {
                 underline.order = order;
-                if !from_cache {
-                    self.dirty_stats.dirty_underlines += 1;
-                }
                 self.underlines.push(underline.clone());
                 self.underline_transforms.push(*transform);
             }
             Primitive::MonochromeSprite(sprite) => {
                 sprite.order = order;
-                if !from_cache {
-                    self.dirty_stats.dirty_monochrome_sprites += 1;
-                }
                 self.monochrome_sprites.push(sprite.clone());
             }
             Primitive::SubpixelSprite(sprite) => {
                 sprite.order = order;
-                if !from_cache {
-                    self.dirty_stats.dirty_subpixel_sprites += 1;
-                }
                 self.subpixel_sprites.push(sprite.clone());
             }
             Primitive::PolychromeSprite(sprite, transform) => {
                 sprite.order = order;
-                if !from_cache {
-                    self.dirty_stats.dirty_polychrome_sprites += 1;
-                }
                 self.polychrome_sprites.push(sprite.clone());
                 self.polychrome_sprite_transforms.push(*transform);
             }
             Primitive::Surface(surface) => {
                 surface.order = order;
-                if !from_cache {
-                    self.dirty_stats.dirty_surfaces += 1;
-                }
                 self.surfaces.push(surface.clone());
             }
             Primitive::CachedTexture(sprite) => {
                 sprite.order = order;
-                // Note: No dirty tracking yet for cached textures
                 self.cached_textures.push(sprite.clone());
             }
             Primitive::TileSprite(sprite) => {
                 sprite.order = order;
-                // Note: No dirty tracking yet for tile sprites
                 self.tile_sprites.push(sprite.clone());
             }
         }
@@ -808,12 +556,6 @@ impl Scene {
 
     pub fn dirty_batch_ranges(&self) -> &[Range<usize>] {
         &self.dirty_ranges
-    }
-
-    /// Returns statistics about which primitives were freshly painted vs from cache.
-    /// Useful for determining whether GPU buffer updates can be skipped or minimized.
-    pub fn dirty_stats(&self) -> SceneDirtyStats {
-        self.dirty_stats
     }
 
     #[cfg_attr(

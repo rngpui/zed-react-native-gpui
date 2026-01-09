@@ -282,11 +282,6 @@ impl Layer {
             self.display_list = Some(DisplayList::new(element_id.clone()));
         }
     }
-
-    /// Get the previous frame's display list for cache lookup.
-    pub(crate) fn previous_display_list(&self) -> Option<&DisplayList> {
-        self.previous_display_list.as_ref()
-    }
 }
 
 /// Tree of all compositing layers for a window.
