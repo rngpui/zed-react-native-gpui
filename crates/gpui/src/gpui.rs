@@ -30,8 +30,6 @@ mod key_dispatch;
 mod keymap;
 mod path_builder;
 mod platform;
-mod primitive_cache;
-pub use primitive_cache::PrimitiveCacheStats;
 pub mod prelude;
 mod profiler;
 #[cfg(any(target_os = "windows", target_os = "linux"))]

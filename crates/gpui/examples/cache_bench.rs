@@ -21,7 +21,7 @@
 use std::time::Instant;
 
 use gpui::{
-    Application, Bounds, Context, LayoutCacheStats, MeasureCacheStats, PrimitiveCacheStats, Render,
+    Application, Bounds, Context, LayoutCacheStats, MeasureCacheStats, Render,
     SceneDirtyStats, TextShapeCacheStats, TitlebarOptions, Window, WindowBounds, WindowOptions,
     div, prelude::*, px, rgb, size,
 };
@@ -48,7 +48,6 @@ const CELL_GAP: f32 = 5.0;
 struct CacheBench {
     frame_times: Vec<f32>,
     last_frame: Instant,
-    cache_stats: PrimitiveCacheStats,
     text_cache_stats: TextShapeCacheStats,
     measure_cache_stats: MeasureCacheStats,
     layout_cache_stats: LayoutCacheStats,
@@ -61,7 +60,6 @@ impl CacheBench {
         Self {
             frame_times: Vec::with_capacity(120),
             last_frame: Instant::now(),
-            cache_stats: PrimitiveCacheStats::default(),
             text_cache_stats: TextShapeCacheStats::default(),
             measure_cache_stats: MeasureCacheStats::default(),
             layout_cache_stats: LayoutCacheStats::default(),
@@ -86,7 +84,6 @@ impl CacheBench {
         let fps = 1000.0 / avg_frame_time;
 
         // Get cache stats from the previous frame
-        self.cache_stats = window.take_primitive_cache_stats();
         self.text_cache_stats = window.take_text_shape_cache_stats();
         self.measure_cache_stats = window.take_measure_cache_stats();
         self.layout_cache_stats = window.take_layout_cache_stats();
@@ -103,7 +100,6 @@ impl Render for CacheBench {
         window.request_animation_frame();
 
         let (fps, frame_time) = self.update_stats(window);
-        let stats = self.cache_stats;
         let text_stats = self.text_cache_stats;
         let measure_stats = self.measure_cache_stats;
         let layout_stats = self.layout_cache_stats;
@@ -111,13 +107,6 @@ impl Render for CacheBench {
         let frame_count = self.frame_count;
 
         // Calculate hit rates
-        let total = stats.hits + stats.misses;
-        let hit_rate = if total > 0 {
-            (stats.hits as f32 / total as f32) * 100.0
-        } else {
-            0.0
-        };
-
         let text_total = text_stats.hits + text_stats.misses;
         let text_hit_rate = if text_total > 0 {
             (text_stats.hits as f32 / text_total as f32) * 100.0
@@ -167,22 +156,6 @@ impl Render for CacheBench {
                             .child(stat_box("FPS", format!("{:.1}", fps), rgb(0xa6e3a1)))
                             .child(stat_box("Frame", format!("{:.2}ms", frame_time), rgb(0x89b4fa)))
                             .child(stat_box("Frame #", format!("{}", frame_count), rgb(0xf5c2e7))),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(0x9399b2))
-                            .text_sm()
-                            .mt_2()
-                            .child("Primitive Cache"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_4()
-                            .child(stat_box("Hits", format!("{}", stats.hits), rgb(0xa6e3a1)))
-                            .child(stat_box("Misses", format!("{}", stats.misses), rgb(0xf38ba8)))
-                            .child(stat_box("Hit Rate", format!("{:.1}%", hit_rate), rgb(0xf9e2af)))
-                            .child(stat_box("Inserts", format!("{}", stats.inserts), rgb(0x89dceb))),
                     )
                     .child(
                         div()

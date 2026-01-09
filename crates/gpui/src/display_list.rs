@@ -35,7 +35,6 @@ use crate::{
     Point, ScaledPixels, scene::TransformationMatrix, scene::BorderStyle, point, size,
     scene::{Quad, Shadow, BackdropBlur, Underline, MonochromeSprite, SubpixelSprite, PolychromeSprite, DrawOrder},
     property_trees::{TransformNodeId, ClipNodeId, PropertyTrees},
-    ImplicitElementId,
 };
 use collections::FxHashMap;
 use smallvec::SmallVec;
@@ -350,16 +349,7 @@ impl ComputedElementId {
         }
     }
 
-    /// Create from an implicit element ID (for migration).
-    pub fn from_implicit(implicit: &ImplicitElementId) -> Self {
-        Self {
-            path_hash: implicit.parent_path_hash,
-            local_id_hash: implicit.child_index as u64,
-            element_type: implicit.element_type,
-        }
-    }
-
-    /// Create from a global element ID and type (for migration).
+    /// Create from a global element ID and type.
     pub fn from_global(global: &GlobalElementId, element_type: std::any::TypeId) -> Self {
         use std::hash::{Hash, Hasher};
         let mut hasher = collections::FxHasher::default();

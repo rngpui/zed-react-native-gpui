@@ -33,16 +33,15 @@
 
 use crate::{
     App, ArenaBox, AvailableSpace, Bounds, CachePolicy, Context, DispatchNodeId, ELEMENT_ARENA,
-    ElementId, FocusHandle, InspectorElementId, LayoutId, Pixels, Point, ScaledPixels, Size,
+    ElementId, FocusHandle, InspectorElementId, LayoutId, Pixels, Point, Size,
     Style, Window,
-    window::{PaintScope, PaintScopeMode},
     util::FluentBuilder,
 };
 use derive_more::{Deref, DerefMut};
 use std::{
-    any::{Any, TypeId, type_name},
+    any::{Any, type_name},
     fmt::{self, Debug, Display},
-    hash::{Hash, Hasher},
+    hash::Hash,
     mem, panic,
     sync::Arc,
 };
@@ -344,76 +343,6 @@ impl Display for GlobalElementId {
             write!(f, "{}", element_id)?;
         }
         Ok(())
-    }
-}
-
-/// An implicit element identifier based on position in the element tree.
-///
-/// Unlike `GlobalElementId` which requires explicit `.id()` calls, `ImplicitElementId`
-/// is automatically computed from:
-/// - Parent path hash (ancestor chain identity)
-/// - Child index (position among siblings)
-/// - Element type (Rust TypeId)
-///
-/// This enables automatic caching without requiring developers to manually annotate elements.
-/// Inspired by React's reconciliation algorithm and Chromium's display item identity.
-///
-/// ## When Position-Based Identity Works
-/// - Static children that don't reorder
-/// - Lists that only append/truncate
-/// - Most UI chrome (headers, footers, sidebars, buttons)
-///
-/// ## When Explicit Keys Are Needed
-/// For lists that reorder dynamically, use explicit `.id()` or `.key()` to maintain identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct ImplicitElementId {
-    /// Hash of the ancestor chain (parent's implicit ID).
-    pub parent_path_hash: u64,
-    /// Position among siblings (0-indexed).
-    pub child_index: u32,
-    /// Type of the element.
-    pub element_type: TypeId,
-}
-
-impl ImplicitElementId {
-    /// The root implicit element ID.
-    pub const ROOT: Self = Self {
-        parent_path_hash: 0,
-        child_index: 0,
-        element_type: TypeId::of::<()>(), // Placeholder, will be set properly
-    };
-
-    /// Create a new implicit element ID for a child element.
-    pub fn child<E: 'static>(&self, index: u32) -> Self {
-        // Hash the parent's identity to create the path hash
-        let mut hasher = collections::FxHasher::default();
-        self.hash(&mut hasher);
-        let parent_path_hash = hasher.finish();
-
-        Self {
-            parent_path_hash,
-            child_index: index,
-            element_type: TypeId::of::<E>(),
-        }
-    }
-
-    /// Create a new implicit element ID with a specific type.
-    pub fn with_type(mut self, type_id: TypeId) -> Self {
-        self.element_type = type_id;
-        self
-    }
-
-    /// Compute a combined hash for use as a cache key.
-    pub fn cache_key(&self) -> u64 {
-        let mut hasher = collections::FxHasher::default();
-        self.hash(&mut hasher);
-        hasher.finish()
-    }
-}
-
-impl Default for ImplicitElementId {
-    fn default() -> Self {
-        Self::ROOT
     }
 }
 
