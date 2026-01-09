@@ -2213,7 +2213,7 @@ impl MetalRenderer {
             let coord = sprite.tile_key.coord;
 
             // Look up the display list for this container
-            let Some((display_list, _)) = scene.get_display_list(container_id) else {
+            let Some(display_list) = scene.get_display_list(container_id) else {
                 continue;
             };
 
@@ -2245,16 +2245,20 @@ impl MetalRenderer {
         // This is the performance-critical change: multiple tiles rasterize concurrently
         let results = rasterize_tiles_parallel(jobs, scale_factor);
 
-        // Phase 0.2: Sequential GPU encoding, but no synchronous waits.
-        // Each tile gets its own command buffer for better GPU parallelism.
-        // Metal guarantees ordering on the same queue - main pass will wait for these.
+        // P1: Batch all tiles into ONE command buffer.
+        // This reduces command buffer creation overhead and improves GPU utilization.
+        // Metal renders encoders in sequence, and queue ordering ensures
+        // tiles are ready before the main pass uses them.
+        let command_buffer = self.command_queue.new_command_buffer();
         for result in results {
-            self.rasterize_display_list_tile(
+            self.encode_tile_to_command_buffer(
                 &result.container_id,
                 result.coord,
                 &result.raster_result,
+                command_buffer,
             );
         }
+        command_buffer.commit();
     }
 
     /// Render quads directly to an encoder (for RTT pre-pass).
@@ -2878,6 +2882,7 @@ impl MetalRenderer {
     /// 3. Ensuring the TileRasterResult contains primitives offset to tile-local coordinates
     ///
     /// Phase 0.2: Commits without waiting - Metal queue ordering handles correctness.
+    #[allow(dead_code)]
     pub fn rasterize_display_list_tile(
         &self,
         container_id: &crate::GlobalElementId,

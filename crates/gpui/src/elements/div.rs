@@ -1755,14 +1755,14 @@ impl Div {
             window.capture_layer_hitboxes(layer_id);
         }
 
-        // Copy layer's DisplayList and PropertyTrees to Scene for renderer access
+        // Copy layer's DisplayList to Scene for renderer access.
+        // Note: PropertyTrees are not needed since transforms/clips are baked into DisplayItem at insert time.
         let layer = window.layer_tree().get(layer_id).unwrap();
         if let Some(display_list) = &layer.display_list {
             if !display_list.items.is_empty() {
                 window.next_frame.scene.insert_display_list(
                     global_id.clone(),
                     display_list.clone(),
-                    layer.property_trees.clone(),
                 );
             }
         }

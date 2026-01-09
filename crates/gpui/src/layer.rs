@@ -271,14 +271,25 @@ impl Layer {
 
     /// Prepare layer for repainting (Phase 20e: Retained DisplayList).
     ///
-    /// Call this when the layer needs to be repainted. Moves current display_list
-    /// to previous_display_list for cache lookup, then clears current for new items.
+    /// Call this when the layer needs to be repainted. Swaps display lists so
+    /// previous_display_list has the old items for cache lookup, then clears
+    /// current display_list for new items.
+    ///
+    /// P1 optimization: Reuses DisplayList allocations by swapping and clearing
+    /// instead of allocating new Vec each frame.
     pub fn prepare_for_repaint(&mut self) {
-        // Move current to previous for cache lookup during paint
-        self.previous_display_list = self.display_list.take();
+        // Swap current and previous display lists.
+        // After swap:
+        // - previous_display_list has this frame's items (for cache lookup)
+        // - display_list has last frame's previous items (will be cleared)
+        std::mem::swap(&mut self.display_list, &mut self.previous_display_list);
 
-        // Create new display list for new items
-        if let Some(ref element_id) = self.element_id {
+        // Clear and reuse the display list (or create new if none exists)
+        if let Some(ref mut display_list) = self.display_list {
+            // Reuse existing allocation - clear() increments generation
+            display_list.clear();
+        } else if let Some(ref element_id) = self.element_id {
+            // First frame or after layer recreation - need to allocate
             self.display_list = Some(DisplayList::new(element_id.clone()));
         }
     }
