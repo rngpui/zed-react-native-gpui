@@ -151,8 +151,19 @@ impl Scene {
         self.display_lists.get(element_id)
     }
 
+    /// Get a mutable reference to a display list and property trees.
+    /// Used to build spatial index before cloning for rasterization.
+    pub fn get_display_list_mut(&mut self, element_id: &GlobalElementId) -> Option<&mut (DisplayList, PropertyTrees)> {
+        self.display_lists.get_mut(element_id)
+    }
+
     /// Insert a display list with property trees for a scroll container.
-    pub fn insert_display_list(&mut self, element_id: GlobalElementId, display_list: DisplayList, property_trees: PropertyTrees) {
+    ///
+    /// Builds the spatial index before inserting to ensure efficient
+    /// `items_intersecting` queries during rasterization.
+    pub fn insert_display_list(&mut self, element_id: GlobalElementId, mut display_list: DisplayList, property_trees: PropertyTrees) {
+        // Build spatial index for efficient tile rasterization queries
+        display_list.ensure_spatial_index_built();
         self.display_lists.insert(element_id, (display_list, property_trees));
     }
 

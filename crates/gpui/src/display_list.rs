@@ -260,6 +260,171 @@ pub(crate) struct ElementItemRange {
     pub bounds: Bounds<Pixels>,
 }
 
+/// Grid-based spatial index for fast item lookup by bounds.
+///
+/// Divides the content space into fixed-size cells. Each cell stores
+/// indices of items that intersect it. Query performance is O(cells_overlapped × items_per_cell)
+/// instead of O(total_items).
+///
+/// Cell size matches tile size (512 device pixels / scale_factor) for optimal
+/// query performance during tile rasterization.
+#[derive(Clone, Debug)]
+pub(crate) struct SpatialIndex {
+    /// Grid cells, indexed by (row * cols + col).
+    /// Each cell contains indices into the DisplayList's items vec.
+    cells: Vec<Vec<usize>>,
+    /// Number of columns in the grid.
+    cols: usize,
+    /// Number of rows in the grid.
+    rows: usize,
+    /// Size of each cell in logical pixels.
+    cell_size: f32,
+    /// Origin of the grid (top-left corner of content bounds).
+    origin: Point<Pixels>,
+    /// Whether the index needs rebuilding (items added/removed since last build).
+    dirty: bool,
+}
+
+impl Default for SpatialIndex {
+    fn default() -> Self {
+        Self {
+            cells: Vec::new(),
+            cols: 0,
+            rows: 0,
+            cell_size: 256.0, // Default cell size in logical pixels
+            origin: Point::default(),
+            dirty: true,
+        }
+    }
+}
+
+impl SpatialIndex {
+    /// Create a new spatial index with the given cell size.
+    pub fn new(cell_size: f32) -> Self {
+        Self {
+            cell_size,
+            ..Default::default()
+        }
+    }
+
+    /// Clear the spatial index.
+    pub fn clear(&mut self) {
+        self.cells.clear();
+        self.cols = 0;
+        self.rows = 0;
+        self.dirty = true;
+    }
+
+    /// Build or rebuild the spatial index from the given items and content bounds.
+    pub fn build(&mut self, items: &[DisplayItem], content_bounds: Bounds<Pixels>) {
+        // Calculate grid dimensions
+        let width = content_bounds.size.width.0.max(1.0);
+        let height = content_bounds.size.height.0.max(1.0);
+
+        self.cols = ((width / self.cell_size).ceil() as usize).max(1);
+        self.rows = ((height / self.cell_size).ceil() as usize).max(1);
+        self.origin = content_bounds.origin;
+
+        // Resize and clear cells
+        let total_cells = self.cols * self.rows;
+        self.cells.clear();
+        self.cells.resize_with(total_cells, Vec::new);
+
+        // Insert each item into overlapping cells
+        for (index, item) in items.iter().enumerate() {
+            if let Some(bounds) = item.bounds() {
+                self.insert_into_cells(index, bounds);
+            }
+        }
+
+        self.dirty = false;
+    }
+
+    /// Insert an item index into all cells it overlaps.
+    fn insert_into_cells(&mut self, item_index: usize, bounds: Bounds<Pixels>) {
+        let (min_col, min_row, max_col, max_row) = self.cells_for_bounds(bounds);
+
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                let cell_index = row * self.cols + col;
+                if cell_index < self.cells.len() {
+                    self.cells[cell_index].push(item_index);
+                }
+            }
+        }
+    }
+
+    /// Get the range of cells that a bounds overlaps.
+    /// Returns (min_col, min_row, max_col, max_row).
+    fn cells_for_bounds(&self, bounds: Bounds<Pixels>) -> (usize, usize, usize, usize) {
+        let rel_x = (bounds.origin.x - self.origin.x).0.max(0.0);
+        let rel_y = (bounds.origin.y - self.origin.y).0.max(0.0);
+
+        let min_col = (rel_x / self.cell_size) as usize;
+        let min_row = (rel_y / self.cell_size) as usize;
+
+        let max_x = rel_x + bounds.size.width.0;
+        let max_y = rel_y + bounds.size.height.0;
+
+        let max_col = ((max_x / self.cell_size) as usize).min(self.cols.saturating_sub(1));
+        let max_row = ((max_y / self.cell_size) as usize).min(self.rows.saturating_sub(1));
+
+        (min_col, min_row, max_col, max_row)
+    }
+
+    /// Query items that potentially intersect the given bounds.
+    ///
+    /// Returns an iterator of item indices. Note: may include items that don't
+    /// actually intersect (false positives from cell-level granularity), so
+    /// callers should do a final intersection check.
+    pub fn query(&self, bounds: Bounds<Pixels>) -> impl Iterator<Item = usize> + '_ {
+        let (min_col, min_row, max_col, max_row) = self.cells_for_bounds(bounds);
+
+        // Collect unique indices from overlapping cells
+        let mut seen = collections::FxHashSet::default();
+
+        (min_row..=max_row)
+            .flat_map(move |row| (min_col..=max_col).map(move |col| row * self.cols + col))
+            .filter(move |&cell_index| cell_index < self.cells.len())
+            .flat_map(move |cell_index| self.cells[cell_index].iter().copied())
+            .filter(move |&index| seen.insert(index))
+    }
+
+    /// Check if the index needs rebuilding.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Mark the index as needing rebuild.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+}
+
+/// Iterator over display items that intersect a given bounds.
+/// Uses spatial index for efficient lookup.
+struct ItemsIntersectingIter<'a> {
+    items: &'a [DisplayItem],
+    indices: std::vec::IntoIter<usize>,
+    query_bounds: Bounds<Pixels>,
+}
+
+impl<'a> Iterator for ItemsIntersectingIter<'a> {
+    type Item = &'a DisplayItem;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Iterate through spatial index results, doing final intersection check
+        for index in self.indices.by_ref() {
+            if let Some(item) = self.items.get(index) {
+                if item.intersects(&self.query_bounds) {
+                    return Some(item);
+                }
+            }
+        }
+        None
+    }
+}
+
 /// A display list containing recorded drawing commands for a layer.
 ///
 /// Display lists are created per scroll container and persist across frames
@@ -290,6 +455,9 @@ pub(crate) struct DisplayList {
     pub content_bounds: Bounds<Pixels>,
     /// Recorded display items.
     pub items: Vec<DisplayItem>,
+    /// Spatial index for fast item lookup by bounds.
+    /// Enables O(cells × items_per_cell) queries instead of O(total_items).
+    spatial_index: SpatialIndex,
     /// Dirty regions that need re-rasterization.
     /// Empty means entire display list is valid (or was just cleared).
     dirty_regions: Vec<Bounds<Pixels>>,
@@ -310,6 +478,7 @@ impl DisplayList {
             generation: 0,
             content_bounds: Bounds::default(),
             items: Vec::new(),
+            spatial_index: SpatialIndex::default(),
             dirty_regions: Vec::new(),
             element_items: FxHashMap::default(),
             element_stack: Vec::new(),
@@ -322,6 +491,7 @@ impl DisplayList {
     /// For partial updates, use `invalidate_region()` instead.
     pub fn clear(&mut self) {
         self.items.clear();
+        self.spatial_index.clear();
         self.content_bounds = Bounds::default();
         self.dirty_regions.clear();
         self.element_items.clear();
@@ -555,19 +725,47 @@ impl DisplayList {
             .any(|dirty| dirty.intersects(bounds))
     }
 
+    /// Ensure the spatial index is built and up-to-date.
+    ///
+    /// Call this before cloning the display list for rasterization to ensure
+    /// the clone has an efficient spatial index for `items_intersecting` queries.
+    pub fn ensure_spatial_index_built(&mut self) {
+        if self.spatial_index.is_dirty() {
+            self.spatial_index.build(&self.items, self.content_bounds);
+        }
+    }
+
     /// Iterate over items that intersect the given bounds.
-    /// Used during tile rasterization to only process relevant items.
-    pub fn items_intersecting(&self, bounds: Bounds<Pixels>) -> impl Iterator<Item = &DisplayItem> {
-        self.items.iter().filter(move |item| item.intersects(&bounds))
+    ///
+    /// Uses spatial index for O(cells × items_per_cell) performance.
+    ///
+    /// The spatial index must be built before calling this method.
+    /// Call `ensure_spatial_index_built()` before rasterization.
+    pub fn items_intersecting(&self, bounds: Bounds<Pixels>) -> impl Iterator<Item = &DisplayItem> + '_ {
+        // Spatial index must be built before querying - if this panics, ensure_spatial_index_built()
+        // wasn't called before the display list was used for rasterization.
+        debug_assert!(
+            !self.spatial_index.is_dirty(),
+            "Spatial index not built before items_intersecting() - call ensure_spatial_index_built() first"
+        );
+
+        ItemsIntersectingIter {
+            items: &self.items,
+            indices: self.spatial_index.query(bounds).collect::<Vec<_>>().into_iter(),
+            query_bounds: bounds,
+        }
     }
 
     /// Extend content_bounds to include the given bounds.
+    /// Also marks the spatial index as dirty since content has changed.
     pub fn extend_bounds(&mut self, bounds: Bounds<Pixels>) {
         if self.content_bounds.size.width.0 == 0.0 && self.content_bounds.size.height.0 == 0.0 {
             self.content_bounds = bounds;
         } else {
             self.content_bounds = self.content_bounds.union(&bounds);
         }
+        // Mark spatial index dirty when content changes
+        self.spatial_index.mark_dirty();
     }
 
     /// Push a quad display item.
@@ -1313,6 +1511,9 @@ mod tests {
             border_widths: Edges::default(),
         });
 
+        // Build spatial index before querying
+        list.ensure_spatial_index_built();
+
         // Query for items in (0, 0) to (50, 50) - should find first quad
         let search_bounds = Bounds {
             origin: point(Pixels(0.0), Pixels(0.0)),
@@ -1587,5 +1788,77 @@ mod tests {
 
         // Dirty regions should be set
         assert!(list.has_dirty_regions());
+    }
+
+    // ========================================================================
+    // Spatial Index Tests
+    // ========================================================================
+
+    #[test]
+    fn test_spatial_index_basic() {
+        let mut list = DisplayList::new(test_element_id());
+
+        // Add quads in a grid pattern
+        for row in 0..4 {
+            for col in 0..4 {
+                list.push_quad(DisplayQuad {
+                    bounds: Bounds {
+                        origin: point(Pixels(col as f32 * 100.0), Pixels(row as f32 * 100.0)),
+                        size: size(Pixels(80.0), Pixels(80.0)),
+                    },
+                    transform_node: TransformNodeId::ROOT,
+                    clip_node: ClipNodeId::ROOT,
+                    background: Background::default(),
+                    border_color: Hsla::default(),
+                    border_style: BorderStyle::default(),
+                    corner_radii: Corners::default(),
+                    border_widths: Edges::default(),
+                });
+            }
+        }
+
+        assert_eq!(list.items.len(), 16);
+
+        // Build spatial index
+        list.ensure_spatial_index_built();
+        assert!(!list.spatial_index.is_dirty());
+
+        // Query top-left corner - should find 1 item
+        let query = Bounds {
+            origin: point(Pixels(0.0), Pixels(0.0)),
+            size: size(Pixels(50.0), Pixels(50.0)),
+        };
+        let count = list.items_intersecting(query).count();
+        assert_eq!(count, 1);
+
+        // Query middle area - should find 4 items (2x2 grid center)
+        let query = Bounds {
+            origin: point(Pixels(90.0), Pixels(90.0)),
+            size: size(Pixels(120.0), Pixels(120.0)),
+        };
+        let count = list.items_intersecting(query).count();
+        assert_eq!(count, 4);
+
+        // Query entire area - should find all 16 items
+        let query = Bounds {
+            origin: point(Pixels(0.0), Pixels(0.0)),
+            size: size(Pixels(400.0), Pixels(400.0)),
+        };
+        let count = list.items_intersecting(query).count();
+        assert_eq!(count, 16);
+    }
+
+    #[test]
+    fn test_spatial_index_rebuild_on_clear() {
+        let mut list = DisplayList::new(test_element_id());
+
+        // Add items and build index
+        list.push_quad(make_test_quad(0.0, 0.0, 100.0, 100.0));
+        list.ensure_spatial_index_built();
+        assert!(!list.spatial_index.is_dirty());
+
+        // Clear should mark index dirty
+        list.clear();
+        assert!(list.spatial_index.is_dirty());
     }
 }
