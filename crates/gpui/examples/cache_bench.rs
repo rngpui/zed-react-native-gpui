@@ -18,9 +18,10 @@ const WINDOW_WIDTH: f32 = 1200.0;
 const WINDOW_HEIGHT: f32 = 900.0;
 
 // Grid configuration - adjust to test different element counts
-const GRID_COLS: usize = 20;
-const GRID_ROWS: usize = 40; // More rows to test scrolling
-const CELL_SIZE: f32 = 50.0;
+// Note: Grid size must stay under 2048px per dimension to fit in 4096 texture at 2x scale
+const GRID_COLS: usize = 15;
+const GRID_ROWS: usize = 25; // ~1875px height, fits in 4096 texture at 2x
+const CELL_SIZE: f32 = 70.0; // Must be >= 64px for RTT caching
 const CELL_GAP: f32 = 5.0;
 
 struct CacheBench {
@@ -233,6 +234,9 @@ impl Render for CacheBench {
             )
             .child(
                 // Scrollable grid of styled elements - these should all cache after frame 1
+                // Note: scroll-container has ID for scroll functionality but RTT caching
+                // is skipped for scroll containers (elements with overflow:scroll).
+                // Only the grid-container participates in RTT caching.
                 div()
                     .id("scroll-container")
                     .flex_1()
@@ -240,6 +244,7 @@ impl Render for CacheBench {
                     .overflow_y_scroll()
                     .child(
                         div()
+                            .id("grid-container") // ID enables RTT caching for the grid
                             .flex()
                             .flex_wrap()
                             .gap(px(CELL_GAP))
@@ -252,8 +257,9 @@ impl Render for CacheBench {
                                 let bg_color = hsl_to_rgb(hue, 0.6, 0.3);
                                 let border_color = hsl_to_rgb(hue, 0.8, 0.5);
 
+                                // Note: Cells intentionally have no ID to avoid nested RTT captures.
+                                // The grid-container handles RTT for the entire grid.
                                 div()
-                                    .id(("cell", i))
                                     .w(px(CELL_SIZE))
                                     .h(px(CELL_SIZE))
                                     .bg(bg_color)
@@ -318,6 +324,7 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> gpui::Rgba {
 }
 
 fn main() {
+    env_logger::init();
     Application::new().run(|cx| {
         cx.open_window(
             WindowOptions {

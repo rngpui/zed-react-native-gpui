@@ -160,6 +160,13 @@ impl Scene {
     pub fn end_subtree_capture(&mut self) -> Option<SubtreeCapture> {
         self.pending_subtree_captures.pop().map(|mut capture| {
             capture.primitive_end = self.paint_operations.len();
+            log::warn!(
+                "RTT CAPTURE END: element={:?}, range={}..{}, has_content={}",
+                capture.id,
+                capture.primitive_start,
+                capture.primitive_end,
+                capture.primitive_end > capture.primitive_start
+            );
             // Only add to completed if it has actual content
             if capture.primitive_end > capture.primitive_start {
                 self.completed_subtree_captures.push(capture.clone());
@@ -173,6 +180,11 @@ impl Scene {
         &self.completed_subtree_captures
     }
 
+    /// Returns true if we're currently capturing a subtree for RTT.
+    pub(crate) fn is_capturing_subtree(&self) -> bool {
+        !self.pending_subtree_captures.is_empty()
+    }
+
     /// Create a mini-scene from a subtree capture, with primitives translated
     /// to be relative to the capture bounds origin (for render-to-texture).
     pub fn create_capture_scene(&self, capture: &SubtreeCapture) -> Scene {
@@ -182,11 +194,21 @@ impl Scene {
             x: ScaledPixels(0.0) - capture.bounds.origin.x,
             y: ScaledPixels(0.0) - capture.bounds.origin.y,
         };
+        // Texture bounds start at origin with the capture size
+        let texture_bounds = Bounds {
+            origin: Point {
+                x: ScaledPixels(0.0),
+                y: ScaledPixels(0.0),
+            },
+            size: capture.bounds.size,
+        };
 
         for op in &self.paint_operations[capture.primitive_start..capture.primitive_end] {
             match op {
                 PaintOperation::Primitive(primitive) => {
-                    let translated = primitive.translate(offset);
+                    // Use translate_for_rtt to set content_mask to full texture bounds,
+                    // ensuring all content is rendered (not clipped to original visible area)
+                    let translated = primitive.translate_for_rtt(offset, texture_bounds);
                     mini_scene.insert_primitive(translated);
                 }
                 PaintOperation::StartLayer(bounds) => {
@@ -415,10 +437,22 @@ impl Scene {
 
     fn insert_primitive_internal(&mut self, primitive: impl Into<Primitive>, from_cache: bool) {
         let mut primitive = primitive.into();
+        let capturing_subtree = !self.pending_subtree_captures.is_empty();
         let transformed_bounds = transformed_bounds(&primitive);
         let clipped_bounds = transformed_bounds.intersect(&primitive.content_mask().bounds);
 
         if clipped_bounds.is_empty() {
+            // During RTT subtree capture, we still want to record primitives that are currently
+            // clipped by the active content mask (e.g. inside a scroll viewport). These are
+            // skipped for the main scene, but are needed to render the full subtree into an
+            // offscreen texture.
+            if capturing_subtree {
+                if !from_cache {
+                    self.mark_dirty(self.paint_operations.len());
+                }
+                self.paint_operations
+                    .push(PaintOperation::Primitive(primitive));
+            }
             return;
         }
 
@@ -865,6 +899,89 @@ impl Primitive {
                 let mut s = sprite.clone();
                 s.bounds.origin = s.bounds.origin + offset;
                 s.content_mask.bounds.origin = s.content_mask.bounds.origin + offset;
+                Primitive::CachedTexture(s)
+            }
+        }
+    }
+
+    /// Translate primitive for render-to-texture.
+    /// Unlike `translate()`, this sets the content_mask to cover the full texture bounds
+    /// rather than translating the original content_mask. This ensures all content is
+    /// rendered to the texture, not just what was visible at capture time.
+    pub fn translate_for_rtt(
+        &self,
+        offset: Point<ScaledPixels>,
+        texture_bounds: Bounds<ScaledPixels>,
+    ) -> Primitive {
+        let full_mask = ContentMask {
+            bounds: texture_bounds,
+        };
+        match self {
+            Primitive::Shadow(shadow, transform) => {
+                let mut s = shadow.clone();
+                s.bounds.origin = s.bounds.origin + offset;
+                s.content_mask = full_mask;
+                Primitive::Shadow(s, *transform)
+            }
+            Primitive::Quad(quad, transform) => {
+                let mut q = quad.clone();
+                q.bounds.origin = q.bounds.origin + offset;
+                q.content_mask = full_mask;
+                Primitive::Quad(q, *transform)
+            }
+            Primitive::BackdropBlur(blur, transform) => {
+                let mut b = blur.clone();
+                b.bounds.origin = b.bounds.origin + offset;
+                b.content_mask = full_mask;
+                Primitive::BackdropBlur(b, *transform)
+            }
+            Primitive::Path(path) => {
+                let mut p = path.clone();
+                p.bounds.origin = p.bounds.origin + offset;
+                p.content_mask = full_mask;
+                // Also translate vertices
+                for vertex in &mut p.vertices {
+                    vertex.xy_position = point(
+                        vertex.xy_position.x + offset.x,
+                        vertex.xy_position.y + offset.y,
+                    );
+                }
+                Primitive::Path(p)
+            }
+            Primitive::Underline(underline, transform) => {
+                let mut u = underline.clone();
+                u.bounds.origin = u.bounds.origin + offset;
+                u.content_mask = full_mask;
+                Primitive::Underline(u, *transform)
+            }
+            Primitive::MonochromeSprite(sprite) => {
+                let mut s = sprite.clone();
+                s.bounds.origin = s.bounds.origin + offset;
+                s.content_mask = full_mask;
+                Primitive::MonochromeSprite(s)
+            }
+            Primitive::SubpixelSprite(sprite) => {
+                let mut s = sprite.clone();
+                s.bounds.origin = s.bounds.origin + offset;
+                s.content_mask = full_mask;
+                Primitive::SubpixelSprite(s)
+            }
+            Primitive::PolychromeSprite(sprite, transform) => {
+                let mut s = sprite.clone();
+                s.bounds.origin = s.bounds.origin + offset;
+                s.content_mask = full_mask;
+                Primitive::PolychromeSprite(s, *transform)
+            }
+            Primitive::Surface(surface) => {
+                let mut s = surface.clone();
+                s.bounds.origin = s.bounds.origin + offset;
+                s.content_mask = full_mask;
+                Primitive::Surface(s)
+            }
+            Primitive::CachedTexture(sprite) => {
+                let mut s = sprite.clone();
+                s.bounds.origin = s.bounds.origin + offset;
+                s.content_mask = full_mask;
                 Primitive::CachedTexture(s)
             }
         }
@@ -1479,6 +1596,17 @@ impl CachedTextureId {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
     }
+}
+
+/// Information about a cached texture including UV bounds for proper sampling.
+/// Used when textures are allocated in size buckets larger than the content.
+#[derive(Clone, Copy, Debug)]
+pub struct CachedTextureInfo {
+    /// The texture ID
+    pub id: CachedTextureId,
+    /// UV bounds for sampling (content_size / texture_size)
+    /// Origin is always (0, 0), size is the fraction of texture containing content
+    pub uv_bounds: Bounds<f32>,
 }
 
 /// A sprite that composites a cached GPU texture to the screen.

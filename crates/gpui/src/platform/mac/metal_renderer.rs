@@ -427,7 +427,10 @@ impl MetalRenderer {
             "surface_fragment",
             MTLPixelFormat::BGRA8Unorm,
         );
-        let cached_textures_pipeline_state = build_pipeline_state(
+        // Cached textures use premultiplied alpha blending because the RTT texture
+        // already contains premultiplied colors from rendering with standard alpha blending
+        // onto a transparent background.
+        let cached_textures_pipeline_state = build_premultiplied_pipeline_state(
             &device,
             &library,
             "cached_textures",
@@ -499,14 +502,24 @@ impl MetalRenderer {
     }
 
     /// Query if an element has a cached texture for RTT compositing.
-    /// Returns the texture ID if the element has a valid cached texture.
-    pub fn get_cached_texture_id(
+    /// Returns texture info including ID and UV bounds if the element has a valid cached texture.
+    pub fn get_cached_texture_info(
         &mut self,
         element_id: &crate::GlobalElementId,
-    ) -> Option<crate::scene::CachedTextureId> {
-        self.texture_cache
-            .lookup_by_id(element_id)
-            .map(|entry| entry.id)
+    ) -> Option<crate::scene::CachedTextureInfo> {
+        self.texture_cache.lookup_by_id(element_id).map(|entry| {
+            // Compute UV bounds from content size vs texture size
+            // Textures are allocated in size buckets, so content may not fill the whole texture
+            let uv_width = entry.content_bounds.size.width.0 as f32 / entry.texture.width as f32;
+            let uv_height = entry.content_bounds.size.height.0 as f32 / entry.texture.height as f32;
+            crate::scene::CachedTextureInfo {
+                id: entry.id,
+                uv_bounds: Bounds {
+                    origin: point(0.0, 0.0),
+                    size: size(uv_width, uv_height),
+                },
+            }
+        })
     }
 
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
@@ -1982,7 +1995,7 @@ impl MetalRenderer {
         }
 
         log::trace!(
-            "render_subtrees_to_textures: {} captures to render",
+            "RTT PRE-PASS: {} captures to check",
             captures.len()
         );
 
@@ -2021,19 +2034,29 @@ impl MetalRenderer {
                 hasher.finish()
             };
 
-            let entry = self.texture_cache.acquire(
+            let acquire_result = self.texture_cache.acquire(
                 &self.device,
                 capture.id.clone(),
                 texture_size,
                 signature,
                 content_bounds,
             );
-            let texture_id = entry.id;
-            let texture = entry.texture.texture.clone();
 
-            log::trace!(
-                "RTT: acquired texture {:?} for element, size {}x{}",
+            // Skip rendering if texture already exists and is up to date
+            if !acquire_result.needs_render {
+                log::trace!(
+                    "RTT: reusing existing texture for element, skipping render"
+                );
+                continue;
+            }
+
+            let texture_id = acquire_result.entry.id;
+            let texture = acquire_result.entry.texture.texture.clone();
+
+            log::warn!(
+                "RTT PRE-PASS: rendering NEW texture {:?} for element {:?}, size {}x{}",
                 texture_id,
+                capture.id,
                 texture_size.width.0,
                 texture_size.height.0
             );
@@ -2065,6 +2088,15 @@ impl MetalRenderer {
             // Create mini-scene with primitives translated to texture coordinates
             let mini_scene = scene.create_capture_scene(capture);
 
+            log::warn!(
+                "RTT: mini-scene created with {} shadows, {} quads, {} underlines, {} mono sprites, {} poly sprites",
+                mini_scene.shadows.len(),
+                mini_scene.quads.len(),
+                mini_scene.underlines.len(),
+                mini_scene.monochrome_sprites.len(),
+                mini_scene.polychrome_sprites.len()
+            );
+
             // Render all primitive types to the texture
             // Order matters for correct blending - render back to front
 
@@ -2088,6 +2120,7 @@ impl MetalRenderer {
                     &self.quads_pipeline_state,
                     &self.unit_vertices,
                     &mini_scene.quads,
+                    &mini_scene.quad_transforms,
                     texture_size,
                     command_encoder,
                 );
@@ -2153,6 +2186,7 @@ impl MetalRenderer {
         pipeline_state: &metal::RenderPipelineState,
         unit_vertices: &metal::Buffer,
         quads: &[crate::scene::Quad],
+        transforms: &[crate::TransformationMatrix],
         viewport_size: Size<DevicePixels>,
         command_encoder: &metal::RenderCommandEncoderRef,
     ) {
@@ -2160,19 +2194,34 @@ impl MetalRenderer {
             return;
         }
 
-        // Allocate a temporary instance buffer for this render
-        let instance_size = std::mem::size_of::<crate::scene::Quad>();
-        let buffer_size = quads.len() * instance_size;
+        // Allocate a temporary instance buffer for quads
+        let quad_size = std::mem::size_of::<crate::scene::Quad>();
+        let quad_buffer_size = quads.len() * quad_size;
 
-        let instance_buffer = device.new_buffer(
-            buffer_size as u64,
+        let quad_buffer = device.new_buffer(
+            quad_buffer_size as u64,
             metal::MTLResourceOptions::StorageModeShared,
         );
 
         // Copy quad data to the buffer
         unsafe {
-            let ptr = instance_buffer.contents() as *mut crate::scene::Quad;
+            let ptr = quad_buffer.contents() as *mut crate::scene::Quad;
             std::ptr::copy_nonoverlapping(quads.as_ptr(), ptr, quads.len());
+        }
+
+        // Allocate transforms buffer
+        let transform_size = std::mem::size_of::<crate::TransformationMatrix>();
+        let transform_buffer_size = transforms.len() * transform_size;
+
+        let transform_buffer = device.new_buffer(
+            transform_buffer_size as u64,
+            metal::MTLResourceOptions::StorageModeShared,
+        );
+
+        // Copy transform data to the buffer
+        unsafe {
+            let ptr = transform_buffer.contents() as *mut crate::TransformationMatrix;
+            std::ptr::copy_nonoverlapping(transforms.as_ptr(), ptr, transforms.len());
         }
 
         // Set up pipeline state
@@ -2184,13 +2233,30 @@ impl MetalRenderer {
         );
         command_encoder.set_vertex_buffer(
             QuadInputIndex::Quads as u64,
-            Some(&instance_buffer),
+            Some(&quad_buffer),
+            0,
+        );
+        command_encoder.set_vertex_buffer(
+            QuadInputIndex::Transforms as u64,
+            Some(&transform_buffer),
             0,
         );
         command_encoder.set_vertex_bytes(
             QuadInputIndex::ViewportSize as u64,
             std::mem::size_of::<Size<DevicePixels>>() as u64,
             &viewport_size as *const Size<DevicePixels> as *const _,
+        );
+
+        // Set fragment buffers (needed for quad_fragment shader)
+        command_encoder.set_fragment_buffer(
+            QuadInputIndex::Quads as u64,
+            Some(&quad_buffer),
+            0,
+        );
+        command_encoder.set_fragment_buffer(
+            QuadInputIndex::Transforms as u64,
+            Some(&transform_buffer),
+            0,
         );
 
         // Draw instanced
@@ -2553,6 +2619,12 @@ impl MetalRenderer {
         command_encoder: &metal::RenderCommandEncoderRef,
         write_instances: bool,
     ) -> bool {
+        if !sprites.is_empty() {
+            log::warn!(
+                "RTT DRAW: {} cached texture sprites to draw",
+                sprites.len()
+            );
+        }
         for sprite in sprites {
             // Look up the texture from the cache and clone the texture reference
             // (metal::Texture implements Clone as an Arc-like reference)
@@ -2562,6 +2634,14 @@ impl MetalRenderer {
                 .map(|entry| entry.texture.texture.clone());
 
             if let Some(texture) = texture {
+                log::trace!(
+                    "draw_cached_textures: drawing sprite {:?} at bounds={:?}, uv={:?}, texture {}x{}",
+                    sprite.texture_id,
+                    sprite.bounds,
+                    sprite.uv_bounds,
+                    texture.width(),
+                    texture.height()
+                );
                 let ok = self.draw_cached_texture(
                     sprite.bounds,
                     sprite.content_mask.clone(),
@@ -2576,8 +2656,12 @@ impl MetalRenderer {
                 if !ok {
                     return false;
                 }
+            } else {
+                log::warn!(
+                    "draw_cached_textures: texture {:?} not found (evicted?), skipping sprite",
+                    sprite.texture_id
+                );
             }
-            // If texture not found (evicted), skip this sprite
         }
         true
     }
@@ -2638,6 +2722,44 @@ fn build_pipeline_state(
     color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
     color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+
+    device
+        .new_render_pipeline_state(&descriptor)
+        .expect("could not create render pipeline state")
+}
+
+/// Build a pipeline state for rendering content that already has premultiplied alpha.
+/// This is used for cached texture compositing where the texture was rendered with
+/// standard alpha blending onto a transparent background, resulting in premultiplied content.
+fn build_premultiplied_pipeline_state(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+    label: &str,
+    vertex_fn_name: &str,
+    fragment_fn_name: &str,
+    pixel_format: metal::MTLPixelFormat,
+) -> metal::RenderPipelineState {
+    let vertex_fn = library
+        .get_function(vertex_fn_name, None)
+        .expect("error locating vertex function");
+    let fragment_fn = library
+        .get_function(fragment_fn_name, None)
+        .expect("error locating fragment function");
+
+    let descriptor = metal::RenderPipelineDescriptor::new();
+    descriptor.set_label(label);
+    descriptor.set_vertex_function(Some(vertex_fn.as_ref()));
+    descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
+    let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
+    color_attachment.set_pixel_format(pixel_format);
+    color_attachment.set_blending_enabled(true);
+    color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
+    color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
+    // Use One for source RGB since texture content is already premultiplied
+    color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::One);
+    color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
+    color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
+    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
 
     device
         .new_render_pipeline_state(&descriptor)

@@ -26,6 +26,14 @@ pub const MIN_TEXTURE_SIZE: u32 = 64;
 /// Maximum size for texture caching (4096x4096 pixels)
 pub const MAX_TEXTURE_SIZE: u32 = 4096;
 
+/// Result of acquiring a texture from the cache.
+pub struct AcquireResult<'a> {
+    /// The cached texture entry
+    pub entry: &'a CachedTextureEntry,
+    /// Whether the texture needs to be rendered (true = new or size changed)
+    pub needs_render: bool,
+}
+
 /// Statistics for texture cache performance.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct TextureCacheStats {
@@ -222,6 +230,8 @@ impl TextureCacheManager {
     }
 
     /// Acquire a texture for an element. Returns existing or allocates new.
+    /// The `needs_render` field in the result indicates whether the caller
+    /// should render content to the texture (true = new texture or size changed).
     pub fn acquire(
         &mut self,
         device: &metal::Device,
@@ -229,17 +239,20 @@ impl TextureCacheManager {
         size: Size<DevicePixels>,
         signature: u64,
         content_bounds: Bounds<DevicePixels>,
-    ) -> &CachedTextureEntry {
+    ) -> AcquireResult<'_> {
         // Check if we can reuse existing texture
         if let Some(entry) = self.active_textures.get(&element_id) {
             let bucket = SizeBucket::from_size(size);
             if entry.texture.width == bucket.width && entry.texture.height == bucket.height {
-                // Same size, can reuse - update entry
+                // Same size, can reuse - update entry but don't need to re-render
                 let entry = self.active_textures.get_mut(&element_id).unwrap();
                 entry.signature = signature;
                 entry.content_bounds = content_bounds;
                 entry.last_used_generation = self.generation;
-                return self.active_textures.get(&element_id).unwrap();
+                return AcquireResult {
+                    entry: self.active_textures.get(&element_id).unwrap(),
+                    needs_render: false,
+                };
             } else {
                 // Different size, release old texture
                 self.release_internal(&element_id);
@@ -275,7 +288,10 @@ impl TextureCacheManager {
         self.lru_queue.push_back((element_id.clone(), self.generation));
         self.current_memory += memory_bytes;
 
-        self.active_textures.get(&element_id).unwrap()
+        AcquireResult {
+            entry: self.active_textures.get(&element_id).unwrap(),
+            needs_render: true,
+        }
     }
 
     /// Release a texture back to the pool for an element.

@@ -2847,24 +2847,34 @@ impl Window {
     ) -> Option<SubtreeCacheHit<'_>> {
         let entry = self.rendered_frame.subtree_cache.get(id)?;
 
-        // First check signature, bounds, and content_mask - these must match for any hit
-        if entry.subtree_signature != subtree_signature
-            || entry.bounds != bounds
-            || entry.content_mask != *content_mask
-        {
+        // Signature must always match
+        if entry.subtree_signature != subtree_signature {
             return None;
         }
 
-        // Check if offset also matches (full hit) or differs (offset-only hit)
-        if entry.element_offset == element_offset {
-            Some(SubtreeCacheHit::Full(entry))
-        } else {
-            let offset_delta = Point {
-                x: element_offset.x - entry.element_offset.x,
-                y: element_offset.y - entry.element_offset.y,
-            };
-            Some(SubtreeCacheHit::OffsetOnly { entry, offset_delta })
+        // Check for full cache hit - everything matches exactly
+        if entry.bounds == bounds
+            && entry.content_mask == *content_mask
+            && entry.element_offset == element_offset
+        {
+            return Some(SubtreeCacheHit::Full(entry));
         }
+
+        // Check for offset-only hit:
+        // - bounds SIZE must match (element dimensions unchanged)
+        // - content_mask SIZE can differ (clipping handled at composite time)
+        // - bounds ORIGIN or element_offset may differ (scrolling/movement)
+        if entry.bounds.size == bounds.size {
+            // Calculate offset delta from bounds origin change
+            // This captures the actual visual movement during scrolling
+            let offset_delta = Point {
+                x: bounds.origin.x - entry.bounds.origin.x,
+                y: bounds.origin.y - entry.bounds.origin.y,
+            };
+            return Some(SubtreeCacheHit::OffsetOnly { entry, offset_delta });
+        }
+
+        None
     }
 
     /// Insert a subtree cache entry for the current frame.
@@ -2986,6 +2996,11 @@ impl Window {
         self.next_frame.scene.end_subtree_capture();
     }
 
+    /// Returns true if we're currently capturing a subtree for RTT.
+    pub(crate) fn is_capturing_subtree(&self) -> bool {
+        self.next_frame.scene.is_capturing_subtree()
+    }
+
     /// Insert a cached texture sprite into the scene.
     /// Used to composite a previously rendered subtree at a new position.
     pub(crate) fn insert_cached_texture_sprite(
@@ -3010,12 +3025,12 @@ impl Window {
     }
 
     /// Query if an element has a cached texture for RTT compositing.
-    /// Returns the texture ID if the element has a valid cached texture.
-    pub(crate) fn get_cached_texture_id(
+    /// Returns texture info including ID and UV bounds if the element has a valid cached texture.
+    pub(crate) fn get_cached_texture_info(
         &self,
         element_id: &GlobalElementId,
-    ) -> Option<crate::scene::CachedTextureId> {
-        self.platform_window.get_cached_texture_id(element_id)
+    ) -> Option<crate::scene::CachedTextureInfo> {
+        self.platform_window.get_cached_texture_info(element_id)
     }
 
     fn replay_next_primitive(&mut self) -> bool {

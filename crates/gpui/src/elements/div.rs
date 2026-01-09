@@ -1365,9 +1365,19 @@ impl Div {
     /// Determine if this Div's subtree should be rendered to a texture for caching.
     /// This enables O(1) scrolling by compositing the cached texture instead of re-rendering.
     fn should_cache_to_texture(&self, bounds: &Bounds<Pixels>) -> bool {
+        // Exclude scroll containers - their visible content changes during scrolling
+        // so caching the entire scrollable content doesn't help.
+        // Their children (inner content) can still be cached individually.
+        let overflow = &self.interactivity.base_style.overflow;
+        if overflow.x == Some(Overflow::Scroll) || overflow.y == Some(Overflow::Scroll) {
+            return false;
+        }
+
         // Size constraints - too small wastes GPU memory, too large exceeds texture limits
+        // Note: Max size of 2000px accounts for 2x scale factor (4096 max texture size)
+        // This is conservative but ensures textures aren't silently skipped in RTT pre-pass
         let min_size = px(64.);
-        let max_size = px(4096.);
+        let max_size = px(2000.);
         if bounds.size.width < min_size || bounds.size.height < min_size {
             return false;
         }
@@ -1537,7 +1547,7 @@ enum SubtreeCacheState {
         // Updated entry from prepaint (with new prepaint_range, needs paint_range update)
         partial_entry: SubtreeCacheEntry,
     },
-    /// Offset-only hit during prepaint - signature/bounds/content_mask match but offset differs.
+    /// Offset-only hit during prepaint - signature/bounds match but position differs.
     /// If the entry has a cached texture, paint can composite it at the new position.
     /// Otherwise, falls back to normal painting but may render to texture for future frames.
     OffsetOnlyHit {
@@ -1548,6 +1558,8 @@ enum SubtreeCacheState {
         offset_delta: Point<Pixels>,
         /// Current element offset for the new cache entry
         current_offset: Point<Pixels>,
+        /// Current content mask (may differ from cached due to clipping at scroll edges)
+        current_content_mask: ContentMask<Pixels>,
         /// Prepaint range from this frame (prepaint was re-run for hitboxes)
         prepaint_range: Range<PrepaintStateIndex>,
         /// Hitbox from this frame's prepaint
@@ -1677,6 +1689,7 @@ impl Element for Div {
                         let old_prepaint_range = cached.prepaint_range.clone();
                         let old_paint_range = cached.paint_range.clone();
                         let hitbox = cached.hitbox.clone();
+                        let cached_texture_id = cached.cached_texture_id;
 
                         // Record NEW prepaint start before reuse
                         let prepaint_start = window.prepaint_index();
@@ -1696,7 +1709,7 @@ impl Element for Div {
                             prepaint_range: prepaint_start..prepaint_end,
                             paint_range: Default::default(), // Will be set in paint phase
                             hitbox: hitbox.clone(),
-                            cached_texture_id: None, // RTT caching not implemented yet
+                            cached_texture_id,
                         };
 
                         // Store cache hit state for paint phase
@@ -1733,6 +1746,7 @@ impl Element for Div {
                             cached_entry,
                             offset_delta,
                             current_offset: element_offset,
+                            current_content_mask: content_mask.clone(),
                             prepaint_range: prepaint_start..prepaint_end,
                             hitbox: prepaint_hitbox.clone(),
                         });
@@ -1812,50 +1826,57 @@ impl Element for Div {
                 cached_entry,
                 offset_delta,
                 current_offset,
+                current_content_mask,
                 prepaint_range,
                 hitbox: cached_hitbox,
             }) => {
                 // Offset-only hit - the element's position changed (e.g., during scrolling)
                 // but its content is the same.
 
+                log::warn!("RTT DEBUG: OffsetOnlyHit for {:?}, offset_delta={:?}", id, offset_delta);
+
+                // Compute new bounds from offset delta
+                let new_bounds = Bounds {
+                    origin: cached_entry.bounds.origin + offset_delta,
+                    size: cached_entry.bounds.size,
+                };
+
                 // Query the texture cache for a cached texture for this element
                 // This checks if the renderer has rendered this subtree to a texture
-                if let Some(texture_id) = window.get_cached_texture_id(&id) {
-                    // We have a cached texture - composite it at the new position
-                    let new_bounds = Bounds {
-                        origin: cached_entry.bounds.origin + offset_delta,
-                        size: cached_entry.bounds.size,
-                    };
-                    let new_content_mask = ContentMask {
-                        bounds: Bounds {
-                            origin: cached_entry.content_mask.bounds.origin + offset_delta,
-                            size: cached_entry.content_mask.bounds.size,
-                        },
-                    };
-
+                let texture_info_result = window.get_cached_texture_info(&id);
+                log::warn!("RTT DEBUG: get_cached_texture_info returned {:?}", texture_info_result.is_some());
+                if let Some(texture_info) = texture_info_result {
+                    log::warn!(
+                        "RTT USING CACHED TEXTURE: {:?}, bounds={:?}, uv_bounds={:?}, content_mask={:?}",
+                        texture_info.id,
+                        new_bounds,
+                        texture_info.uv_bounds,
+                        current_content_mask.bounds
+                    );
+                    let paint_start = window.paint_index();
                     // Insert the cached texture sprite at the new position
+                    // Use CURRENT content_mask for clipping (may differ from cached due to scroll edges)
+                    // Use UV bounds from texture_info to handle size bucket allocation
                     window.insert_cached_texture_sprite(
                         new_bounds,
-                        new_content_mask.clone(),
-                        Bounds {
-                            origin: crate::point(0.0, 0.0),
-                            size: crate::size(1.0, 1.0),
-                        },
-                        texture_id,
+                        current_content_mask.clone(),
+                        texture_info.uv_bounds,
+                        texture_info.id,
                     );
+                    let paint_end = window.paint_index();
 
-                    // Update cache entry with new offset (keep the texture ID)
+                    // Update cache entry with new bounds and current content mask
                     window.insert_subtree_cache(
                         id,
                         SubtreeCacheEntry {
                             subtree_signature: cached_entry.subtree_signature,
                             bounds: new_bounds,
-                            content_mask: new_content_mask,
+                            content_mask: current_content_mask,
                             element_offset: current_offset,
                             prepaint_range,
-                            paint_range: Default::default(), // No paint operations - using cached texture
+                            paint_range: paint_start..paint_end,
                             hitbox: cached_hitbox,
-                            cached_texture_id: Some(texture_id),
+                            cached_texture_id: Some(texture_info.id),
                         },
                     );
                     return;
@@ -1863,17 +1884,21 @@ impl Element for Div {
 
                 // No cached texture - fall back to normal painting
                 // But mark this subtree for texture capture on this frame
+                log::trace!(
+                    "RTT FALLBACK: no cached texture, painting + capturing. bounds={:?}",
+                    new_bounds
+                );
 
                 // Record paint start
                 let paint_start = window.paint_index();
 
                 // Begin subtree capture for RTT (if eligible)
-                let should_capture = self.should_cache_to_texture(&cached_entry.bounds);
+                let should_capture = self.should_cache_to_texture(&new_bounds);
                 if should_capture {
                     window.begin_subtree_capture(
                         id.clone(),
-                        cached_entry.bounds,
-                        cached_entry.content_mask.clone(),
+                        new_bounds,
+                        current_content_mask.clone(),
                     );
                 }
 
@@ -1888,14 +1913,14 @@ impl Element for Div {
                 // Record paint end
                 let paint_end = window.paint_index();
 
-                // Insert updated cache entry with new offset for next frame
+                // Insert updated cache entry with new bounds for next frame
                 // Note: cached_texture_id will be set by the renderer pre-pass on subsequent frames
                 window.insert_subtree_cache(
                     id,
                     SubtreeCacheEntry {
                         subtree_signature: cached_entry.subtree_signature,
-                        bounds: cached_entry.bounds,
-                        content_mask: cached_entry.content_mask,
+                        bounds: new_bounds,
+                        content_mask: current_content_mask,
                         element_offset: current_offset,
                         prepaint_range,
                         paint_range: paint_start..paint_end,
