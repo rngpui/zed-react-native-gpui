@@ -2207,8 +2207,8 @@ impl MetalRenderer {
             let container_id = &sprite.tile_key.container_id;
             let coord = sprite.tile_key.coord;
 
-            // Look up the display list and property trees for this container
-            let Some((display_list, property_trees)) = scene.get_display_list(container_id) else {
+            // Look up the display list for this container
+            let Some((display_list, _)) = scene.get_display_list(container_id) else {
                 continue;
             };
 
@@ -2223,14 +2223,10 @@ impl MetalRenderer {
             );
 
             if needs_render {
-                // Arc::clone is cheap (just increments reference count)
-                // PropertyTrees needs to be cloned because rasterize_tile takes &mut for caching
                 jobs.push(TileRasterJob {
                     container_id: container_id.clone(),
                     coord,
                     display_list: Arc::clone(display_list),
-                    property_trees: property_trees.clone(),
-                    // All tiles in tile_sprites are visible by definition
                     priority: TilePriority::VISIBLE,
                 });
             }

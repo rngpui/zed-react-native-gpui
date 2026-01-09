@@ -28,7 +28,6 @@
 //! ```
 
 use crate::display_list::{DisplayList, TileRasterResult};
-use crate::property_trees::PropertyTrees;
 use crate::scene::TileCoord;
 use crate::GlobalElementId;
 use rayon::prelude::*;
@@ -48,10 +47,6 @@ pub struct TileRasterJob {
 
     /// The display list to rasterize (Arc for cheap cloning across tiles).
     pub display_list: Arc<DisplayList>,
-
-    /// Property trees for transform/clip resolution (cloned for thread safety).
-    /// PropertyTrees needs to be owned because rasterize_tile takes &mut for caching.
-    pub property_trees: PropertyTrees,
 
     /// Priority for scheduling (higher = more important).
     /// Visible tiles should have higher priority.
@@ -117,12 +112,7 @@ pub fn rasterize_tiles_parallel(
     jobs.into_par_iter()
         .map(|job| {
             let tile_bounds = TileCache::tile_content_bounds(job.coord, scale_factor);
-
-            // Clone property_trees since rasterize_tile needs &mut
-            let mut property_trees = job.property_trees;
-            let raster_result =
-                job.display_list
-                    .rasterize_tile(tile_bounds, scale_factor, &mut property_trees);
+            let raster_result = job.display_list.rasterize_tile(tile_bounds, scale_factor);
 
             TileRasterJobResult {
                 container_id: job.container_id,

@@ -402,20 +402,30 @@ impl SpatialIndex {
 
     /// Query items that potentially intersect the given bounds.
     ///
-    /// Returns an iterator of item indices. Note: may include items that don't
+    /// Returns indices of items that may intersect. Note: may include items that don't
     /// actually intersect (false positives from cell-level granularity), so
     /// callers should do a final intersection check.
-    pub fn query(&self, bounds: Bounds<Pixels>) -> impl Iterator<Item = usize> + '_ {
+    pub fn query(&self, bounds: Bounds<Pixels>) -> Vec<usize> {
         let (min_col, min_row, max_col, max_row) = self.cells_for_bounds(bounds);
 
         // Collect unique indices from overlapping cells
         let mut seen = collections::FxHashSet::default();
+        let mut result = Vec::new();
 
-        (min_row..=max_row)
-            .flat_map(move |row| (min_col..=max_col).map(move |col| row * self.cols + col))
-            .filter(move |&cell_index| cell_index < self.cells.len())
-            .flat_map(move |cell_index| self.cells[cell_index].iter().copied())
-            .filter(move |&index| seen.insert(index))
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                let cell_index = row * self.cols + col;
+                if cell_index < self.cells.len() {
+                    for &index in &self.cells[cell_index] {
+                        if seen.insert(index) {
+                            result.push(index);
+                        }
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     /// Check if the index needs rebuilding.
@@ -800,8 +810,6 @@ impl DisplayList {
     /// The spatial index must be built before calling this method.
     /// Call `ensure_spatial_index_built()` before rasterization.
     pub fn items_intersecting(&self, bounds: Bounds<Pixels>) -> impl Iterator<Item = &DisplayItem> + '_ {
-        // Spatial index must be built before querying - if this panics, ensure_spatial_index_built()
-        // wasn't called before the display list was used for rasterization.
         debug_assert!(
             !self.spatial_index.is_dirty(),
             "Spatial index not built before items_intersecting() - call ensure_spatial_index_built() first"
@@ -809,7 +817,7 @@ impl DisplayList {
 
         ItemsIntersectingIter {
             items: &self.items,
-            indices: self.spatial_index.query(bounds).collect::<Vec<_>>().into_iter(),
+            indices: self.spatial_index.query(bounds).into_iter(),
             query_bounds: bounds,
         }
     }
@@ -826,7 +834,6 @@ impl DisplayList {
 
         self.spatial_index
             .query(bounds)
-            .collect::<Vec<_>>()
             .into_iter()
             .filter_map(move |index| {
                 let item = self.items.get(index)?;
@@ -910,7 +917,6 @@ impl DisplayList {
         &self,
         tile_bounds: Bounds<Pixels>,
         scale_factor: f32,
-        _property_trees: &mut PropertyTrees,
     ) -> TileRasterResult {
         debug_assert!(
             !self.baked_transforms.is_empty() || self.items.is_empty(),
