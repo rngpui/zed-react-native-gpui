@@ -537,6 +537,9 @@ impl<E: Element> Drawable<E> {
                     let computed_id = window.compute_element_id::<E>(global_id.as_ref());
                     window.begin_element_paint(computed_id, input_hash);
 
+                    // Always call paint() - it handles children and other side effects.
+                    // Caching happens at primitive insertion level: insert_primitive_internal
+                    // checks current_element_has_cache_hit() and skips if cached.
                     self.element.paint(
                         global_id.as_ref(),
                         inspector_id.as_ref(),
@@ -547,7 +550,7 @@ impl<E: Element> Drawable<E> {
                         cx,
                     );
 
-                    window.finalize_element_paint();
+                    window.finalize_element_paint(computed_id);
                 } else {
                     // No caching - skip tracking overhead, paint directly
                     self.element.paint(

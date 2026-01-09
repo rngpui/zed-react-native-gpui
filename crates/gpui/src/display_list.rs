@@ -386,11 +386,17 @@ impl ComputedElementId {
 /// own `ElementEntry` records. This separation is critical for per-element caching:
 /// when a child changes, we can invalidate just that child's items while preserving
 /// the parent's cached items.
+///
+/// Note: Elements may paint items BOTH before AND after children (e.g., backgrounds
+/// before, borders after). We track both ranges to ensure complete caching.
 #[derive(Clone, Debug)]
 pub(crate) struct ElementEntry {
-    /// Range of items owned directly by this element (NOT including children).
-    /// Items in this range are the element's own primitives (background, border, etc.).
+    /// Range of items owned directly by this element BEFORE children.
+    /// Items in this range are typically backgrounds, shadows.
     pub own_items: Range<usize>,
+    /// Range of items owned directly by this element AFTER children.
+    /// Items in this range are typically borders (painted on top of content).
+    pub items_after_children: Range<usize>,
     /// Combined bounds of own items only (not including children).
     pub own_bounds: Bounds<Pixels>,
     /// Hash of element inputs (for change detection).
@@ -404,12 +410,12 @@ pub(crate) struct ElementEntry {
 impl ElementEntry {
     /// Check if this element has any own items.
     pub fn has_own_items(&self) -> bool {
-        !self.own_items.is_empty()
+        !self.own_items.is_empty() || !self.items_after_children.is_empty()
     }
 
     /// Get the number of own items.
     pub fn own_item_count(&self) -> usize {
-        self.own_items.len()
+        self.own_items.len() + self.items_after_children.len()
     }
 }
 
@@ -424,9 +430,12 @@ struct ElementPaintStackEntry {
     id: ComputedElementId,
     /// Index in items vec where this element's own items start.
     start_index: usize,
-    /// Index where own items end (set by end_element_own_items).
-    /// None means own items haven't been marked yet.
+    /// Index where own items (before children) end (set when first child begins).
+    /// None means no children have started yet.
     own_items_end: Option<usize>,
+    /// Index where children's items end (set when last child finalizes).
+    /// Items after this index (up to finalize) are "items_after_children".
+    children_items_end: Option<usize>,
     /// Hash of element inputs for change detection.
     input_hash: u64,
     /// Children painted during this element's paint.
@@ -727,6 +736,7 @@ impl DisplayList {
             id,
             start_index: self.items.len(),
             own_items_end: None,
+            children_items_end: None,
             input_hash,
             children: SmallVec::new(),
             cache_hit,
@@ -766,17 +776,33 @@ impl DisplayList {
     /// 3. Stores the entry for later lookup
     pub fn finalize_element(&mut self) -> Option<Bounds<Pixels>> {
         let entry = self.element_paint_stack.pop()?;
+        let current_len = self.items.len();
 
-        // If end_element_own_items wasn't called, assume all items are own items
+        // If own_items_end wasn't set, assume all items are own items
         // (this is the case for leaf elements with no children)
-        let own_items_end = entry.own_items_end.unwrap_or(self.items.len());
+        let own_items_end = entry.own_items_end.unwrap_or(current_len);
 
-        // Calculate bounds of own items only
+        // Items painted after children end (e.g., borders) are "items_after_children"
+        // If no children painted, children_items_end is None, so items_after_children is empty
+        let items_after_children_start = entry.children_items_end.unwrap_or(own_items_end);
+        let items_after_children = items_after_children_start..current_len;
+
+        // Calculate bounds of all own items (before + after children)
         let own_bounds = self.calculate_bounds_for_range(entry.start_index, own_items_end);
+        let after_bounds = self.calculate_bounds_for_range(items_after_children_start, current_len);
+        let combined_bounds = if own_bounds.size.width.0 == 0.0 && own_bounds.size.height.0 == 0.0 {
+            after_bounds
+        } else if after_bounds.size.width.0 == 0.0 && after_bounds.size.height.0 == 0.0 {
+            own_bounds
+        } else {
+            own_bounds.union(&after_bounds)
+        };
 
-        // Register this element as a child of the parent (if any)
+        // Register this element as a child of the parent and update parent's children_items_end
         if let Some(parent) = self.element_paint_stack.last_mut() {
             parent.children.push(entry.id);
+            // Update parent's children_items_end to include this child's items
+            parent.children_items_end = Some(current_len);
         }
 
         // Store the entry
@@ -784,13 +810,14 @@ impl DisplayList {
             entry.id,
             ElementEntry {
                 own_items: entry.start_index..own_items_end,
-                own_bounds,
+                items_after_children,
+                own_bounds: combined_bounds,
                 input_hash: entry.input_hash,
                 children: entry.children,
             },
         );
 
-        Some(own_bounds)
+        Some(combined_bounds)
     }
 
     /// Calculate bounds for a range of items.

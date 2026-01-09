@@ -354,8 +354,14 @@ impl LayerTree {
             // Clear property trees - transforms/clips are rebuilt during paint
             layer.property_trees.clear();
 
-            // Phase 20e: Swap display lists for per-element caching
-            layer.begin_frame();
+            // Phase 0.3: Root layer uses prepare_for_repaint() to swap display lists,
+            // enabling element-level caching (items baked at insert time are self-contained).
+            // Other layers use begin_frame() which clears previous_display_list.
+            if layer.id == LayerId::ROOT {
+                layer.prepare_for_repaint();
+            } else {
+                layer.begin_frame();
+            }
         }
 
         // Reset layer stack to just root

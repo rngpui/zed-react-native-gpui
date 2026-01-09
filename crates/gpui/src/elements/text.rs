@@ -114,12 +114,15 @@ impl Element for &'static str {
     fn content_hash(
         &self,
         _id: Option<&GlobalElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         window: &Window,
         _cx: &App,
     ) -> Option<u64> {
         let style = window.text_style();
-        Some(text_content_hash(self, None, &style, window.rem_size()))
+        let mut hasher = ContentHasher::default();
+        hasher.write_u64(text_content_hash(self, None, &style, window.rem_size()));
+        hasher.write_u64(bounds.content_hash());
+        Some(hasher.finish())
     }
 }
 
@@ -190,12 +193,15 @@ impl Element for SharedString {
     fn content_hash(
         &self,
         _id: Option<&GlobalElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         window: &Window,
         _cx: &App,
     ) -> Option<u64> {
         let style = window.text_style();
-        Some(text_content_hash(self.as_ref(), None, &style, window.rem_size()))
+        let mut hasher = ContentHasher::default();
+        hasher.write_u64(text_content_hash(self.as_ref(), None, &style, window.rem_size()));
+        hasher.write_u64(bounds.content_hash());
+        Some(hasher.finish())
     }
 }
 
@@ -375,11 +381,14 @@ impl Element for StyledText {
     fn content_hash(
         &self,
         _id: Option<&GlobalElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _window: &Window,
         _cx: &App,
     ) -> Option<u64> {
-        self.content_hash
+        let mut hasher = ContentHasher::default();
+        hasher.write_u64(self.content_hash?);
+        hasher.write_u64(bounds.content_hash());
+        Some(hasher.finish())
     }
 }
 
@@ -1094,11 +1103,14 @@ impl Element for InteractiveText {
     fn content_hash(
         &self,
         _id: Option<&GlobalElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _window: &Window,
         _cx: &App,
     ) -> Option<u64> {
-        self.text.content_hash
+        let mut hasher = ContentHasher::default();
+        hasher.write_u64(self.text.content_hash?);
+        hasher.write_u64(bounds.content_hash());
+        Some(hasher.finish())
     }
 }
 

@@ -2493,8 +2493,10 @@ impl Window {
                     // Insert primitives into Scene
                     self.next_frame.scene.insert_from_raster_result(result);
 
-                    // Clear the display list for next frame
-                    display_list.clear();
+                    // Phase 0.3: Do NOT clear display_list - it persists for element cache lookups.
+                    // At the start of next frame, prepare_for_repaint() will swap it to
+                    // previous_display_list where elements can look up their cached items.
+                    // Property trees can be cleared since items have baked world transforms/clips.
                     layer.property_trees.clear();
                 }
             }
@@ -3450,7 +3452,13 @@ impl Window {
             false
         };
 
-        // If cache hit, copy items from previous frame first
+        // Begin tracking in current display list FIRST (to set start_index correctly)
+        if let Some(ref mut display_list) = layer.display_list {
+            display_list.begin_element(id, input_hash, cache_hit);
+        }
+
+        // If cache hit, copy items from previous frame AFTER begin_element
+        // so copied items fall within the element's tracked range
         if cache_hit {
             if let Some(ref prev_list) = layer.previous_display_list {
                 if let Some(prev_entry) = prev_list.get_element_entry(&id) {
@@ -3461,11 +3469,6 @@ impl Window {
             }
         }
 
-        // Begin tracking in current display list (with cache_hit flag)
-        if let Some(ref mut display_list) = layer.display_list {
-            display_list.begin_element(id, input_hash, cache_hit);
-        }
-
         cache_hit
     }
 
@@ -3473,13 +3476,33 @@ impl Window {
     ///
     /// Called at the end of an element's paint() method. Records the element's
     /// item range and bounds for future cache lookups.
-    pub(crate) fn finalize_element_paint(&mut self) {
+    pub(crate) fn finalize_element_paint(&mut self, element_id: crate::display_list::ComputedElementId) {
         // Pop from element path stack (to balance push in compute_element_id)
         self.element_path_stack.pop();
         self.element_child_counters.pop();
 
-        // Finalize in display list
         let layer = self.layer_tree.current_layer_mut();
+
+        // If this element had a cache hit, copy items_after_children from previous frame
+        // (these are items like borders that are painted after children)
+        if let Some(ref display_list) = layer.display_list {
+            if display_list.current_element_has_cache_hit() {
+                if let Some(ref prev_list) = layer.previous_display_list {
+                    if let Some(prev_entry) = prev_list.get_element_entry(&element_id) {
+                        if !prev_entry.items_after_children.is_empty() {
+                            if let Some(ref mut current_list) = layer.display_list {
+                                current_list.copy_items_from_range(
+                                    prev_list,
+                                    prev_entry.items_after_children.clone(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Finalize in display list
         if let Some(ref mut display_list) = layer.display_list {
             display_list.finalize_element();
         }
