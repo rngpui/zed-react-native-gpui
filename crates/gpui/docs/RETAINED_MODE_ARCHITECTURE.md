@@ -2,13 +2,15 @@
 
 ## Executive Summary
 
-This document proposes a fundamental architectural change to GPUI: transitioning from an **immediate-mode** rendering model (rebuild everything every frame) to a **retained-mode** model (persist the element tree, only update what changed).
+This document proposes evolving GPUI from an **immediate-mode** rendering model (rebuild everything every frame) to a **retained-artifact** model (persist paint/layout artifacts, only rebuild what changed).
 
 **The Problem**: GPUI currently does O(n) work per frame regardless of what changed, resulting in ~30fps in debug mode for a static 375-element grid on an M2 Ultra.
 
-**The Solution**: Retain the element tree across frames, track changes through Rust's ownership model, and only re-render/re-layout/re-paint elements that actually changed.
+**The Solution**: Retain *artifacts* (layout nodes, display list entries, tiles, textures) across frames, track changes through entity invalidation, and only re-render/re-layout/re-paint elements that actually changed.
 
 **The Goal**: O(changed) work per frame, enabling 120fps in debug mode for typical UI workloads.
+
+**Key Insight**: GPUI already has significant retained-mode infrastructure. The path forward is to unify and extend these existing systems, not introduce a parallel retained element tree.
 
 ---
 
@@ -16,18 +18,15 @@ This document proposes a fundamental architectural change to GPUI: transitioning
 
 1. [Problem Analysis](#1-problem-analysis)
 2. [Design Goals](#2-design-goals)
-3. [Architecture Overview](#3-architecture-overview)
-4. [Core Data Structures](#4-core-data-structures)
-5. [The Frame Cycle](#5-the-frame-cycle)
-6. [Automatic Reactivity](#6-automatic-reactivity)
-7. [Reconciliation](#7-reconciliation)
-8. [Incremental Layout](#8-incremental-layout)
-9. [Incremental Paint](#9-incremental-paint)
-10. [Integration with Existing Systems](#10-integration-with-existing-systems)
-11. [Developer Experience](#11-developer-experience)
-12. [Migration Strategy](#12-migration-strategy)
-13. [Performance Expectations](#13-performance-expectations)
-14. [Open Questions](#14-open-questions)
+3. [Existing Infrastructure](#3-existing-infrastructure)
+4. [Architecture Overview](#4-architecture-overview)
+5. [Core Mechanisms](#5-core-mechanisms)
+6. [Incremental Layout](#6-incremental-layout)
+7. [Incremental Paint](#7-incremental-paint)
+8. [Tile & Raster Cache Unification](#8-tile--raster-cache-unification)
+9. [Implementation Plan](#9-implementation-plan)
+10. [Performance Expectations](#10-performance-expectations)
+11. [Open Questions](#11-open-questions)
 
 ---
 
@@ -35,7 +34,7 @@ This document proposes a fundamental architectural change to GPUI: transitioning
 
 ### 1.1 Current Architecture
 
-GPUI currently uses an immediate-mode-inspired architecture where the element tree is rebuilt from scratch every frame:
+GPUI uses an immediate-mode-inspired architecture where the element tree is rebuilt from scratch every frame:
 
 ```
 Every frame (regardless of what changed):
@@ -51,7 +50,7 @@ Every frame (regardless of what changed):
 ### 1.2 The Performance Impact
 
 Using `cache_bench` as a concrete example:
-- **Grid**: 375 cells (15×25), completely static
+- **Grid**: 375 cells (15x25), completely static
 - **Stats overlay**: ~30 elements, only text values change
 - **Total**: ~405 elements
 
@@ -60,10 +59,10 @@ Using `cache_bench` as a concrete example:
 Every frame:
 ├── render() rebuilds 375 grid divs (unchanged!)
 ├── render() rebuilds 30 stat elements (only values change)
-├── request_layout() × 405 elements
+├── request_layout() x 405 elements
 ├── compute_layout() walks all 405 nodes
-├── prepaint() × 405 elements
-├── paint() × 405 elements
+├── prepaint() x 405 elements
+├── paint() x 405 elements
 └── Result: ~30fps in debug mode on M2 Ultra
 ```
 
@@ -95,6 +94,17 @@ The architectural issue is not "debug mode is slow" but rather:
 
 Debug mode amplifies this by adding a constant multiplier to all operations. But the fundamental problem is the linear work, not the constant factor.
 
+### 1.5 Why Not Retain Element Instances?
+
+The original proposal suggested retaining `AnyElement` instances across frames. This is **not feasible** with current GPUI:
+
+- `AnyElement` is `ArenaBox<dyn ElementObject>` (`src/element.rs:663`)
+- Elements are allocated in `ELEMENT_ARENA` (`src/window.rs:227`)
+- The arena is cleared every frame (`src/arena.rs:179`)
+- Elements and callbacks are intentionally dropped each frame (`src/element.rs:13`)
+
+Retaining element instances would require redesigning allocation, lifetimes, and update semantics — a massive rewrite with unclear benefits over the artifact-based approach.
+
 ---
 
 ## 2. Design Goals
@@ -103,1301 +113,668 @@ Debug mode amplifies this by adding a constant multiplier to all operations. But
 
 1. **O(changed) frame complexity**: Work done should be proportional to what changed, not total elements
 2. **120fps in debug mode**: For typical UI workloads with few changes per frame
-3. **Zero-annotation reactivity**: Developers should not need to manually specify dependencies
-4. **Backward compatible**: Existing GPUI code should work without modification (possibly with degraded performance initially)
+3. **Build on existing infrastructure**: Extend what GPUI already has, don't introduce parallel systems
+4. **Backward compatible**: Existing GPUI code should work without modification
 
 ### 2.2 Secondary Goals
 
-1. **Minimal memory overhead**: Retained tree should not significantly increase memory usage
-2. **Predictable performance**: No surprise O(n²) behaviors or GC pauses
+1. **Minimal memory overhead**: Retained artifacts should not significantly increase memory usage
+2. **Predictable performance**: No surprise O(n²) behaviors
 3. **Debuggability**: Clear tools to understand why re-renders happen
-4. **Incremental adoption**: Can be enabled per-view or globally
+4. **Incremental adoption**: Benefits increase as more infrastructure is connected
 
 ### 2.3 Non-Goals
 
-1. **Immediate-mode purity**: We're explicitly moving away from immediate mode
-2. **Perfect automatic optimization**: Some edge cases may need hints
-3. **Breaking API changes**: Core Element/View traits should remain similar
+1. **Retaining element instances**: Elements remain ephemeral (arena-allocated, per-frame)
+2. **Generic reconciliation/diff**: No framework-level element diffing
+3. **Render hash from struct fields**: Too expensive, unclear benefits over entity notification
 
 ---
 
-## 3. Architecture Overview
+## 3. Existing Infrastructure
 
-### 3.1 High-Level Design
+GPUI already contains significant retained-mode building blocks. The strategy is to unify and extend these, not replace them.
+
+### 3.1 Runtime Dependency Tracking & Invalidation
+
+**Already implemented:**
+- `App::detect_accessed_entities` (`src/app.rs:854`)
+- `App::record_entities_accessed` (`src/app.rs:868`)
+- `App::notify` (`src/app.rs:2165`)
+- `Window::mark_view_dirty` (`src/window.rs:1502`)
+
+Views already track which entities they read during render. When an entity is updated via `notify()`, dependent views are marked dirty.
+
+### 3.2 View Subtree Reuse (AnyView::cached)
+
+**Already implemented:**
+- `AnyView::cached` reuses prepaint/paint ranges (`src/view.rs:99`, `src/view.rs:202`)
+- Cache lookup/application (`src/window.rs:2650`, `src/window.rs:2711`)
+
+This is extremely close to "retained mode" — it caches *artifacts* (paint ranges), not element instances. Currently opt-in via `AnyView::cached(style)`.
+
+### 3.3 Layout Node Reuse
+
+**Already implemented:**
+- `TaffyLayoutEngine.element_to_node: FxHashMap<GlobalElementId, NodeId>` (`src/taffy.rs:49`)
+
+Layout nodes persist across frames for elements with explicit IDs. This avoids recreating Taffy nodes.
+
+### 3.4 Universal Element Identity & Per-Element Paint Caching
+
+**Already implemented:**
+- `ComputedElementId` (`src/display_list.rs:325`)
+- `ElementEntry` with cached paint state (`src/display_list.rs:383`)
+- Phase 20 per-element caching in Window (`src/window.rs:3408`)
+
+Every element gets a stable identity. Paint artifacts can be cached and reused per-element.
+
+### 3.5 SubtreeCache / Render-to-Texture
+
+**Already implemented:**
+- Subtree cache lookup/insert (`src/window.rs:2759`, `src/window.rs:2854`)
+- RTT capture for scroll container optimization
+
+### 3.6 DisplayList & Tile System
+
+**Already implemented:**
+- `DisplayList` with spatial index (`src/display_list.rs`)
+- `DisplayList::invalidate_region` for dirty rect tracking (`src/display_list.rs:917`)
+- Tile cache with generation-based invalidation (`src/platform/mac/tile_cache.rs`)
+
+---
+
+## 4. Architecture Overview
+
+### 4.1 High-Level Design
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        RETAINED ELEMENT TREE                        │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │  RetainedNode                                                │   │
-│  │  ├── element: Box<dyn Element>                              │   │
-│  │  ├── children: Vec<RetainedNodeId>                          │   │
-│  │  ├── cached_state: RetainedState (layout, paint cache)      │   │
-│  │  └── flags: DirtyFlags (NEEDS_RENDER | NEEDS_LAYOUT | ...)  │   │
-│  └─────────────────────────────────────────────────────────────┘   │
-│                              │                                      │
-│                              ▼                                      │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │  Frame Cycle                                                 │   │
-│  │  1. Check dirty flags (O(1) for clean subtrees)             │   │
-│  │  2. Re-render dirty views only                               │   │
-│  │  3. Reconcile changed subtrees                               │   │
-│  │  4. Layout dirty subtrees only                               │   │
-│  │  5. Paint dirty elements only                                │   │
-│  │  6. Composite (unchanged from current)                       │   │
-│  └─────────────────────────────────────────────────────────────┘   │
+│                     RETAINED ARTIFACT MODEL                          │
+│                                                                      │
+│  Elements: Ephemeral (arena-allocated, rebuilt when dirty)          │
+│  Artifacts: Retained (layout nodes, paint entries, tiles, textures) │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  Invalidation Flow                                            │   │
+│  │                                                               │   │
+│  │  Entity.notify() ──► mark_view_dirty() ──► NEEDS_RENDER      │   │
+│  │                                                               │   │
+│  │  View dirty ──► rebuild element subtree ──► NEEDS_LAYOUT     │   │
+│  │                                                               │   │
+│  │  Layout changed ──► NEEDS_PAINT ──► invalidate_region()      │   │
+│  │                                                               │   │
+│  │  Dirty region ──► tile invalidation ──► re-rasterize tiles   │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  Frame Cycle                                                  │   │
+│  │                                                               │   │
+│  │  1. Check view dirty flags (O(dirty views))                  │   │
+│  │  2. Rebuild dirty view subtrees only                         │   │
+│  │  3. Layout with cached nodes (O(dirty + ancestors))          │   │
+│  │  4. Paint with artifact reuse (O(dirty elements))            │   │
+│  │  5. Rasterize dirty tiles only (O(dirty tiles))              │   │
+│  │  6. Composite (unchanged)                                     │   │
+│  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 Key Concepts
+### 4.2 Key Principles
 
-| Concept | Description |
-|---------|-------------|
-| **Retained Tree** | Element tree persists across frames |
-| **Dirty Flags** | Track what needs re-render/layout/paint |
-| **Automatic Tracking** | Rust's ownership model enables dependency detection |
-| **Reconciliation** | Diff new elements against retained tree |
-| **Incremental Layout** | Skip layout for clean subtrees |
-| **Incremental Paint** | Skip paint for clean elements |
+| Principle | Description |
+|-----------|-------------|
+| **Artifacts, not instances** | Retain layout nodes, paint entries, tiles — not element objects |
+| **Entity-driven invalidation** | `notify()` is the primary signal, not hashing state |
+| **Unified identity** | `ComputedElementId` is the key for all caches |
+| **Dirty rect propagation** | Changes generate regions that invalidate tiles |
+| **Subtree skip** | Clean subtrees skip render/layout/paint entirely |
 
-### 3.3 Comparison with Current Architecture
+### 4.3 What Changes vs. What's Retained
 
-| Aspect | Current (Immediate) | Proposed (Retained) |
-|--------|---------------------|---------------------|
-| Element tree lifetime | One frame | Persists across frames |
-| Work per frame | O(total elements) | O(changed elements) |
-| Render calls | Every view, every frame | Only dirty views |
-| Layout calls | Every element, every frame | Only dirty subtrees |
-| Paint calls | Every element, every frame | Only dirty elements |
-| Memory | Lower (temporary) | Higher (persistent) |
-| Complexity | Simpler | More complex |
+| Component | Lifetime | Cache Key |
+|-----------|----------|-----------|
+| `AnyElement` | One frame (arena) | N/A |
+| View render output | One frame | N/A |
+| Layout `NodeId` | Persistent | `ComputedElementId` |
+| `ElementEntry` (paint cache) | Persistent | `ComputedElementId` |
+| `DisplayList` items | Per-layer, swapped | Element ranges |
+| Tile textures | LRU cached | `(LayerId, TileCoord, generation)` |
+| RTT textures | LRU cached | `(ElementId, bounds, clip)` |
 
 ---
 
-## 4. Core Data Structures
+## 5. Core Mechanisms
 
-### 4.1 RetainedNodeId
-
-```rust
-/// Unique identifier for a retained element node.
-/// Stable across frames for the lifetime of the element.
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub struct RetainedNodeId(u64);
-
-impl RetainedNodeId {
-    pub fn next() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        Self(COUNTER.fetch_add(1, Ordering::Relaxed))
-    }
-}
-```
-
-### 4.2 DirtyFlags
+### 5.1 Dirty Flags
 
 ```rust
 bitflags! {
-    /// Flags indicating what work is needed for a retained node.
+    /// Flags indicating what work is needed for a view/element.
     #[derive(Copy, Clone, Eq, PartialEq, Debug)]
     pub struct DirtyFlags: u8 {
-        /// View inputs changed, need to call render()
+        /// View's entity was notified, need to call render()
         const NEEDS_RENDER = 0b0000_0001;
 
         /// Layout inputs changed, need to recompute layout
         const NEEDS_LAYOUT = 0b0000_0010;
 
         /// Visual appearance changed, need to repaint
-        const NEEDS_PAINT = 0b0000_0100;
+        const NEEDS_PAINT  = 0b0000_0100;
 
-        /// Some descendant has dirty flags set.
-        /// Enables O(1) skip of clean subtrees.
+        /// Some descendant has dirty flags set (enables subtree skip)
         const SUBTREE_DIRTY = 0b0000_1000;
-
-        /// Element was just created, needs full initialization
-        const NEWLY_CREATED = 0b0001_0000;
-
-        /// All flags set (for initialization)
-        const ALL = 0b0001_1111;
     }
 }
 ```
 
-### 4.3 RetainedState
+### 5.2 Invalidation via Entity Notification
+
+The existing `notify()` system is the primary invalidation mechanism:
 
 ```rust
-/// Cached state for a retained element node.
-#[derive(Debug)]
-pub struct RetainedState {
-    // === Layout Cache ===
-    /// Taffy layout node ID
-    pub layout_id: Option<LayoutId>,
-    /// Computed bounds from last layout
-    pub bounds: Bounds<Pixels>,
-    /// Constraints used for last layout (for cache validity)
-    pub layout_constraints: Option<Size<AvailableSpace>>,
+// When an entity updates:
+entity.update(cx, |state, cx| {
+    state.value = new_value;
+    cx.notify();  // Marks all dependent views as NEEDS_RENDER
+});
 
-    // === Paint Cache ===
-    /// Range of items in the DisplayList belonging to this element
-    pub display_items: Range<usize>,
-    /// Content mask at paint time
-    pub content_mask: ContentMask<Pixels>,
-
-    // === Render Cache (for Views) ===
-    /// Hash of inputs that produced the current children
-    pub render_hash: u64,
-    /// Cached element output from render() (before reconciliation)
-    pub rendered_element: Option<AnyElement>,
-
-    // === Dependency Tracking ===
-    /// Entity handles read during last render
-    pub entity_dependencies: SmallVec<[EntityId; 4]>,
-}
-
-impl Default for RetainedState {
-    fn default() -> Self {
-        Self {
-            layout_id: None,
-            bounds: Bounds::default(),
-            layout_constraints: None,
-            display_items: 0..0,
-            content_mask: ContentMask::default(),
-            render_hash: 0,
-            rendered_element: None,
-            entity_dependencies: SmallVec::new(),
-        }
-    }
-}
+// Framework automatically:
+// 1. Finds views that read this entity (via detect_accessed_entities)
+// 2. Marks them NEEDS_RENDER
+// 3. Propagates SUBTREE_DIRTY to ancestors
 ```
 
-### 4.4 RetainedNode
+**No render hash needed.** The entity notification system already provides O(1) invalidation. Hashing entire view structs would reintroduce O(n) work and require `Hash` bounds on all fields.
 
-```rust
-/// A node in the retained element tree.
-pub struct RetainedNode {
-    /// Unique identifier for this node
-    pub id: RetainedNodeId,
-
-    /// Key for reconciliation (user-provided or auto-generated)
-    pub key: ElementKey,
-
-    /// Type ID for same-type checking during reconciliation
-    pub type_id: TypeId,
-
-    /// The actual element (boxed for heterogeneous storage)
-    pub element: Option<AnyElement>,
-
-    /// For view nodes: the view's entity handle
-    pub view_entity: Option<AnyEntityHandle>,
-
-    // === Tree Structure ===
-    pub parent: Option<RetainedNodeId>,
-    pub children: SmallVec<[RetainedNodeId; 4]>,
-    /// Index in parent's children array (for efficient removal)
-    pub index_in_parent: usize,
-
-    // === State ===
-    pub state: RetainedState,
-    pub flags: DirtyFlags,
-}
-```
-
-### 4.5 ElementKey
-
-```rust
-/// Key for identifying elements during reconciliation.
-#[derive(Clone, Eq, PartialEq, Hash, Debug)]
-pub enum ElementKey {
-    /// Auto-generated from position in parent
-    Index(usize),
-    /// User-provided stable key
-    Named(SharedString),
-    /// Derived from data (e.g., database ID)
-    Data(u64),
-}
-
-impl Default for ElementKey {
-    fn default() -> Self {
-        ElementKey::Index(0)
-    }
-}
-```
-
-### 4.6 RetainedTree
-
-```rust
-/// The retained element tree for a window.
-pub struct RetainedTree {
-    /// All nodes in the tree, indexed by ID
-    nodes: SlotMap<RetainedNodeId, RetainedNode>,
-
-    /// Root node of the tree
-    root: Option<RetainedNodeId>,
-
-    /// Fast lookup: element path → node ID
-    path_to_node: FxHashMap<ElementPath, RetainedNodeId>,
-
-    /// Fast lookup: entity ID → nodes that depend on it
-    entity_to_dependents: FxHashMap<EntityId, SmallVec<[RetainedNodeId; 4]>>,
-
-    /// Nodes that need processing this frame
-    dirty_roots: Vec<RetainedNodeId>,
-
-    /// Statistics for debugging/profiling
-    stats: RetainedTreeStats,
-}
-
-#[derive(Default, Debug)]
-pub struct RetainedTreeStats {
-    pub total_nodes: usize,
-    pub nodes_rendered: usize,
-    pub nodes_laid_out: usize,
-    pub nodes_painted: usize,
-    pub nodes_skipped: usize,
-}
-```
-
----
-
-## 5. The Frame Cycle
-
-### 5.1 Overview
+### 5.3 Subtree Dirty Propagation
 
 ```rust
 impl Window {
-    /// Main draw entry point - replaces current immediate-mode draw
-    pub fn draw(&mut self, cx: &mut App) {
-        // Reset per-frame stats
-        self.retained_tree.stats = RetainedTreeStats::default();
-
-        // Phase 1: Process dirty renders
-        // Only visits views marked NEEDS_RENDER
-        self.process_dirty_renders(cx);
-
-        // Phase 2: Incremental layout
-        // Skips entire subtrees without NEEDS_LAYOUT or SUBTREE_DIRTY
-        self.layout_dirty_subtrees(cx);
-
-        // Phase 3: Incremental paint
-        // Skips elements without NEEDS_PAINT, reuses cached display items
-        self.paint_dirty_elements(cx);
-
-        // Phase 4: Composite (unchanged from current)
-        // Uses existing compositor/tile system
-        self.composite(cx);
-
-        // Clear dirty flags for next frame
-        self.retained_tree.clear_processed_flags();
-    }
-}
-```
-
-### 5.2 Phase 1: Process Dirty Renders
-
-```rust
-impl Window {
-    fn process_dirty_renders(&mut self, cx: &mut App) {
-        // Process dirty roots in order (parents before children)
-        // This ensures parent render happens before child reconciliation
-        let dirty_roots = std::mem::take(&mut self.retained_tree.dirty_roots);
-
-        for node_id in dirty_roots {
-            let node = match self.retained_tree.nodes.get(node_id) {
-                Some(n) => n,
-                None => continue, // Node was removed
-            };
-
-            if !node.flags.contains(DirtyFlags::NEEDS_RENDER) {
-                continue; // Already processed or cleaned
-            }
-
-            if node.view_entity.is_some() {
-                self.render_view_node(node_id, cx);
-            }
-        }
-    }
-
-    fn render_view_node(&mut self, node_id: RetainedNodeId, cx: &mut App) {
-        let node = &self.retained_tree.nodes[node_id];
-        let view_entity = node.view_entity.clone().unwrap();
-
-        // Start dependency tracking
-        let tracker = cx.start_dependency_tracking();
-
-        // Compute render hash from view state
-        let new_render_hash = view_entity.render_hash(cx);
-
-        // Check if render is actually needed
-        if new_render_hash == node.state.render_hash
-            && !node.flags.contains(DirtyFlags::NEWLY_CREATED)
-        {
-            // Render hash unchanged, skip render entirely!
-            self.retained_tree.nodes[node_id].flags.remove(DirtyFlags::NEEDS_RENDER);
-            self.retained_tree.stats.nodes_skipped += 1;
-            return;
-        }
-
-        // Actually call render()
-        let new_element = view_entity.render(self, cx);
-
-        // Record dependencies
-        let dependencies = tracker.finish();
-
-        // Reconcile new element with existing children
-        self.reconcile_node_children(node_id, vec![new_element], cx);
-
-        // Update state
-        let node = &mut self.retained_tree.nodes[node_id];
-        node.state.render_hash = new_render_hash;
-        node.state.entity_dependencies = dependencies;
-        node.flags.remove(DirtyFlags::NEEDS_RENDER);
-
-        self.retained_tree.stats.nodes_rendered += 1;
-    }
-}
-```
-
-### 5.3 Phase 2: Incremental Layout
-
-```rust
-impl Window {
-    fn layout_dirty_subtrees(&mut self, cx: &mut App) {
-        if let Some(root_id) = self.retained_tree.root {
-            let available_space = self.viewport_size().into();
-            self.layout_node_if_needed(root_id, available_space, cx);
-        }
-    }
-
-    fn layout_node_if_needed(
-        &mut self,
-        node_id: RetainedNodeId,
-        available_space: Size<AvailableSpace>,
-        cx: &mut App,
-    ) {
-        let node = &self.retained_tree.nodes[node_id];
-
-        // Fast path: entire subtree is clean
-        if !node.flags.intersects(DirtyFlags::NEEDS_LAYOUT | DirtyFlags::SUBTREE_DIRTY) {
-            self.retained_tree.stats.nodes_skipped += 1;
-            return; // Skip entire subtree!
-        }
-
-        // This node or a descendant needs layout
-        if node.flags.contains(DirtyFlags::NEEDS_LAYOUT) {
-            self.compute_node_layout(node_id, available_space, cx);
-            self.retained_tree.stats.nodes_laid_out += 1;
-        }
-
-        // Recurse into children that might need layout
-        let children = node.children.clone();
-        for child_id in children {
-            // Child available space comes from this node's layout
-            let child_space = self.child_available_space(node_id, child_id);
-            self.layout_node_if_needed(child_id, child_space, cx);
-        }
-
-        // Clear layout flags
-        let node = &mut self.retained_tree.nodes[node_id];
-        node.flags.remove(DirtyFlags::NEEDS_LAYOUT | DirtyFlags::SUBTREE_DIRTY);
-    }
-
-    fn compute_node_layout(
-        &mut self,
-        node_id: RetainedNodeId,
-        available_space: Size<AvailableSpace>,
-        cx: &mut App,
-    ) {
-        let node = &mut self.retained_tree.nodes[node_id];
-
-        // Check if we can reuse cached layout
-        if node.state.layout_constraints == Some(available_space) {
-            // Constraints unchanged, layout is still valid
-            return;
-        }
-
-        // Actually compute layout using Taffy
-        // ... (existing layout logic, but for single node)
-
-        node.state.layout_constraints = Some(available_space);
-    }
-}
-```
-
-### 5.4 Phase 3: Incremental Paint
-
-```rust
-impl Window {
-    fn paint_dirty_elements(&mut self, cx: &mut App) {
-        // Prepare display list for incremental updates
-        self.prepare_display_list_for_incremental_paint();
-
-        if let Some(root_id) = self.retained_tree.root {
-            self.paint_node_if_needed(root_id, cx);
-        }
-    }
-
-    fn paint_node_if_needed(&mut self, node_id: RetainedNodeId, cx: &mut App) {
-        let node = &self.retained_tree.nodes[node_id];
-
-        // Fast path: this element and all descendants are clean
-        if !node.flags.intersects(DirtyFlags::NEEDS_PAINT | DirtyFlags::SUBTREE_DIRTY) {
-            // Copy cached display items to output
-            self.display_list.copy_items_from_cache(
-                &self.cached_display_list,
-                node.state.display_items.clone(),
-            );
-            self.retained_tree.stats.nodes_skipped += 1;
-            return;
-        }
-
-        if node.flags.contains(DirtyFlags::NEEDS_PAINT) {
-            // Actually paint this element
-            let items_start = self.display_list.len();
-
-            // Paint element's own content (background, borders, etc.)
-            self.paint_element_content(node_id, cx);
-
-            // Paint children in order
-            let children = node.children.clone();
-            for child_id in children {
-                self.paint_node_if_needed(child_id, cx);
-            }
-
-            // Record painted range for future cache
-            let items_end = self.display_list.len();
-            self.retained_tree.nodes[node_id].state.display_items = items_start..items_end;
-
-            self.retained_tree.stats.nodes_painted += 1;
-        } else {
-            // This node is clean but has dirty descendants
-            // Paint our cached content, then recurse for children
-            self.paint_element_content_from_cache(node_id);
-
-            let children = node.children.clone();
-            for child_id in children {
-                self.paint_node_if_needed(child_id, cx);
-            }
-        }
-
-        // Clear paint flags
-        let node = &mut self.retained_tree.nodes[node_id];
-        node.flags.remove(DirtyFlags::NEEDS_PAINT);
-    }
-}
-```
-
----
-
-## 6. Automatic Reactivity
-
-### 6.1 Why Rust Makes This Easier
-
-Unlike JavaScript, Rust's ownership model provides structural guarantees that enable automatic dependency tracking:
-
-| JavaScript Challenge | Rust Advantage |
-|---------------------|----------------|
-| Objects mutable anywhere | Mutation requires `&mut` |
-| Unknown variable types | Full type info at compile time |
-| Closures capture anything | Explicit capture semantics |
-| Runtime type uncertainty | Proc macros see all types |
-| Need runtime tracking (MobX) | Compile-time analysis possible |
-
-### 6.2 Dependency Sources
-
-A view's render output can depend on exactly three things:
-
-```rust
-fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    // 1. self.* - view's own state (tracked via derive macro)
-    // 2. cx.read_entity() - other entities (tracked at runtime)
-    // 3. window.* - window state (known set, tracked by framework)
-}
-```
-
-This closed set of dependency sources enables comprehensive automatic tracking.
-
-### 6.3 View State Tracking (Compile-Time)
-
-```rust
-/// Derive macro automatically generates render_hash from struct fields
-#[derive(View)]
-pub struct MyView {
-    label: String,           // Included in render_hash
-    count: u32,              // Included in render_hash
-    items: Vec<Item>,        // Included in render_hash
-
-    #[no_render]             // Excluded from render_hash
-    internal_cache: Cache,
-}
-
-// Generated by #[derive(View)]:
-impl MyView {
-    fn render_hash(&self) -> u64 {
-        let mut hasher = FxHasher::default();
-        self.label.hash(&mut hasher);
-        self.count.hash(&mut hasher);
-        self.items.hash(&mut hasher);
-        // internal_cache excluded due to #[no_render]
-        hasher.finish()
-    }
-}
-```
-
-### 6.4 Entity Dependency Tracking (Runtime)
-
-```rust
-impl<'a> Context<'a> {
-    /// Read an entity's state, recording a dependency
-    pub fn read_entity<T: 'static>(&self, handle: &Entity<T>) -> &T {
-        // Record that current view depends on this entity
-        if let Some(tracker) = self.dependency_tracker.as_ref() {
-            tracker.record_read(handle.entity_id());
-        }
-
-        // Return the entity's state
-        handle.read(self.app)
-    }
-}
-
-// When an entity is updated:
-impl<T: 'static> Entity<T> {
-    pub fn update(&self, cx: &mut App, f: impl FnOnce(&mut T, &mut ModelContext<T>)) {
-        // Perform the update
-        f(&mut self.state, &mut model_cx);
-
-        // Mark all dependent views as needing re-render
-        if let Some(dependents) = cx.entity_dependents.get(&self.entity_id()) {
-            for &node_id in dependents {
-                cx.window.retained_tree.mark_needs_render(node_id);
-            }
-        }
-    }
-}
-```
-
-### 6.5 Dirty Flag Propagation
-
-```rust
-impl RetainedTree {
-    /// Mark a node as needing re-render
-    pub fn mark_needs_render(&mut self, node_id: RetainedNodeId) {
-        let node = &mut self.nodes[node_id];
-
-        if node.flags.contains(DirtyFlags::NEEDS_RENDER) {
-            return; // Already dirty
-        }
-
-        node.flags |= DirtyFlags::NEEDS_RENDER
-                    | DirtyFlags::NEEDS_LAYOUT
-                    | DirtyFlags::NEEDS_PAINT;
+    fn mark_view_dirty(&mut self, view_id: EntityId) {
+        // Mark this view
+        self.dirty_views.insert(view_id, DirtyFlags::NEEDS_RENDER);
 
         // Propagate SUBTREE_DIRTY up to root
-        self.propagate_subtree_dirty(node.parent);
-
-        // Add to processing queue
-        self.dirty_roots.push(node_id);
-    }
-
-    /// Mark a node as needing re-layout (but not re-render)
-    pub fn mark_needs_layout(&mut self, node_id: RetainedNodeId) {
-        let node = &mut self.nodes[node_id];
-
-        if node.flags.contains(DirtyFlags::NEEDS_LAYOUT) {
-            return;
-        }
-
-        node.flags |= DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT;
-        self.propagate_subtree_dirty(node.parent);
-    }
-
-    /// Mark a node as needing repaint only
-    pub fn mark_needs_paint(&mut self, node_id: RetainedNodeId) {
-        let node = &mut self.nodes[node_id];
-
-        if node.flags.contains(DirtyFlags::NEEDS_PAINT) {
-            return;
-        }
-
-        node.flags |= DirtyFlags::NEEDS_PAINT;
-        self.propagate_subtree_dirty(node.parent);
-    }
-
-    fn propagate_subtree_dirty(&mut self, node_id: Option<RetainedNodeId>) {
-        let mut current = node_id;
-        while let Some(id) = current {
-            let node = &mut self.nodes[id];
-            if node.flags.contains(DirtyFlags::SUBTREE_DIRTY) {
-                break; // Already marked, ancestors must be too
+        // This enables O(1) skip of clean subtrees
+        let mut current = self.view_parent(view_id);
+        while let Some(parent_id) = current {
+            let flags = self.dirty_views.entry(parent_id).or_default();
+            if flags.contains(DirtyFlags::SUBTREE_DIRTY) {
+                break;  // Already propagated
             }
-            node.flags |= DirtyFlags::SUBTREE_DIRTY;
-            current = node.parent;
+            *flags |= DirtyFlags::SUBTREE_DIRTY;
+            current = self.view_parent(parent_id);
         }
+    }
+}
+```
+
+### 5.4 Frame Cycle with Dirty Checking
+
+```rust
+impl Window {
+    pub fn draw(&mut self, cx: &mut App) {
+        // Phase 1: Render dirty views only
+        // Clean views skip render() entirely
+        self.render_dirty_views(cx);
+
+        // Phase 2: Layout with node reuse
+        // Clean subtrees reuse cached layout
+        self.layout_incrementally(cx);
+
+        // Phase 3: Paint with artifact reuse
+        // Clean elements copy cached display items
+        self.paint_incrementally(cx);
+
+        // Phase 4: Rasterize dirty tiles only
+        // Clean tiles are not re-rendered
+        self.rasterize_dirty_tiles(cx);
+
+        // Phase 5: Composite (unchanged)
+        self.composite(cx);
+
+        // Clear per-frame dirty flags
+        self.clear_dirty_flags();
     }
 }
 ```
 
 ---
 
-## 7. Reconciliation
+## 6. Incremental Layout
 
-### 7.1 Overview
+### 6.1 Extend Layout Node Reuse
 
-When a view re-renders, we must diff the new element output against the existing retained tree to determine minimal updates.
-
-```rust
-impl Window {
-    fn reconcile_node_children(
-        &mut self,
-        parent_id: RetainedNodeId,
-        new_children: Vec<AnyElement>,
-        cx: &mut App,
-    ) {
-        let parent = &self.retained_tree.nodes[parent_id];
-        let old_children = parent.children.clone();
-
-        // Build map of old children by key
-        let mut old_by_key: FxHashMap<ElementKey, RetainedNodeId> = old_children
-            .iter()
-            .map(|&id| {
-                let node = &self.retained_tree.nodes[id];
-                (node.key.clone(), id)
-            })
-            .collect();
-
-        let mut new_child_ids = SmallVec::new();
-
-        for (index, new_element) in new_children.into_iter().enumerate() {
-            let key = new_element.key().unwrap_or(ElementKey::Index(index));
-
-            if let Some(existing_id) = old_by_key.remove(&key) {
-                // Found matching child by key - reconcile in place
-                self.reconcile_existing_node(existing_id, new_element, cx);
-                new_child_ids.push(existing_id);
-            } else {
-                // No match - create new retained node
-                let new_id = self.create_retained_node(new_element, Some(parent_id), index);
-                new_child_ids.push(new_id);
-            }
-        }
-
-        // Remove old children that weren't matched
-        for (_, orphan_id) in old_by_key {
-            self.remove_retained_subtree(orphan_id);
-        }
-
-        // Update parent's children list
-        let parent = &mut self.retained_tree.nodes[parent_id];
-        parent.children = new_child_ids;
-    }
-}
-```
-
-### 7.2 Same-Type Reconciliation
+Currently, layout nodes are reused only for elements with explicit `GlobalElementId`. Extend this to all elements using `ComputedElementId`:
 
 ```rust
-impl Window {
-    fn reconcile_existing_node(
-        &mut self,
-        node_id: RetainedNodeId,
-        new_element: AnyElement,
-        cx: &mut App,
-    ) {
-        let node = &self.retained_tree.nodes[node_id];
+// Current (src/taffy.rs:49):
+element_to_node: FxHashMap<GlobalElementId, NodeId>
 
-        // Check if types match
-        if node.type_id != new_element.type_id() {
-            // Type changed - replace entirely
-            self.replace_retained_node(node_id, new_element, cx);
-            return;
-        }
-
-        // Same type - check what changed
-        let diff = self.diff_element_props(node_id, &new_element);
-
-        match diff {
-            ElementDiff::Unchanged => {
-                // Nothing changed, keep everything as-is
-            }
-            ElementDiff::PropsChanged { affects_layout } => {
-                if affects_layout {
-                    self.retained_tree.mark_needs_layout(node_id);
-                } else {
-                    self.retained_tree.mark_needs_paint(node_id);
-                }
-                // Update stored element
-                self.retained_tree.nodes[node_id].element = Some(new_element);
-            }
-            ElementDiff::ChildrenChanged { new_children } => {
-                // Recursively reconcile children
-                self.reconcile_node_children(node_id, new_children, cx);
-            }
-        }
-    }
-}
-
-enum ElementDiff {
-    Unchanged,
-    PropsChanged { affects_layout: bool },
-    ChildrenChanged { new_children: Vec<AnyElement> },
-}
+// Extended:
+element_to_node: FxHashMap<ComputedElementId, NodeId>
 ```
 
-### 7.3 Keying Strategy
+This gives every element stable layout node identity, not just `.id()` elements.
 
-```rust
-// Recommended: Use stable data IDs
-div().children(items.iter().map(|item| {
-    div()
-        .key(ElementKey::Data(item.id))  // Stable across reorders
-        .child(item.name.clone())
-}))
-
-// Fallback: Position-based keys (default)
-div().children(items.iter().map(|item| {
-    div().child(item.name.clone())  // Key = Index(0), Index(1), ...
-}))
-
-// Anti-pattern: Random keys (defeats reconciliation)
-div().children(items.iter().map(|item| {
-    div()
-        .key(ElementKey::Data(rand::random()))  // DON'T DO THIS
-        .child(item.name.clone())
-}))
-```
-
----
-
-## 8. Incremental Layout
-
-### 8.1 Layout Caching Strategy
+### 6.2 Layout Cache Validity
 
 ```rust
 struct LayoutCache {
-    /// Last constraints used for layout
+    node_id: NodeId,
     constraints: Size<AvailableSpace>,
-    /// Computed size from last layout
-    size: Size<Pixels>,
-    /// Whether layout is still valid
-    valid: bool,
+    result: Size<Pixels>,
 }
 
-impl RetainedNode {
-    fn needs_relayout(&self, new_constraints: Size<AvailableSpace>) -> bool {
-        // Needs layout if:
-        // 1. Explicitly marked dirty
-        if self.flags.contains(DirtyFlags::NEEDS_LAYOUT) {
-            return true;
-        }
-
-        // 2. Constraints changed
-        if self.state.layout_constraints != Some(new_constraints) {
-            return true;
-        }
-
-        false
-    }
-}
-```
-
-### 8.2 Integration with Taffy
-
-```rust
 impl Window {
-    fn compute_node_layout(
-        &mut self,
-        node_id: RetainedNodeId,
-        constraints: Size<AvailableSpace>,
-        cx: &mut App,
-    ) {
-        let node = &self.retained_tree.nodes[node_id];
+    fn layout_element(&mut self, element_id: ComputedElementId, constraints: Size<AvailableSpace>) -> Size<Pixels> {
+        // Check if cached layout is still valid
+        if let Some(cache) = self.layout_cache.get(&element_id) {
+            if cache.constraints == constraints && !self.is_layout_dirty(element_id) {
+                return cache.result;  // O(1) cache hit
+            }
+        }
 
-        // Get or create Taffy node
-        let layout_id = node.state.layout_id.unwrap_or_else(|| {
-            self.layout_engine.create_node()
+        // Actually compute layout
+        let result = self.compute_layout(element_id, constraints);
+
+        // Cache for next frame
+        self.layout_cache.insert(element_id, LayoutCache {
+            node_id: self.get_or_create_node(element_id),
+            constraints,
+            result,
         });
 
-        // Update Taffy node style if needed
-        if let Some(ref element) = node.element {
-            let style = element.style();
-            self.layout_engine.set_style(layout_id, style);
-        }
-
-        // Set children in Taffy
-        let child_layout_ids: Vec<_> = node.children
-            .iter()
-            .filter_map(|&child_id| {
-                self.retained_tree.nodes[child_id].state.layout_id
-            })
-            .collect();
-        self.layout_engine.set_children(layout_id, &child_layout_ids);
-
-        // Compute layout
-        self.layout_engine.compute_layout(layout_id, constraints);
-
-        // Store results
-        let node = &mut self.retained_tree.nodes[node_id];
-        node.state.layout_id = Some(layout_id);
-        node.state.bounds = self.layout_engine.get_bounds(layout_id);
-        node.state.layout_constraints = Some(constraints);
+        result
     }
 }
+```
+
+### 6.3 Let Taffy Handle Incremental Layout
+
+Don't hand-roll incremental layout walking. Taffy already supports this:
+
+```rust
+// Taffy's compute_layout is already incremental if:
+// 1. Node identity is stable (same NodeId across frames)
+// 2. Style hasn't changed
+// 3. Children haven't changed
+
+// Our job is just to ensure stable identity via ComputedElementId
 ```
 
 ---
 
-## 9. Incremental Paint
+## 7. Incremental Paint
 
-### 9.1 Display List Management
+### 7.1 Extend AnyView::cached to be Default
+
+Currently `AnyView::cached(style)` is opt-in. Make it the default by storing the view's last root style in `AnyViewState`:
 
 ```rust
-pub struct IncrementalDisplayList {
-    /// Current frame's display items
-    items: Vec<DisplayItem>,
-
-    /// Previous frame's items (for cache lookup)
-    previous_items: Vec<DisplayItem>,
-
-    /// Map from node ID to item range in previous_items
-    node_to_cached_range: FxHashMap<RetainedNodeId, Range<usize>>,
+// Current (src/view.rs):
+pub struct AnyViewState {
+    root_style: Option<Style>,  // Only set if cached() was called
+    // ...
 }
 
-impl IncrementalDisplayList {
-    /// Copy cached items for a clean node
-    pub fn copy_cached_items(&mut self, node_id: RetainedNodeId) {
-        if let Some(range) = self.node_to_cached_range.get(&node_id) {
-            let items = self.previous_items[range.clone()].to_vec();
-            self.items.extend(items);
-        }
-    }
-
-    /// Begin painting a node, returns start index
-    pub fn begin_node(&mut self, node_id: RetainedNodeId) -> usize {
-        self.items.len()
-    }
-
-    /// End painting a node, records range for future caching
-    pub fn end_node(&mut self, node_id: RetainedNodeId, start: usize) {
-        let end = self.items.len();
-        self.node_to_cached_range.insert(node_id, start..end);
-    }
-
-    /// Swap current to previous for next frame
-    pub fn end_frame(&mut self) {
-        std::mem::swap(&mut self.items, &mut self.previous_items);
-        self.items.clear();
-    }
+// Extended:
+pub struct AnyViewState {
+    root_style: Style,           // Always stored
+    cached_prepaint: Option<PrepaintState>,
+    cached_paint_range: Option<Range<usize>>,
+    // ...
 }
 ```
 
-### 9.2 Paint Ordering
+This allows caching to be automatic without requiring `AnyView::cached(style)`.
 
-The retained tree maintains paint order through child ordering. Reconciliation preserves order where possible and handles reordering via keys.
+### 7.2 Offset-Tolerant Reuse
+
+Currently cached views require exact origin match. Allow reuse when size matches but origin differs:
 
 ```rust
 impl Window {
-    fn paint_node(&mut self, node_id: RetainedNodeId, cx: &mut App) {
-        let start = self.display_list.begin_node(node_id);
+    fn can_reuse_cached_paint(&self, view_id: EntityId, new_bounds: Bounds<Pixels>) -> bool {
+        let cache = self.view_paint_cache.get(&view_id)?;
 
-        let node = &self.retained_tree.nodes[node_id];
-
-        // 1. Paint node's own background/borders
-        if let Some(ref element) = node.element {
-            element.paint_background(self, cx);
+        // Size must match exactly
+        if cache.bounds.size != new_bounds.size {
+            return false;
         }
 
-        // 2. Paint children in order (back to front)
-        for &child_id in &node.children {
-            self.paint_node_if_needed(child_id, cx);
+        // Origin can differ - we'll apply offset when copying items
+        true
+    }
+
+    fn copy_cached_paint_with_offset(&mut self, view_id: EntityId, new_origin: Point<Pixels>) {
+        let cache = self.view_paint_cache.get(&view_id).unwrap();
+        let offset = new_origin - cache.bounds.origin;
+
+        // Copy items with offset applied
+        for item in &cache.items {
+            self.display_list.push_item_with_offset(item.clone(), offset);
+        }
+    }
+}
+```
+
+### 7.3 Subtree Paint Skip
+
+Track full subtree item ranges. If a subtree is unchanged and no descendant is invalidated, skip calling child `paint()` entirely:
+
+```rust
+impl Window {
+    fn paint_view(&mut self, view_id: EntityId, cx: &mut Context) {
+        let flags = self.dirty_flags(view_id);
+
+        // Fast path: entire subtree is clean
+        if !flags.intersects(DirtyFlags::NEEDS_PAINT | DirtyFlags::SUBTREE_DIRTY) {
+            // Copy cached paint artifacts, skip paint() call
+            self.copy_cached_subtree_paint(view_id);
+            return;
         }
 
-        // 3. Paint node's foreground (text, etc.)
-        if let Some(ref element) = node.element {
-            element.paint_foreground(self, cx);
+        if flags.contains(DirtyFlags::NEEDS_PAINT) {
+            // Actually paint this view
+            self.paint_view_fresh(view_id, cx);
+        } else {
+            // This view is clean but has dirty descendants
+            // Paint our cached content, recurse for children
+            self.copy_cached_view_paint(view_id);
+            self.paint_dirty_children(view_id, cx);
+        }
+    }
+}
+```
+
+### 7.4 Dirty Region Generation
+
+When paint changes, generate dirty regions from bounds deltas:
+
+```rust
+impl Window {
+    fn record_paint_change(&mut self, element_id: ComputedElementId, old_bounds: Bounds<Pixels>, new_bounds: Bounds<Pixels>) {
+        // Invalidate old location
+        if old_bounds != Bounds::default() {
+            self.display_list.invalidate_region(old_bounds);
         }
 
-        self.display_list.end_node(node_id, start);
+        // Invalidate new location
+        self.display_list.invalidate_region(new_bounds);
     }
 }
 ```
 
 ---
 
-## 10. Integration with Existing Systems
+## 8. Tile & Raster Cache Unification
 
-### 10.1 Compositor Thread Integration
+### 8.1 Unified Raster Cache Abstraction
 
-The retained tree and compositor thread are complementary:
+RTT (render-to-texture) and tiling are both "cached rasterization keyed by element identity + context":
+
+| Cache Type | Key | Value |
+|------------|-----|-------|
+| RTT | `(ElementId, bounds, clip)` | Single texture |
+| Tile | `(LayerId, TileCoord, generation)` | Texture grid |
+
+Unify under a single abstraction:
+
+```rust
+pub struct RasterCache {
+    /// Single-texture cache for small elements (RTT)
+    element_textures: FxHashMap<RasterKey, CachedTexture>,
+
+    /// Tiled texture cache for large scroll containers
+    tile_textures: FxHashMap<TileKey, CachedTexture>,
+}
+
+#[derive(Hash, Eq, PartialEq)]
+pub struct RasterKey {
+    element_id: ComputedElementId,
+    bounds: Bounds<DevicePixels>,
+    clip_hash: u64,
+    generation: u64,
+}
+```
+
+### 8.2 Dirty Region → Tile Invalidation
+
+Wire dirty regions from DisplayList into tile cache:
+
+```rust
+impl MetalRenderer {
+    fn rasterize_display_list_tiles(&mut self, scene: &Scene, scale_factor: f32) {
+        for (container_id, display_list) in &scene.display_lists {
+            // Get dirty regions from display list
+            let dirty_regions = display_list.dirty_regions();
+
+            // Invalidate affected tiles
+            self.tile_cache.invalidate_tiles_for_regions(
+                container_id,
+                &dirty_regions,
+                scale_factor,
+            );
+
+            // Clear dirty regions after processing
+            display_list.clear_dirty_regions();
+
+            // Only rasterize invalidated tiles
+            // ... existing tile rasterization loop
+        }
+    }
+}
+```
+
+### 8.3 Avoid Scene-Index-Based Caches
+
+SubtreeCache currently stores Scene indices (`primitive_start`, `primitive_end`). These are brittle once root rendering is DisplayList-driven.
+
+**Migration**: Key caches by `ComputedElementId` + context, not Scene indices. The Phase 20 `ElementEntry` system already does this correctly.
+
+---
+
+## 9. Implementation Plan
+
+### Phase 1: Make View Caching Default (High Impact, Low Risk)
+
+**Goal**: `AnyView::cached` behavior without explicit opt-in.
+
+**Tasks**:
+- [ ] Store view's last root style in `AnyViewState` automatically
+- [ ] Check cache validity on every view paint
+- [ ] Reuse cached prepaint/paint ranges when valid
+- [ ] Add offset-tolerant reuse (same size, different origin)
+
+**Files**: `src/view.rs`, `src/window.rs`
+
+**Validation**: `cache_bench` shows reduced paint calls for static grid
+
+### Phase 2: Extend Layout Identity (Medium Impact, Low Risk)
+
+**Goal**: All elements get stable layout node identity, not just `.id()` elements.
+
+**Tasks**:
+- [ ] Change `TaffyLayoutEngine.element_to_node` key from `GlobalElementId` to `ComputedElementId`
+- [ ] Ensure `ComputedElementId` is computed before layout
+- [ ] Verify layout cache hits for elements without explicit IDs
+
+**Files**: `src/taffy.rs`, `src/window.rs`
+
+**Validation**: Layout node count stays stable across frames for static UI
+
+### Phase 3: Subtree Paint Skip (High Impact, Medium Risk)
+
+**Goal**: Clean subtrees skip `paint()` call entirely, copy cached artifacts.
+
+**Tasks**:
+- [ ] Track subtree paint ranges in `ElementEntry`
+- [ ] Implement `SUBTREE_DIRTY` flag propagation
+- [ ] Copy cached subtree items when clean
+- [ ] Handle offset application for moved subtrees
+
+**Files**: `src/window.rs`, `src/display_list.rs`
+
+**Validation**: `cache_bench` shows near-zero paint work for static grid
+
+### Phase 4: Dirty Region → Tile Invalidation (Medium Impact, Medium Risk)
+
+**Goal**: Only re-rasterize tiles that intersect dirty regions.
+
+**Tasks**:
+- [ ] Wire `DisplayList::dirty_regions()` into tile rasterization
+- [ ] Implement `TileCache::invalidate_tiles_for_regions()`
+- [ ] Clear dirty regions after tile invalidation
+- [ ] Track per-tile invalidation in stats
+
+**Files**: `src/display_list.rs`, `src/platform/mac/metal_renderer.rs`, `src/platform/mac/tile_cache.rs`
+
+**Validation**: Changing one cell in grid re-rasterizes only affected tiles
+
+### Phase 5: Unify Raster Caches (Low Impact, High Value Long-Term)
+
+**Goal**: Single abstraction for RTT and tile caching.
+
+**Tasks**:
+- [ ] Define `RasterCache` abstraction
+- [ ] Migrate SubtreeCache to use `ComputedElementId` keys
+- [ ] Migrate tile cache to unified interface
+- [ ] Remove Scene-index-based cache keys
+
+**Files**: `src/window.rs`, `src/scene.rs`, `src/platform/mac/tile_cache.rs`
+
+**Validation**: RTT and tiling share code paths, stats unified
+
+### Phase 6: Instrumentation & Validation
+
+**Goal**: Prove the system is truly O(changed).
+
+**Tasks**:
+- [ ] Add counters: views rendered/skipped, layout nodes reused, elements cache-hit
+- [ ] Add counters: tiles re-rasterized, bytes uploaded to GPU
+- [ ] Create benchmark suite: static UI, single-element change, bulk change
+- [ ] Document expected performance characteristics
+
+**Files**: `src/window.rs`, `examples/cache_bench.rs`
+
+**Validation**: Counters show O(changed) behavior in all benchmarks
+
+---
+
+## 10. Performance Expectations
+
+### 10.1 Theoretical Complexity
+
+| Scenario | Current | Retained Artifacts |
+|----------|---------|-------------------|
+| Nothing changed | O(n) | O(1) |
+| One element changed | O(n) | O(1) |
+| k elements changed | O(n) | O(k) |
+| All elements changed | O(n) | O(n) |
+| Scroll (with compositor) | O(visible) | O(new tiles) |
+
+### 10.2 cache_bench Predictions
+
+**Current** (375 grid cells + 30 stats elements):
+- Every frame: O(405) work
+- Debug mode: ~30fps
+
+**Phase 1** (view caching default):
+- Frame where nothing changes: O(30) stats elements + O(1) grid check
+- Speedup: ~10x
+- Debug mode prediction: ~100fps
+
+**Phase 3** (subtree paint skip):
+- Frame where nothing changes: O(1) dirty check
+- Debug mode prediction: 120fps
+
+### 10.3 Memory Overhead
+
+Per cached view:
+- `PrepaintState`: ~100 bytes
+- Paint range: ~16 bytes
+- Layout cache: ~64 bytes
+- **Total**: ~180 bytes per view
+
+For 100 views: ~18 KB additional memory (negligible)
+
+---
+
+## 11. Open Questions
+
+### 11.1 Animation Integration
+
+**Question**: How do animations work with retained artifacts?
+
+**Approach**: Animated elements mark themselves dirty each frame via `cx.notify()`. The animation system already does this. No special handling needed — animations are just frequent invalidations.
+
+### 11.2 Context/Theme Changes
+
+**Question**: How do theme changes invalidate dependent subtrees?
+
+**Approach**: Theme is an entity. Views that read theme during render are automatically tracked as dependents. Theme change → `notify()` → all theme-dependent views marked dirty.
+
+### 11.3 Event Handler Identity
+
+**Question**: Event handler closures change identity every render. Does this cause issues?
+
+**Approach**: Event handlers aren't compared for equality. They're simply replaced when the element is rebuilt. Since elements are ephemeral anyway, this isn't a problem.
+
+### 11.4 Layout Dependencies
+
+**Question**: How to handle layout dependencies where sibling size affects my size?
+
+**Approach**: Taffy handles this internally. When any child changes, parent layout is recomputed, which may affect siblings. The `NEEDS_LAYOUT` flag propagates appropriately.
+
+### 11.5 Memory Management
+
+**Question**: When are cached artifacts garbage collected?
+
+**Approach**:
+- Layout nodes: Removed when element no longer appears in tree
+- Paint cache: LRU eviction based on element activity
+- Tiles: Existing LRU eviction in tile cache
+
+---
+
+## Appendix A: Relationship to Compositor Thread
+
+The retained artifact model and compositor thread are complementary:
 
 ```
 ┌─────────────────────────────┐    ┌─────────────────────────────┐
 │      MAIN THREAD            │    │    COMPOSITOR THREAD        │
 │                             │    │                             │
-│  Retained tree updates      │───▶│  Receives tile updates      │
-│  Only dirty nodes painted   │    │  Composites at 120fps       │
+│  Retained artifacts reduce  │───►│  Receives tile updates      │
+│  work to O(changed)         │    │  Composites at 120fps       │
 │  DisplayList → Tiles        │    │  Handles scroll offset      │
 │                             │    │                             │
 └─────────────────────────────┘    └─────────────────────────────┘
 ```
 
-Retained mode reduces main thread work, compositor thread decouples scroll from main thread. Together they enable:
-- 120fps scroll always (compositor)
-- 120fps content updates for sparse changes (retained mode)
+- **Compositor thread**: Scroll at 120fps regardless of main thread work
+- **Retained artifacts**: Main thread does O(changed) work
 
-### 10.2 Entity System
-
-```rust
-// Current entity update:
-entity.update(cx, |state, cx| {
-    state.value = new_value;
-    cx.notify();  // Manual notification
-});
-
-// With retained mode:
-entity.update(cx, |state, cx| {
-    state.value = new_value;
-    // Automatic: framework marks dependent views dirty
-});
-```
-
-### 10.3 GlobalElementId Mapping
-
-```rust
-impl RetainedTree {
-    /// Map from GlobalElementId (existing) to RetainedNodeId (new)
-    global_id_to_node: FxHashMap<GlobalElementId, RetainedNodeId>,
-
-    /// Get retained node for a global element ID
-    pub fn node_for_global_id(&self, id: &GlobalElementId) -> Option<RetainedNodeId> {
-        self.global_id_to_node.get(id).copied()
-    }
-}
-```
+Together: 120fps everything.
 
 ---
 
-## 11. Developer Experience
-
-### 11.1 Zero-Annotation Usage (Goal)
-
-```rust
-#[derive(View)]
-struct MyView {
-    label: String,
-    count: u32,
-}
-
-impl Render for MyView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Just write normal code - framework handles memoization
-        div()
-            .child(self.label.clone())
-            .child(format!("Count: {}", self.count))
-    }
-}
-
-// Updates automatically trigger minimal re-render:
-entity.update(cx, |view, _| {
-    view.count += 1;
-    // Only this view re-renders, and only the count text repaints
-});
-```
-
-### 11.2 Explicit Keying (When Needed)
-
-```rust
-// For dynamic lists, provide stable keys:
-div().children(items.iter().map(|item| {
-    div()
-        .key(item.id)  // Stable identity for reconciliation
-        .child(item.name.clone())
-}))
-```
-
-### 11.3 Debugging Tools
-
-```rust
-// In debug builds, track why re-renders happen:
-impl Window {
-    pub fn debug_render_reason(&self, node_id: RetainedNodeId) -> RenderReason {
-        // Returns: StateChanged { field: "count" }
-        //      or: EntityChanged { entity: "user_data" }
-        //      or: ParentRerendered
-        //      or: NewlyCreated
-    }
-}
-
-// Stats available for profiling:
-let stats = window.retained_tree_stats();
-println!("Rendered: {}/{} nodes", stats.nodes_rendered, stats.total_nodes);
-println!("Skipped: {} nodes", stats.nodes_skipped);
-```
-
-### 11.4 Escape Hatches
-
-```rust
-// Force re-render (escape hatch)
-cx.force_render();
-
-// Mark specific element as always-dirty (for animations)
-div()
-    .always_repaint()  // Opts out of paint caching
-    .child(animated_content)
-
-// Exclude field from render hash
-#[derive(View)]
-struct MyView {
-    label: String,
-    #[no_render]
-    animation_state: AnimationState,  // Changes don't trigger re-render
-}
-```
-
----
-
-## 12. Migration Strategy
-
-### 12.1 Phase 1: Infrastructure (Non-Breaking)
-
-**Goal**: Add retained tree alongside existing immediate mode.
-
-```rust
-// Window gains retained tree, but doesn't use it yet
-pub struct Window {
-    // ... existing fields ...
-    retained_tree: Option<RetainedTree>,  // New, optional
-}
-```
-
-**Tasks**:
-- [ ] Implement `RetainedTree`, `RetainedNode`, `DirtyFlags`
-- [ ] Add `RetainedNodeId` generation
-- [ ] Implement dirty flag propagation
-- [ ] Add tree traversal utilities
-- [ ] Unit tests for tree operations
-
-### 12.2 Phase 2: Parallel Execution (Validation)
-
-**Goal**: Run both paths, validate they produce identical output.
-
-```rust
-impl Window {
-    fn draw(&mut self, cx: &mut App) {
-        // Run existing immediate mode
-        let immediate_result = self.draw_immediate(cx);
-
-        // Run new retained mode
-        let retained_result = self.draw_retained(cx);
-
-        // Validate (debug builds only)
-        #[cfg(debug_assertions)]
-        self.validate_results(&immediate_result, &retained_result);
-
-        // Use immediate mode result for now
-        immediate_result
-    }
-}
-```
-
-**Tasks**:
-- [ ] Implement retained render path
-- [ ] Implement reconciliation
-- [ ] Add result comparison logic
-- [ ] Fix discrepancies until outputs match
-
-### 12.3 Phase 3: View Memoization (Opt-In)
-
-**Goal**: Views can opt-in to memoization via derive macro.
-
-```rust
-// Opt-in to retained mode benefits
-#[derive(View)]  // New derive macro
-struct MyView { ... }
-
-// Without derive, falls back to always-render (existing behavior)
-struct LegacyView { ... }
-```
-
-**Tasks**:
-- [ ] Implement `#[derive(View)]` proc macro
-- [ ] Generate `render_hash` from struct fields
-- [ ] Add `#[no_render]` attribute support
-- [ ] Documentation and examples
-
-### 12.4 Phase 4: Incremental Layout (Automatic)
-
-**Goal**: Layout automatically skips clean subtrees.
-
-**Tasks**:
-- [ ] Integrate retained tree with Taffy
-- [ ] Implement layout constraint caching
-- [ ] Skip layout for unchanged constraints
-- [ ] Validate layout correctness
-
-### 12.5 Phase 5: Incremental Paint (Automatic)
-
-**Goal**: Paint automatically skips clean elements.
-
-**Tasks**:
-- [ ] Implement `IncrementalDisplayList`
-- [ ] Cache display item ranges per node
-- [ ] Copy cached items for clean nodes
-- [ ] Validate paint correctness
-
-### 12.6 Phase 6: Entity Integration (Automatic)
-
-**Goal**: Entity updates automatically mark dependent views dirty.
-
-**Tasks**:
-- [ ] Implement dependency tracking in `Context`
-- [ ] Record entity reads during render
-- [ ] Mark dependents dirty on entity update
-- [ ] Remove manual `cx.notify()` requirement
-
-### 12.7 Phase 7: Default Enable (Breaking)
-
-**Goal**: Retained mode becomes the default.
-
-**Tasks**:
-- [ ] Enable retained mode by default
-- [ ] Remove immediate mode code paths
-- [ ] Performance benchmarking
-- [ ] Documentation updates
-
----
-
-## 13. Performance Expectations
-
-### 13.1 Theoretical Complexity
-
-| Scenario | Current | Retained |
-|----------|---------|----------|
-| Nothing changed | O(n) | O(1) |
-| One element changed | O(n) | O(1) |
-| k elements changed | O(n) | O(k) |
-| All elements changed | O(n) | O(n) |
-| Scroll (with compositor) | O(visible) | O(new rows) |
-
-### 13.2 cache_bench Predictions
-
-Current (375 grid cells + 30 stats elements):
-- Every frame: O(405) work
-- Debug mode: ~30fps
-
-With retained mode:
-- Frame where only stats change: O(30) work
-- Speedup: ~13x
-- Debug mode prediction: ~100+ fps
-
-With stats in separate view:
-- Frame where nothing changes: O(1) work
-- Debug mode prediction: 120fps easily
-
-### 13.3 Memory Overhead
-
-Per retained node:
-- `RetainedNode` struct: ~200 bytes
-- `RetainedState`: ~100 bytes
-- Tree pointers: ~32 bytes
-- **Total**: ~332 bytes per element
-
-For 1000 elements: ~332 KB additional memory (acceptable)
-
-### 13.4 Benchmarks to Create
-
-```rust
-#[bench]
-fn bench_static_grid_current(b: &mut Bencher) {
-    // Measure current immediate mode with static grid
-}
-
-#[bench]
-fn bench_static_grid_retained(b: &mut Bencher) {
-    // Measure retained mode with static grid (should be ~O(1))
-}
-
-#[bench]
-fn bench_single_update_current(b: &mut Bencher) {
-    // Measure current mode with one element changing
-}
-
-#[bench]
-fn bench_single_update_retained(b: &mut Bencher) {
-    // Measure retained mode with one element changing
-}
-```
-
----
-
-## 14. Open Questions
-
-### 14.1 Context Propagation
-
-**Question**: How do context changes (theme, locale) invalidate dependent subtrees?
-
-**Potential approach**: Track context reads like entity reads, invalidate when context changes.
-
-### 14.2 Layout Dependencies
-
-**Question**: How to handle layout dependencies where sibling size affects my size?
-
-**Potential approach**: Taffy handles this internally; we just need to re-run layout when any child changes.
-
-### 14.3 Animation Integration
-
-**Question**: How do animations work with retained mode?
-
-**Potential approach**: Animated elements mark themselves `always_repaint`, or animations update element state which triggers normal dirty propagation.
-
-### 14.4 Event Handler Identity
-
-**Question**: Event handler closures change identity every render. Does this cause issues?
-
-**Potential approach**: Event handlers are stored by element, not compared for equality. Reconciliation by key handles handler updates.
-
-### 14.5 Memory Management
-
-**Question**: When are retained nodes garbage collected?
-
-**Potential approach**: Nodes removed from tree during reconciliation are immediately dropped. No separate GC needed.
-
-### 14.6 Hot Reloading
-
-**Question**: How does hot reloading interact with retained tree?
-
-**Potential approach**: Hot reload clears retained tree, forces full re-render. Acceptable for development.
-
----
-
-## Appendix A: Comparison with Other Frameworks
-
-| Framework | Architecture | Memoization | Change Detection |
-|-----------|--------------|-------------|------------------|
-| React | Virtual DOM, reconciliation | Manual (useMemo) or Compiler | Props comparison |
-| React Native | Retained native views | Manual or Compiler | Props + bridge messages |
-| Flutter | Retained widget tree | Automatic (const widgets) | Widget identity |
-| SwiftUI | Retained view tree | Automatic (value types) | Equatable conformance |
-| Solid.js | Fine-grained reactivity | Automatic (signals) | Signal subscriptions |
-| **GPUI (current)** | Immediate mode | Paint-level only | None (always rebuild) |
-| **GPUI (proposed)** | Retained mode | Automatic (ownership) | Render hash + entity deps |
-
----
-
-## Appendix B: Glossary
-
-| Term | Definition |
-|------|------------|
-| **Immediate Mode** | UI rebuilt from scratch every frame |
-| **Retained Mode** | UI tree persists across frames |
-| **Reconciliation** | Diffing new elements against existing tree |
-| **Dirty Flags** | Bits indicating what work is needed |
-| **Render Hash** | Hash of inputs affecting render output |
-| **Entity Dependency** | View depends on entity state |
-| **SUBTREE_DIRTY** | Flag enabling O(1) skip of clean subtrees |
+## Appendix B: What We're NOT Doing
+
+| Approach | Why Not |
+|----------|---------|
+| Retain `AnyElement` instances | Arena allocation clears every frame; would require massive rewrite |
+| Render hash from struct fields | O(n) hashing, requires `Hash` bounds, unclear benefit over `notify()` |
+| Generic element reconciliation | No framework-level diffing; elements are ephemeral |
+| Separate retained tree | Duplicates existing infrastructure; artifacts are the right abstraction |
 
 ---
 
 ## Appendix C: References
 
-1. React Fiber Architecture: https://github.com/acdlite/react-fiber-architecture
-2. React Compiler: https://react.dev/learn/react-compiler
+1. Chromium Compositor: https://chromium.googlesource.com/chromium/src/+/master/docs/how_cc_works.md
+2. React Fiber Architecture: https://github.com/acdlite/react-fiber-architecture
 3. Flutter Rendering: https://docs.flutter.dev/resources/architectural-overview#rendering
-4. SwiftUI View Updates: https://developer.apple.com/documentation/swiftui/view
-5. Solid.js Reactivity: https://www.solidjs.com/guides/reactivity
+4. GPUI Phase 20 (per-element caching): `src/display_list.rs`, `src/window.rs`
