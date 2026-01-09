@@ -2196,13 +2196,16 @@ impl MetalRenderer {
         // macOS retina displays typically use 2.0, non-retina use 1.0
         let scale_factor = self.layer.contents_scale() as f32;
 
-        // Process each tile sprite
+        // Collect tiles that need rendering along with their display list data
+        // We clone the data to avoid borrow conflicts with PropertyTrees caching
+        let mut tiles_to_render: Vec<(crate::GlobalElementId, crate::TileCoord, crate::display_list::DisplayList, crate::PropertyTrees)> = Vec::new();
+
         for sprite in tile_sprites {
             let container_id = &sprite.tile_key.container_id;
             let coord = sprite.tile_key.coord;
 
-            // Look up the display list for this container
-            let Some(display_list) = scene.get_display_list(container_id) else {
+            // Look up the display list and property trees for this container
+            let Some((display_list, property_trees)) = scene.get_display_list(container_id) else {
                 continue;
             };
 
@@ -2217,13 +2220,20 @@ impl MetalRenderer {
             );
 
             if needs_render {
-                // Rasterize the display list to this tile
-                let tile_bounds = TileCache::tile_content_bounds(coord, scale_factor);
-                let raster_result = display_list.rasterize_tile(tile_bounds, scale_factor);
-
-                // Render to the tile texture
-                self.rasterize_display_list_tile(container_id, coord, &raster_result);
+                // Clone display list and property trees for rasterization
+                // PropertyTrees needs mutable access for caching world transforms/clips
+                tiles_to_render.push((container_id.clone(), coord, display_list.clone(), property_trees.clone()));
             }
+        }
+
+        // Now rasterize each tile that needs rendering
+        for (container_id, coord, display_list, mut property_trees) in tiles_to_render {
+            // Rasterize the display list to this tile
+            let tile_bounds = TileCache::tile_content_bounds(coord, scale_factor);
+            let raster_result = display_list.rasterize_tile(tile_bounds, scale_factor, &mut property_trees);
+
+            // Render to the tile texture
+            self.rasterize_display_list_tile(&container_id, coord, &raster_result);
         }
     }
 

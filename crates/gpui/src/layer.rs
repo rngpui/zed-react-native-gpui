@@ -20,6 +20,7 @@
 //! - No repaint needed for property-only changes
 
 use crate::display_list::DisplayList;
+use crate::property_trees::PropertyTrees;
 use crate::scene::TransformationMatrix;
 use crate::{Bounds, GlobalElementId, Pixels, Point, Size};
 use collections::FxHashMap;
@@ -88,7 +89,11 @@ pub struct Layer {
     pub clip: Option<Bounds<Pixels>>,
 
     /// Content rendered to this layer (None for root layer).
-    pub display_list: Option<DisplayList>,
+    pub(crate) display_list: Option<DisplayList>,
+
+    /// Property trees for transforms and clips.
+    /// Used by DisplayItems to reference transforms/clips by node ID.
+    pub property_trees: PropertyTrees,
 
     /// Content bounds (union of all DisplayItems).
     pub content_bounds: Bounds<Pixels>,
@@ -126,6 +131,7 @@ impl Layer {
             content_origin: Point::default(),
             clip: None,
             display_list,
+            property_trees: PropertyTrees::new(),
             content_bounds: Bounds::default(),
             content_size: Size::default(),
             viewport_size: Size::default(),
@@ -191,7 +197,8 @@ impl LayerTree {
     ///
     /// This preserves layers and their display lists across frames, but resets
     /// the tree structure (parent/children relationships) which gets rebuilt
-    /// during the paint traversal.
+    /// during the paint traversal. Property trees are also cleared since transforms
+    /// and clips are rebuilt during paint.
     /// Call this at the start of each frame before painting.
     pub fn begin_frame(&mut self) {
         // Reset tree structure for all layers (will be rebuilt during paint)
@@ -204,6 +211,8 @@ impl LayerTree {
                 // Will be set correctly during push_layer
                 None
             };
+            // Clear property trees - transforms/clips are rebuilt during paint
+            layer.property_trees.clear();
         }
 
         // Reset layer stack to just root
@@ -467,7 +476,11 @@ mod tests {
 
         tree.begin_frame();
 
-        assert_eq!(tree.len(), 1);
+        // Layers are preserved for reuse across frames (display lists cached)
+        assert_eq!(tree.len(), 2);
+        // But layer stack is reset to root only
         assert!(!tree.is_inside_layer());
+        // And tree structure (children) is cleared
+        assert!(tree.root_layer().children.is_empty());
     }
 }

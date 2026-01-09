@@ -8,6 +8,7 @@ use crate::{
     AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, GlobalElementId,
     Hsla, Pixels, Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
     display_list::DisplayList,
+    property_trees::PropertyTrees,
 };
 use collections::FxHashMap;
 use std::{
@@ -110,9 +111,10 @@ pub(crate) struct Scene {
     pending_subtree_captures: Vec<SubtreeCapture>,
     /// Completed subtree captures ready for render-to-texture
     pub(crate) completed_subtree_captures: Vec<SubtreeCapture>,
-    /// Display lists for tile rasterization. Keyed by scroll container element ID.
+    /// Display lists with property trees for tile rasterization. Keyed by scroll container element ID.
     /// These are populated during the paint phase and used by the renderer for tile rasterization.
-    pub(crate) display_lists: FxHashMap<GlobalElementId, DisplayList>,
+    /// Each entry contains (DisplayList, PropertyTrees) where PropertyTrees provide transform/clip lookups.
+    pub(crate) display_lists: FxHashMap<GlobalElementId, (DisplayList, PropertyTrees)>,
 }
 
 impl Scene {
@@ -144,14 +146,14 @@ impl Scene {
         self.display_lists.clear();
     }
 
-    /// Get a display list by element ID.
-    pub fn get_display_list(&self, element_id: &GlobalElementId) -> Option<&DisplayList> {
+    /// Get a display list and property trees by element ID.
+    pub fn get_display_list(&self, element_id: &GlobalElementId) -> Option<&(DisplayList, PropertyTrees)> {
         self.display_lists.get(element_id)
     }
 
-    /// Insert a display list for a scroll container.
-    pub fn insert_display_list(&mut self, element_id: GlobalElementId, display_list: DisplayList) {
-        self.display_lists.insert(element_id, display_list);
+    /// Insert a display list with property trees for a scroll container.
+    pub fn insert_display_list(&mut self, element_id: GlobalElementId, display_list: DisplayList, property_trees: PropertyTrees) {
+        self.display_lists.insert(element_id, (display_list, property_trees));
     }
 
     /// Begin capturing primitives for a subtree that may be cached to a texture.

@@ -41,6 +41,8 @@ pub use scene::SceneDirtyStats;
 mod display_list;
 mod layer;
 pub use layer::{LayerId, LayerReason, LayerTree};
+mod property_trees;
+pub use property_trees::{ClipNodeId, PropertyTrees, TransformNodeId};
 mod shared_string;
 mod shared_uri;
 mod style;

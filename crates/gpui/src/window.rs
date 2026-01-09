@@ -20,7 +20,8 @@ use crate::{
     WindowParams, WindowTextSystem, point, prelude::*,
     primitive_cache::{CacheReplay, CachedPaintOperation, PrimitiveCache, PrimitiveCacheStats}, px, rems, scene::Primitive,
     size, transparent_black,
-    display_list::{DisplayList, DisplayListManager, convert_primitive_to_display_item},
+    display_list::convert_primitive_to_display_item,
+    property_trees::{TransformNodeId, ClipNodeId},
 };
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
@@ -959,19 +960,6 @@ fn other_kind(operation: &CachedPaintOperation) -> &'static str {
         CachedPaintOperation::EndLayer => "layer_end",
     }
 }
-
-/// Context for direct-to-DisplayList painting inside scroll containers.
-/// When active, primitives paint directly to DisplayList instead of Scene,
-/// eliminating the Scene→DisplayList conversion overhead.
-struct ScrollContainerContext {
-    /// Content origin in scaled device pixels (for coordinate offset).
-    content_origin: Point<ScaledPixels>,
-    /// Inverse scale factor (1.0 / scale_factor) for converting to Pixels.
-    inv_scale: f32,
-    /// The display list being built.
-    display_list: DisplayList,
-}
-
 /// Holds the state for a specific window.
 pub struct Window {
     pub(crate) handle: AnyWindowHandle,
@@ -1004,11 +992,7 @@ pub struct Window {
     primitive_cache: PrimitiveCache,
     text_shape_cache: crate::text_shape_cache::TextShapeCache,
     measure_cache: crate::measure_cache::MeasureCache,
-    display_list_manager: DisplayListManager,
-    /// Active scroll container context for direct-to-DisplayList painting.
-    /// When Some, insert_primitive_internal writes to DisplayList instead of Scene.
-    current_scroll_container: Option<ScrollContainerContext>,
-    /// True when inside a tiled scroll container's paint_children_tiled.
+    /// True when inside a tiled scroll container's paint.
     /// When true, SubtreeCache is disabled because scene indices would be invalid.
     inside_tiled_scroll_container: bool,
     /// The layer tree for compositing. Manages scroll containers, transforms, and opacity layers.
@@ -1501,8 +1485,6 @@ impl Window {
             primitive_cache: PrimitiveCache::new(DEFAULT_PRIMITIVE_CACHE_ENTRIES),
             text_shape_cache: crate::text_shape_cache::TextShapeCache::new(DEFAULT_TEXT_SHAPE_CACHE_ENTRIES),
             measure_cache: crate::measure_cache::MeasureCache::new(DEFAULT_MEASURE_CACHE_ENTRIES),
-            display_list_manager: DisplayListManager::new(),
-            current_scroll_container: None,
             inside_tiled_scroll_container: false,
             layer_tree: crate::layer::LayerTree::new(),
             last_frame_was_stable: false,
@@ -2966,24 +2948,6 @@ impl Window {
         self.rendered_frame.scene.dirty_stats()
     }
 
-    /// Get or create a display list for the given element.
-    ///
-    /// Display lists are used for browser-like tiled rendering of scroll containers.
-    /// Elements paint to a display list instead of directly to the scene, and the
-    /// display list is then rasterized to tiles on demand.
-    #[allow(dead_code)]
-    pub(crate) fn display_list_for(
-        &mut self,
-        element_id: &GlobalElementId,
-    ) -> &mut crate::display_list::DisplayList {
-        self.display_list_manager.get_or_create(element_id)
-    }
-
-    /// Get the display list manager.
-    pub(crate) fn display_list_manager(&mut self) -> &mut DisplayListManager {
-        &mut self.display_list_manager
-    }
-
     /// Begin capturing primitives for a subtree that may be cached to a texture.
     /// Call this before painting the subtree's content.
     pub(crate) fn begin_subtree_capture(&mut self, id: GlobalElementId, bounds: Bounds<Pixels>) {
@@ -3267,6 +3231,10 @@ impl Window {
         if self.layer_tree.is_inside_layer() {
             let scale_factor = self.scale_factor;
             let inv_scale = 1.0 / scale_factor;
+
+            // Get current content mask (already intersected) for creating clip node
+            let content_mask = self.content_mask();
+
             // content_origin is where content (0,0) appears in window space (bounds.origin + scroll_offset)
             let layer = self.layer_tree.current_layer_mut();
             let content_origin = Point {
@@ -3274,10 +3242,29 @@ impl Window {
                 y: ScaledPixels(layer.content_origin.y.0 * scale_factor),
             };
 
+            // Create a clip node for the current content_mask in the layer's property trees.
+            // For Phase 13, we use ROOT transform node (transform integration comes later).
+            // The clip bounds are converted to content-local coordinates by subtracting content_origin.
+            let clip_bounds_in_content = Bounds {
+                origin: Point {
+                    x: content_mask.bounds.origin.x - layer.content_origin.x,
+                    y: content_mask.bounds.origin.y - layer.content_origin.y,
+                },
+                size: content_mask.bounds.size,
+            };
+            let clip_node = layer.property_trees.push_clip(
+                ClipNodeId::ROOT,
+                clip_bounds_in_content,
+                TransformNodeId::ROOT,
+            );
+            let transform_node = TransformNodeId::ROOT;
+
             if let Some(item) = convert_primitive_to_display_item(
                 &primitive,
                 inv_scale,
                 content_origin,
+                transform_node,
+                clip_node,
             ) {
                 // Non-root layers always have a display list
                 let display_list = layer
@@ -3295,37 +3282,10 @@ impl Window {
                     DisplayItem::SubpixelSprite(s) => display_list.extend_bounds(s.bounds),
                     DisplayItem::PolychromeSprite(s) => display_list.extend_bounds(s.bounds),
                     DisplayItem::Path(p) => display_list.extend_bounds(p.bounds),
-                    DisplayItem::PushClip(_) | DisplayItem::PopClip => {}
                 }
                 display_list.items.push(item);
             }
             // Don't add to Scene when in layer mode
-            return;
-        }
-
-        // Legacy: If we're in direct-to-DisplayList mode via ScrollContainerContext
-        if let Some(ctx) = &mut self.current_scroll_container {
-            if let Some(item) = convert_primitive_to_display_item(
-                &primitive,
-                ctx.inv_scale,
-                ctx.content_origin,
-            ) {
-                // Extend display list bounds based on item type
-                use crate::display_list::DisplayItem;
-                match &item {
-                    DisplayItem::Quad(q) => ctx.display_list.extend_bounds(q.bounds),
-                    DisplayItem::Shadow(s) => ctx.display_list.extend_bounds(s.bounds),
-                    DisplayItem::BackdropBlur(b) => ctx.display_list.extend_bounds(b.bounds),
-                    DisplayItem::Underline(u) => ctx.display_list.extend_bounds(u.bounds),
-                    DisplayItem::MonochromeSprite(s) => ctx.display_list.extend_bounds(s.bounds),
-                    DisplayItem::SubpixelSprite(s) => ctx.display_list.extend_bounds(s.bounds),
-                    DisplayItem::PolychromeSprite(s) => ctx.display_list.extend_bounds(s.bounds),
-                    DisplayItem::Path(p) => ctx.display_list.extend_bounds(p.bounds),
-                    DisplayItem::PushClip(_) | DisplayItem::PopClip => {}
-                }
-                ctx.display_list.items.push(item);
-            }
-            // Don't add to Scene when in direct DisplayList mode
             return;
         }
 
@@ -3493,48 +3453,6 @@ impl Window {
         result
     }
 
-    /// Begin direct-to-DisplayList painting for a scroll container.
-    ///
-    /// When this is active, all primitives painted by children will go directly
-    /// to a DisplayList instead of Scene, eliminating conversion overhead.
-    ///
-    /// Call `end_scroll_container_paint()` to retrieve the built DisplayList.
-    ///
-    /// # Arguments
-    /// * `element_id` - The GlobalElementId of the scroll container
-    /// * `content_origin` - The window-space origin of the scroll content (in Pixels)
-    pub(crate) fn begin_scroll_container_paint(
-        &mut self,
-        element_id: GlobalElementId,
-        content_origin: Point<Pixels>,
-    ) {
-        let scale_factor = self.scale_factor();
-        let content_origin_scaled = Point {
-            x: ScaledPixels(content_origin.x.0 * scale_factor),
-            y: ScaledPixels(content_origin.y.0 * scale_factor),
-        };
-
-        self.current_scroll_container = Some(ScrollContainerContext {
-            content_origin: content_origin_scaled,
-            inv_scale: 1.0 / scale_factor,
-            display_list: DisplayList::new(element_id),
-        });
-    }
-
-    /// End direct-to-DisplayList painting and return the built DisplayList.
-    ///
-    /// Returns the DisplayList containing all primitives painted since
-    /// `begin_scroll_container_paint()` was called.
-    ///
-    /// # Panics
-    /// Panics if `begin_scroll_container_paint()` was not called.
-    pub(crate) fn end_scroll_container_paint(&mut self) -> DisplayList {
-        self.current_scroll_container
-            .take()
-            .expect("end_scroll_container_paint called without begin_scroll_container_paint")
-            .display_list
-    }
-
     /// Enter tiled scroll container mode. While in this mode, SubtreeCache is disabled
     /// because scene indices would be invalid (primitives go to DisplayList, not Scene).
     pub(crate) fn enter_tiled_scroll_container(&mut self) {
@@ -3573,13 +3491,6 @@ impl Window {
         self.layer_tree.pop_layer()
     }
 
-    /// Check if we're inside any non-root layer.
-    ///
-    /// When true, primitives should be routed to the layer's DisplayList.
-    pub(crate) fn is_inside_layer(&self) -> bool {
-        self.layer_tree.is_inside_layer()
-    }
-
     /// Get a reference to the layer tree.
     pub(crate) fn layer_tree(&self) -> &crate::layer::LayerTree {
         &self.layer_tree
@@ -3588,18 +3499,6 @@ impl Window {
     /// Get a mutable reference to the layer tree.
     pub(crate) fn layer_tree_mut(&mut self) -> &mut crate::layer::LayerTree {
         &mut self.layer_tree
-    }
-
-    /// Get a mutable reference to the current layer's DisplayList.
-    ///
-    /// This is used for direct-to-DisplayList painting in layers.
-    /// Panics if called on the root layer (which doesn't have a display list).
-    pub(crate) fn current_layer_display_list(&mut self) -> &mut DisplayList {
-        self.layer_tree
-            .current_layer_mut()
-            .display_list
-            .as_mut()
-            .expect("Only non-root layers have display lists")
     }
 
     /// Perform prepaint on child elements in a "retryable" manner, so that any side effects
