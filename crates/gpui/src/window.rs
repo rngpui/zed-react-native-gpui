@@ -20,7 +20,7 @@ use crate::{
     WindowParams, WindowTextSystem, point, prelude::*,
     primitive_cache::{CacheReplay, CachedPaintOperation, PrimitiveCache, PrimitiveCacheStats}, px, rems, scene::Primitive,
     size, transparent_black,
-    display_list::DisplayListManager,
+    display_list::{DisplayList, DisplayListManager, convert_primitive_to_display_item},
 };
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
@@ -960,6 +960,18 @@ fn other_kind(operation: &CachedPaintOperation) -> &'static str {
     }
 }
 
+/// Context for direct-to-DisplayList painting inside scroll containers.
+/// When active, primitives paint directly to DisplayList instead of Scene,
+/// eliminating the Scene→DisplayList conversion overhead.
+struct ScrollContainerContext {
+    /// Content origin in scaled device pixels (for coordinate offset).
+    content_origin: Point<ScaledPixels>,
+    /// Inverse scale factor (1.0 / scale_factor) for converting to Pixels.
+    inv_scale: f32,
+    /// The display list being built.
+    display_list: DisplayList,
+}
+
 /// Holds the state for a specific window.
 pub struct Window {
     pub(crate) handle: AnyWindowHandle,
@@ -993,6 +1005,12 @@ pub struct Window {
     text_shape_cache: crate::text_shape_cache::TextShapeCache,
     measure_cache: crate::measure_cache::MeasureCache,
     display_list_manager: DisplayListManager,
+    /// Active scroll container context for direct-to-DisplayList painting.
+    /// When Some, insert_primitive_internal writes to DisplayList instead of Scene.
+    current_scroll_container: Option<ScrollContainerContext>,
+    /// True when inside a tiled scroll container's paint_children_tiled.
+    /// When true, SubtreeCache is disabled because scene indices would be invalid.
+    inside_tiled_scroll_container: bool,
     /// True if the last frame was completely stable (all cache hits at same positions).
     /// When true, we can potentially skip drawing if nothing has changed.
     last_frame_was_stable: bool,
@@ -1482,6 +1500,8 @@ impl Window {
             text_shape_cache: crate::text_shape_cache::TextShapeCache::new(DEFAULT_TEXT_SHAPE_CACHE_ENTRIES),
             measure_cache: crate::measure_cache::MeasureCache::new(DEFAULT_MEASURE_CACHE_ENTRIES),
             display_list_manager: DisplayListManager::new(),
+            current_scroll_container: None,
+            inside_tiled_scroll_container: false,
             last_frame_was_stable: false,
             paint_scopes: Vec::new(),
             next_frame_callbacks,
@@ -2961,40 +2981,6 @@ impl Window {
         &mut self.display_list_manager
     }
 
-    /// Populate a display list from painted primitives in the given range.
-    ///
-    /// This converts Scene primitives to DisplayList format for browser-like
-    /// tiled rendering. The display list stores resolution-independent
-    /// representations that can be rasterized to tiles at any scale factor.
-    ///
-    /// Returns the number of items in the display list.
-    ///
-    /// `content_origin` is the window-space origin of the scroll container.
-    /// All display list item bounds will be offset by this amount to convert
-    /// from window coordinates to content coordinates.
-    pub(crate) fn populate_display_list_from_paint_range(
-        &mut self,
-        element_id: &GlobalElementId,
-        primitive_range: std::ops::Range<usize>,
-        content_origin: Point<Pixels>,
-    ) -> usize {
-        let scale_factor = self.scale_factor();
-
-        // Get or create the display list
-        let display_list = self.display_list_manager.get_or_create(element_id);
-
-        // Populate from scene primitives, offsetting to content coordinates
-        crate::display_list::populate_display_list_from_scene(
-            display_list,
-            &self.next_frame.scene,
-            primitive_range,
-            scale_factor,
-            content_origin,
-        );
-
-        display_list.items.len()
-    }
-
     /// Begin capturing primitives for a subtree that may be cached to a texture.
     /// Call this before painting the subtree's content.
     pub(crate) fn begin_subtree_capture(&mut self, id: GlobalElementId, bounds: Bounds<Pixels>) {
@@ -3274,6 +3260,32 @@ impl Window {
             }
         }
 
+        // If we're in direct-to-DisplayList mode, convert and add to DisplayList
+        if let Some(ctx) = &mut self.current_scroll_container {
+            if let Some(item) = convert_primitive_to_display_item(
+                &primitive,
+                ctx.inv_scale,
+                ctx.content_origin,
+            ) {
+                // Extend display list bounds based on item type
+                use crate::display_list::DisplayItem;
+                match &item {
+                    DisplayItem::Quad(q) => ctx.display_list.extend_bounds(q.bounds),
+                    DisplayItem::Shadow(s) => ctx.display_list.extend_bounds(s.bounds),
+                    DisplayItem::BackdropBlur(b) => ctx.display_list.extend_bounds(b.bounds),
+                    DisplayItem::Underline(u) => ctx.display_list.extend_bounds(u.bounds),
+                    DisplayItem::MonochromeSprite(s) => ctx.display_list.extend_bounds(s.bounds),
+                    DisplayItem::SubpixelSprite(s) => ctx.display_list.extend_bounds(s.bounds),
+                    DisplayItem::PolychromeSprite(s) => ctx.display_list.extend_bounds(s.bounds),
+                    DisplayItem::Path(p) => ctx.display_list.extend_bounds(p.bounds),
+                    DisplayItem::PushClip(_) | DisplayItem::PopClip => {}
+                }
+                ctx.display_list.items.push(item);
+            }
+            // Don't add to Scene when in direct DisplayList mode
+            return;
+        }
+
         self.next_frame.scene.insert_primitive(primitive);
     }
 
@@ -3436,6 +3448,65 @@ impl Window {
         let result = f(self);
         self.element_opacity = previous_opacity;
         result
+    }
+
+    /// Begin direct-to-DisplayList painting for a scroll container.
+    ///
+    /// When this is active, all primitives painted by children will go directly
+    /// to a DisplayList instead of Scene, eliminating conversion overhead.
+    ///
+    /// Call `end_scroll_container_paint()` to retrieve the built DisplayList.
+    ///
+    /// # Arguments
+    /// * `element_id` - The GlobalElementId of the scroll container
+    /// * `content_origin` - The window-space origin of the scroll content (in Pixels)
+    pub(crate) fn begin_scroll_container_paint(
+        &mut self,
+        element_id: GlobalElementId,
+        content_origin: Point<Pixels>,
+    ) {
+        let scale_factor = self.scale_factor();
+        let content_origin_scaled = Point {
+            x: ScaledPixels(content_origin.x.0 * scale_factor),
+            y: ScaledPixels(content_origin.y.0 * scale_factor),
+        };
+
+        self.current_scroll_container = Some(ScrollContainerContext {
+            content_origin: content_origin_scaled,
+            inv_scale: 1.0 / scale_factor,
+            display_list: DisplayList::new(element_id),
+        });
+    }
+
+    /// End direct-to-DisplayList painting and return the built DisplayList.
+    ///
+    /// Returns the DisplayList containing all primitives painted since
+    /// `begin_scroll_container_paint()` was called.
+    ///
+    /// # Panics
+    /// Panics if `begin_scroll_container_paint()` was not called.
+    pub(crate) fn end_scroll_container_paint(&mut self) -> DisplayList {
+        self.current_scroll_container
+            .take()
+            .expect("end_scroll_container_paint called without begin_scroll_container_paint")
+            .display_list
+    }
+
+    /// Enter tiled scroll container mode. While in this mode, SubtreeCache is disabled
+    /// because scene indices would be invalid (primitives go to DisplayList, not Scene).
+    pub(crate) fn enter_tiled_scroll_container(&mut self) {
+        self.inside_tiled_scroll_container = true;
+    }
+
+    /// Exit tiled scroll container mode.
+    pub(crate) fn exit_tiled_scroll_container(&mut self) {
+        self.inside_tiled_scroll_container = false;
+    }
+
+    /// Check if we're inside a tiled scroll container.
+    /// When true, SubtreeCache should be disabled.
+    pub(crate) fn is_inside_tiled_scroll_container(&self) -> bool {
+        self.inside_tiled_scroll_container
     }
 
     /// Perform prepaint on child elements in a "retryable" manner, so that any side effects

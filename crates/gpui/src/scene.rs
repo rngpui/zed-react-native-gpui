@@ -235,12 +235,6 @@ impl Scene {
         self.paint_operations.len()
     }
 
-    /// Get a slice of paint operations for the given range.
-    /// Used by display list conversion to read captured primitives.
-    pub fn paint_operations_slice(&self, range: std::ops::Range<usize>) -> &[PaintOperation] {
-        &self.paint_operations[range]
-    }
-
     /// Truncate paint operations to the given length.
     /// Used to remove primitives that have been converted to a display list for tiled rendering.
     /// Note: This only removes from paint_operations; the typed arrays (quads, shadows, etc.)

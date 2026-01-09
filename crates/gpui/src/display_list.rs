@@ -286,64 +286,6 @@ impl DisplayList {
         self.generation += 1;
     }
 
-    /// Record a quad to the display list.
-    pub fn push_quad(&mut self, quad: DisplayQuad) {
-        self.extend_bounds(quad.bounds);
-        self.items.push(DisplayItem::Quad(quad));
-    }
-
-    /// Record a shadow to the display list.
-    pub fn push_shadow(&mut self, shadow: DisplayShadow) {
-        self.extend_bounds(shadow.bounds);
-        self.items.push(DisplayItem::Shadow(shadow));
-    }
-
-    /// Record a backdrop blur to the display list.
-    pub fn push_backdrop_blur(&mut self, blur: DisplayBackdropBlur) {
-        self.extend_bounds(blur.bounds);
-        self.items.push(DisplayItem::BackdropBlur(blur));
-    }
-
-    /// Record an underline to the display list.
-    pub fn push_underline(&mut self, underline: DisplayUnderline) {
-        self.extend_bounds(underline.bounds);
-        self.items.push(DisplayItem::Underline(underline));
-    }
-
-    /// Record a monochrome sprite to the display list.
-    pub fn push_monochrome_sprite(&mut self, sprite: DisplayMonochromeSprite) {
-        self.extend_bounds(sprite.bounds);
-        self.items.push(DisplayItem::MonochromeSprite(sprite));
-    }
-
-    /// Record a subpixel sprite to the display list.
-    pub fn push_subpixel_sprite(&mut self, sprite: DisplaySubpixelSprite) {
-        self.extend_bounds(sprite.bounds);
-        self.items.push(DisplayItem::SubpixelSprite(sprite));
-    }
-
-    /// Record a polychrome sprite to the display list.
-    pub fn push_polychrome_sprite(&mut self, sprite: DisplayPolychromeSprite) {
-        self.extend_bounds(sprite.bounds);
-        self.items.push(DisplayItem::PolychromeSprite(sprite));
-    }
-
-    /// Record a path to the display list.
-    pub fn push_path(&mut self, path: DisplayPath) {
-        self.extend_bounds(path.bounds);
-        self.items.push(DisplayItem::Path(path));
-    }
-
-    /// Push a clipping region.
-    pub fn push_clip(&mut self, mask: ContentMask<Pixels>) {
-        self.items.push(DisplayItem::PushClip(mask));
-    }
-
-    /// Pop a clipping region.
-    pub fn pop_clip(&mut self) {
-        self.items.push(DisplayItem::PopClip);
-    }
-
     /// Iterate over items that intersect the given bounds.
     /// Used during tile rasterization to only process relevant items.
     pub fn items_intersecting(&self, bounds: Bounds<Pixels>) -> impl Iterator<Item = &DisplayItem> {
@@ -351,7 +293,7 @@ impl DisplayList {
     }
 
     /// Extend content_bounds to include the given bounds.
-    fn extend_bounds(&mut self, bounds: Bounds<Pixels>) {
+    pub fn extend_bounds(&mut self, bounds: Bounds<Pixels>) {
         if self.content_bounds.size.width.0 == 0.0 && self.content_bounds.size.height.0 == 0.0 {
             self.content_bounds = bounds;
         } else {
@@ -693,6 +635,11 @@ impl DisplayListManager {
         self.lists.contains_key(element_id)
     }
 
+    /// Insert a display list for the given element.
+    pub fn insert(&mut self, element_id: GlobalElementId, display_list: DisplayList) {
+        self.lists.insert(element_id, display_list);
+    }
+
     /// Remove a display list.
     pub fn remove(&mut self, element_id: &GlobalElementId) -> Option<DisplayList> {
         self.lists.remove(element_id)
@@ -714,75 +661,12 @@ impl DisplayListManager {
     }
 }
 
-/// Converts Scene primitives to DisplayList format.
-/// This enables the "capture once, rasterize many" architecture.
-///
-/// `content_origin` is the window-space origin of the scroll container.
-/// All display list item bounds are offset by this amount to convert from
-/// window coordinates to content coordinates. This is essential for tile
-/// intersection tests: tiles use content coordinates (0,0 is top-left of content),
-/// so display list items must also be in content coordinates.
-pub fn populate_display_list_from_scene(
-    display_list: &mut DisplayList,
-    scene: &crate::Scene,
-    primitive_range: std::ops::Range<usize>,
-    scale_factor: f32,
-    content_origin: Point<Pixels>,
-) {
-    use crate::scene::PaintOperation;
-
-    // Clear and increment generation
-    display_list.clear();
-
-    // Inverse scale factor to convert ScaledPixels back to Pixels
-    let inv_scale = 1.0 / scale_factor;
-
-    // Scale the content origin to device pixels for offsetting
-    let content_origin_scaled = point(
-        crate::ScaledPixels(content_origin.x.0 * scale_factor),
-        crate::ScaledPixels(content_origin.y.0 * scale_factor),
-    );
-
-    for op in scene.paint_operations_slice(primitive_range.clone()) {
-        match op {
-            PaintOperation::Primitive(primitive) => {
-                if let Some(item) = convert_primitive_to_display_item(primitive, inv_scale, content_origin_scaled) {
-                    match &item {
-                        DisplayItem::Quad(q) => display_list.extend_bounds(q.bounds),
-                        DisplayItem::Shadow(s) => display_list.extend_bounds(s.bounds),
-                        DisplayItem::BackdropBlur(b) => display_list.extend_bounds(b.bounds),
-                        DisplayItem::Underline(u) => display_list.extend_bounds(u.bounds),
-                        DisplayItem::MonochromeSprite(s) => display_list.extend_bounds(s.bounds),
-                        DisplayItem::SubpixelSprite(s) => display_list.extend_bounds(s.bounds),
-                        DisplayItem::PolychromeSprite(s) => display_list.extend_bounds(s.bounds),
-                        DisplayItem::Path(p) => display_list.extend_bounds(p.bounds),
-                        DisplayItem::PushClip(_) | DisplayItem::PopClip => {}
-                    }
-                    display_list.items.push(item);
-                }
-            }
-            PaintOperation::StartLayer(bounds) => {
-                // Convert layer bounds to Pixels and push as clip
-                // Also offset to content coordinates
-                let mut pixel_bounds = scale_bounds_to_pixels(bounds, inv_scale);
-                pixel_bounds.origin.x.0 -= content_origin.x.0;
-                pixel_bounds.origin.y.0 -= content_origin.y.0;
-                display_list.items.push(DisplayItem::PushClip(ContentMask {
-                    bounds: pixel_bounds,
-                }));
-            }
-            PaintOperation::EndLayer => {
-                display_list.items.push(DisplayItem::PopClip);
-            }
-        }
-    }
-}
-
 /// Convert a Scene Primitive to a DisplayItem.
 ///
 /// `content_origin` is the window-space origin of the scroll container in ScaledPixels.
 /// This is subtracted from all bounds to convert from window coordinates to content coordinates.
-fn convert_primitive_to_display_item(
+/// `inv_scale` is 1.0 / scale_factor to convert from ScaledPixels to Pixels.
+pub fn convert_primitive_to_display_item(
     primitive: &crate::scene::Primitive,
     inv_scale: f32,
     content_origin: Point<crate::ScaledPixels>,

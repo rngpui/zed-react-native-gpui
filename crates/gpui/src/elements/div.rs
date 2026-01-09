@@ -1458,6 +1458,13 @@ impl Div {
             scroll_handle.scroll_to_active_item();
         }
 
+        // Check if this will be a tiled scroll container BEFORE children's prepaint.
+        // We need to set the flag so children know not to use SubtreeCache (which stores
+        // scene indices, but tiled scroll containers write to DisplayList instead).
+        let will_tile = self
+            .interactivity
+            .will_use_tiled_rendering(bounds, content_size);
+
         self.interactivity.prepaint(
             global_id,
             inspector_id,
@@ -1471,6 +1478,11 @@ impl Div {
                     return hitbox;
                 }
 
+                // Set flag before children's prepaint so they don't use SubtreeCache
+                if will_tile {
+                    window.enter_tiled_scroll_container();
+                }
+
                 window.with_image_cache(image_cache, |window| {
                     window.with_element_offset(scroll_offset, |window| {
                         for child in &mut self.children {
@@ -1482,6 +1494,11 @@ impl Div {
                         listener(children_bounds, window, cx);
                     }
                 });
+
+                // Clear flag after children's prepaint
+                if will_tile {
+                    window.exit_tiled_scroll_container();
+                }
 
                 hitbox
             },
@@ -1606,6 +1623,11 @@ impl Div {
             return;
         };
 
+        // Enter tiled scroll container mode for paint phase.
+        // This tells children's paint to skip reuse_paint() because paint_range refers
+        // to Scene indices, but primitives go to DisplayList in tiled scroll containers.
+        window.enter_tiled_scroll_container();
+
         // Check if we have an existing display list we can reuse.
         // We only need to rebuild when content actually changes, not on scroll.
         // The display list stores content in content-space coordinates, independent of scroll.
@@ -1627,31 +1649,33 @@ impl Div {
 
         // Only paint children and rebuild display list if we don't have one or content changed
         if !has_valid_display_list {
-            // Record scene position before painting children
-            let paint_start = window.next_frame.scene.len();
+            // DIRECT-TO-DISPLAYLIST: Paint children directly to DisplayList instead of Scene.
+            // This eliminates the O(N) Scene→DisplayList conversion overhead.
+            //
+            // The content_origin is where content (0,0) appears in window space with current scroll.
+            // This is subtracted from primitive coordinates to get content-space coordinates.
+            let content_origin = Point {
+                x: bounds.origin.x + scroll_offset.x,
+                y: bounds.origin.y + scroll_offset.y,
+            };
+
+            // Enter direct-to-DisplayList mode. While active, insert_primitive_internal()
+            // will convert primitives and write them to DisplayList instead of Scene.
+            window.begin_scroll_container_paint(global_id.clone(), content_origin);
 
             // CRITICAL: For tiled rendering, we need to paint ALL content, not just the visible
             // viewport. The normal content_mask clips to the viewport, which means items below
-            // the visible area wouldn't be painted to the scene and wouldn't appear in the
-            // display list.
-            //
-            // We push a full-content mask directly onto the stack (bypassing the intersection
-            // in with_content_mask) so that all content is rendered. The scroll_offset is used
-            // to position content correctly in window space.
+            // the visible area wouldn't be painted. Push a full-content mask so all content is
+            // rendered.
             let full_content_mask = ContentMask {
                 bounds: Bounds {
-                    // Position the mask at bounds.origin + scroll_offset, which is where
-                    // content (0,0) appears in window space with current scroll
-                    origin: Point {
-                        x: bounds.origin.x + scroll_offset.x,
-                        y: bounds.origin.y + scroll_offset.y,
-                    },
+                    origin: content_origin,
                     size: content_size,
                 },
             };
             window.content_mask_stack.push(full_content_mask);
 
-            // Paint all children ONCE - this respects the prepaint/paint contract
+            // Paint all children ONCE - primitives go directly to DisplayList
             for child in children.iter_mut() {
                 child.paint(window, cx);
             }
@@ -1659,37 +1683,13 @@ impl Div {
             // Pop the full-content mask
             window.content_mask_stack.pop();
 
-            // Record scene position after painting
-            let paint_end = window.next_frame.scene.len();
+            // Exit direct-to-DisplayList mode and get the built DisplayList
+            let display_list = window.end_scroll_container_paint();
 
-            // Convert painted primitives to DisplayList and move to Scene
-            if paint_end > paint_start {
-                let primitive_range = paint_start..paint_end;
-
-                // Convert Scene primitives to DisplayList format
-                // Pass (bounds.origin + scroll_offset) so we can offset from window space to content space.
-                // When scroll_offset is applied, content at position (0,0) paints at:
-                //   window_pos = bounds.origin + scroll_offset
-                // To convert back: content_pos = window_pos - (bounds.origin + scroll_offset)
-                let content_origin = Point {
-                    x: bounds.origin.x + scroll_offset.x,
-                    y: bounds.origin.y + scroll_offset.y,
-                };
-                window.populate_display_list_from_paint_range(
-                    global_id,
-                    primitive_range.clone(),
-                    content_origin,
-                );
-
-                // Move the display list from DisplayListManager to Scene for renderer access
-                if let Some(display_list) = window.display_list_manager().get(global_id).cloned() {
-                    window.next_frame.scene.insert_display_list(global_id.clone(), display_list);
-                }
-
-                // TODO: Truncation currently breaks subtree caching (which references paint operation indices).
-                // For now, keep original primitives. This results in double rendering but allows testing.
-                // Proper solution: either mark primitives as "display list only" or defer truncation.
-                // window.next_frame.scene.truncate_paint_operations(paint_start);
+            // Store the display list in manager (for reuse across frames) and scene (for renderer)
+            if !display_list.items.is_empty() {
+                window.display_list_manager().insert(global_id.clone(), display_list.clone());
+                window.next_frame.scene.insert_display_list(global_id.clone(), display_list);
             }
         } else {
             // Reuse existing display list - just copy to Scene for renderer access
@@ -1783,6 +1783,9 @@ impl Div {
                 window.next_frame.scene.insert_primitive(tile_sprite);
             }
         }
+
+        // Exit tiled scroll container mode
+        window.exit_tiled_scroll_container();
 
         let _ = generation; // Suppress unused warning
     }
@@ -1939,6 +1942,11 @@ impl Element for Div {
         cx: &mut App,
     ) -> Option<Hitbox> {
         // Check for subtree cache hit
+        // Note: We allow SubtreeCache lookup even inside tiled scroll containers.
+        // The prepaint_range is still valid (hitboxes, layout state).
+        // However, the paint_range refers to Scene indices which are invalid for tiled
+        // scroll containers (primitives go to DisplayList). The paint phase handles this
+        // by checking is_inside_tiled_scroll_container() and skipping reuse_paint().
         if self.can_cache_subtree() {
             if let Some(id) = global_id {
                 let signature = self.compute_subtree_signature();
@@ -1947,41 +1955,48 @@ impl Element for Div {
 
                 match window.lookup_subtree_cache_with_offset(id, signature, bounds, &content_mask, element_offset) {
                     Some(SubtreeCacheHit::Full(cached)) => {
-                        // Full cache hit - extract values before mutable operations
-                        let old_prepaint_range = cached.prepaint_range.clone();
-                        let old_paint_range = cached.paint_range.clone();
-                        let hitbox = cached.hitbox.clone();
-                        let cached_texture_id = cached.cached_texture_id;
+                        // Inside tiled scroll containers, we can't use the Full cache hit path
+                        // because reuse_prepaint/reuse_paint would use invalid Scene indices
+                        // (primitives go to DisplayList instead). Fall through to normal prepaint.
+                        if window.is_inside_tiled_scroll_container() {
+                            // Continue to normal prepaint (fall through to end of match)
+                        } else {
+                            // Full cache hit - extract values before mutable operations
+                            let old_prepaint_range = cached.prepaint_range.clone();
+                            let old_paint_range = cached.paint_range.clone();
+                            let hitbox = cached.hitbox.clone();
+                            let cached_texture_id = cached.cached_texture_id;
 
-                        // Record NEW prepaint start before reuse
-                        let prepaint_start = window.prepaint_index();
+                            // Record NEW prepaint start before reuse
+                            let prepaint_start = window.prepaint_index();
 
-                        // Reuse prepaint data from previous frame
-                        window.reuse_prepaint(old_prepaint_range);
+                            // Reuse prepaint data from previous frame
+                            window.reuse_prepaint(old_prepaint_range);
 
-                        // Record NEW prepaint end after reuse
-                        let prepaint_end = window.prepaint_index();
+                            // Record NEW prepaint end after reuse
+                            let prepaint_end = window.prepaint_index();
 
-                        // Create partial cache entry with NEW prepaint range (paint_range updated in paint phase)
-                        let partial_entry = SubtreeCacheEntry {
-                            subtree_signature: signature,
-                            bounds,
-                            content_mask: content_mask.clone(),
-                            element_offset,
-                            prepaint_range: prepaint_start..prepaint_end,
-                            paint_range: Default::default(), // Will be set in paint phase
-                            hitbox: hitbox.clone(),
-                            cached_texture_id,
-                        };
+                            // Create partial cache entry with NEW prepaint range (paint_range updated in paint phase)
+                            let partial_entry = SubtreeCacheEntry {
+                                subtree_signature: signature,
+                                bounds,
+                                content_mask: content_mask.clone(),
+                                element_offset,
+                                prepaint_range: prepaint_start..prepaint_end,
+                                paint_range: Default::default(), // Will be set in paint phase
+                                hitbox: hitbox.clone(),
+                                cached_texture_id,
+                            };
 
-                        // Store cache hit state for paint phase
-                        request_layout.subtree_cache_state = Some(SubtreeCacheState::CacheHit {
-                            id: id.clone(),
-                            old_paint_range,
-                            partial_entry,
-                        });
+                            // Store cache hit state for paint phase
+                            request_layout.subtree_cache_state = Some(SubtreeCacheState::CacheHit {
+                                id: id.clone(),
+                                old_paint_range,
+                                partial_entry,
+                            });
 
-                        return hitbox;
+                            return hitbox;
+                        }
                     }
                     Some(SubtreeCacheHit::OffsetOnly { entry, offset_delta }) => {
                         // Offset-only hit - signature/bounds/content_mask match but offset differs.
@@ -2069,6 +2084,20 @@ impl Element for Div {
         // Check for subtree cache state from prepaint
         match request_layout.subtree_cache_state.take() {
             Some(SubtreeCacheState::CacheHit { id, old_paint_range, mut partial_entry }) => {
+                // Inside tiled scroll containers, we can't use reuse_paint because the paint_range
+                // refers to Scene indices, but primitives go to DisplayList instead.
+                // Fall through to normal paint in this case.
+                if window.is_inside_tiled_scroll_container() {
+                    // Still record the paint range for SubtreeCache
+                    let paint_start = window.paint_index();
+                    self.paint_uncached(global_id, inspector_id, bounds, hitbox, window, cx);
+                    let paint_end = window.paint_index();
+
+                    partial_entry.paint_range = paint_start..paint_end;
+                    window.insert_subtree_cache(id, partial_entry);
+                    return;
+                }
+
                 // Cache hit - record NEW paint start before reuse
                 let paint_start = window.paint_index();
 
@@ -2140,7 +2169,11 @@ impl Element for Div {
                 let paint_start = window.paint_index();
 
                 // Begin subtree capture for RTT (if eligible)
-                let should_capture = self.should_cache_to_texture(&new_bounds);
+                // Don't capture when inside tiled scroll containers because:
+                // 1. Scene indices would be invalid (primitives go to DisplayList)
+                // 2. Scene is truncated after children paint, invalidating capture indices
+                let should_capture = !window.is_inside_tiled_scroll_container()
+                    && self.should_cache_to_texture(&new_bounds);
                 if should_capture {
                     window.begin_subtree_capture(id.clone(), new_bounds);
                 }
@@ -2667,12 +2700,14 @@ impl Interactivity {
         );
     }
 
-    /// Check if this element is a scroll container eligible for tiled rendering.
-    /// Returns true if:
-    /// 1. Element has scroll overflow (x or y)
-    /// 2. Element has an ID (needed for cache keying)
-    /// 3. Content size exceeds the viewport by a significant margin
-    pub fn is_tiled_scroll_container(&self, bounds: Bounds<Pixels>) -> bool {
+    /// Check if this element will use tiled rendering during paint.
+    /// This version takes content_size as a parameter so it can be called during prepaint
+    /// (before self.content_size is set).
+    pub fn will_use_tiled_rendering(
+        &self,
+        bounds: Bounds<Pixels>,
+        content_size: Size<Pixels>,
+    ) -> bool {
         // Must have an ID for cache keying
         if self.element_id.is_none() {
             return false;
@@ -2688,11 +2723,20 @@ impl Interactivity {
         // Content should be larger than viewport for tiling to be worthwhile
         // Only tile if content exceeds viewport by at least one tile size (512 device pixels ~= 256 logical pixels)
         let min_excess = Pixels(256.0);
-        let content_exceeds_x = self.content_size.width > bounds.size.width + min_excess;
-        let content_exceeds_y = self.content_size.height > bounds.size.height + min_excess;
+        let content_exceeds_x = content_size.width > bounds.size.width + min_excess;
+        let content_exceeds_y = content_size.height > bounds.size.height + min_excess;
 
         // Must have excess content in at least one scrollable direction
         (is_scroll_x && content_exceeds_x) || (is_scroll_y && content_exceeds_y)
+    }
+
+    /// Check if this element is a scroll container eligible for tiled rendering.
+    /// Returns true if:
+    /// 1. Element has scroll overflow (x or y)
+    /// 2. Element has an ID (needed for cache keying)
+    /// 3. Content size exceeds the viewport by a significant margin
+    pub fn is_tiled_scroll_container(&self, bounds: Bounds<Pixels>) -> bool {
+        self.will_use_tiled_rendering(bounds, self.content_size)
     }
 
     #[cfg(debug_assertions)]
