@@ -2797,11 +2797,6 @@ impl MetalRenderer {
             }
         };
 
-        // Skip if nothing to render
-        if raster_result.is_empty() {
-            return;
-        }
-
         let tile_size: Size<DevicePixels> = size(
             DevicePixels(super::tile_cache::TILE_SIZE as i32),
             DevicePixels(super::tile_cache::TILE_SIZE as i32),
