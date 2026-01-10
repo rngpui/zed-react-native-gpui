@@ -1605,11 +1605,6 @@ impl Div {
         window: &mut Window,
         cx: &mut App,
     ) {
-        use crate::scene::{TileCoord, TileKey, TileSprite};
-
-        // Tile size in device pixels (must match tile_cache::TILE_SIZE)
-        const TILE_SIZE: u32 = 512;
-
         let scale_factor = window.scale_factor();
 
         // Get content mask for clipping tiles at viewport edges
@@ -1781,90 +1776,30 @@ impl Div {
                 }
             }
         }
-        let layer = window.layer_tree().get(layer_id).unwrap();
-        if let Some(arc_display_list) = &layer.display_list {
-            if !arc_display_list.items.is_empty() {
-                window.next_frame.scene.insert_display_list(
-                    global_id.clone(),
-                    Arc::clone(arc_display_list),
-                );
-            }
+
+        // Extract data from layer before scene mutations (avoids borrow conflicts)
+        let (display_list_clone, tile_sprites) = {
+            let layer = window.layer_tree().get(layer_id).unwrap();
+            let display_list = layer
+                .display_list
+                .as_ref()
+                .filter(|dl| !dl.items.is_empty())
+                .map(Arc::clone);
+            // P2.2: Emit TileSprite primitives using centralized Layer method.
+            // This ensures consistency between normal draw and compositor-only paths.
+            let sprites = layer.emit_tile_sprites();
+            (display_list, sprites)
+        };
+
+        // Insert display list and tile sprites into scene
+        if let Some(arc_display_list) = display_list_clone {
+            window
+                .next_frame
+                .scene
+                .insert_display_list(global_id.clone(), arc_display_list);
         }
-
-        // Calculate visible tile range based on scroll offset and viewport
-        let tile_size_px = TILE_SIZE as f32 / scale_factor;
-
-        // scroll_offset is negative (scroll down = negative y)
-        let content_top_left_x = -scroll_offset.x.0;
-        let content_top_left_y = -scroll_offset.y.0;
-
-        let min_tile = TileCoord {
-            x: (content_top_left_x / tile_size_px).floor() as i32,
-            y: (content_top_left_y / tile_size_px).floor() as i32,
-        };
-
-        let max_tile = TileCoord {
-            x: ((content_top_left_x + bounds.size.width.0) / tile_size_px).ceil() as i32 - 1,
-            y: ((content_top_left_y + bounds.size.height.0) / tile_size_px).ceil() as i32 - 1,
-        };
-
-        // Insert TileSprite primitives for visible tiles
-        for tile_y in min_tile.y..=max_tile.y {
-            for tile_x in min_tile.x..=max_tile.x {
-                let coord = TileCoord { x: tile_x, y: tile_y };
-
-                // Calculate content-space bounds for this tile
-                let tile_content_origin = Point {
-                    x: Pixels(coord.x as f32 * tile_size_px),
-                    y: Pixels(coord.y as f32 * tile_size_px),
-                };
-                let tile_content_size = Size {
-                    width: Pixels(tile_size_px),
-                    height: Pixels(tile_size_px),
-                };
-
-                // Calculate where this tile should appear on screen
-                let screen_origin = Point {
-                    x: bounds.origin.x + tile_content_origin.x + scroll_offset.x,
-                    y: bounds.origin.y + tile_content_origin.y + scroll_offset.y,
-                };
-
-                let tile_sprite = TileSprite {
-                    order: 0, // Will be set by insert_primitive
-                    _pad: 0,
-                    bounds: crate::Bounds {
-                        origin: crate::point(
-                            crate::ScaledPixels(screen_origin.x.0 * scale_factor),
-                            crate::ScaledPixels(screen_origin.y.0 * scale_factor),
-                        ),
-                        size: crate::size(
-                            crate::ScaledPixels(tile_content_size.width.0 * scale_factor),
-                            crate::ScaledPixels(tile_content_size.height.0 * scale_factor),
-                        ),
-                    },
-                    // P1.2: Use outer_clip_for_tiles which includes ancestor clips.
-                    // This ensures tiles are clipped correctly when scroll containers
-                    // are nested inside other clipping ancestors.
-                    content_mask: ContentMask {
-                        bounds: crate::Bounds {
-                            origin: crate::point(
-                                crate::ScaledPixels(outer_clip_for_tiles.bounds.origin.x.0 * scale_factor),
-                                crate::ScaledPixels(outer_clip_for_tiles.bounds.origin.y.0 * scale_factor),
-                            ),
-                            size: crate::size(
-                                crate::ScaledPixels(outer_clip_for_tiles.bounds.size.width.0 * scale_factor),
-                                crate::ScaledPixels(outer_clip_for_tiles.bounds.size.height.0 * scale_factor),
-                            ),
-                        },
-                    },
-                    tile_key: TileKey {
-                        container_id: global_id.clone(),
-                        coord,
-                    },
-                };
-
-                window.next_frame.scene.insert_primitive(tile_sprite);
-            }
+        for tile_sprite in tile_sprites {
+            window.next_frame.scene.insert_primitive(tile_sprite);
         }
 
         // Pop the layer from the layer tree
