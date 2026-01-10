@@ -1398,6 +1398,11 @@ impl PlatformWindow for WaylandWindow {
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         self.borrow().renderer.gpu_specs().into()
     }
+
+    fn request_frame(&self) {
+        let state = self.borrow();
+        state.surface.frame(&state.globals.qh, state.surface.id());
+    }
 }
 
 fn update_window(mut state: RefMut<WaylandWindowState>) {

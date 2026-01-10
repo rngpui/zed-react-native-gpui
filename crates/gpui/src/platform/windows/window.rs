@@ -945,6 +945,12 @@ impl PlatformWindow for WindowsWindow {
 
         self.0.update_ime_position(self.0.hwnd, caret_position);
     }
+
+    fn request_frame(&self) {
+        unsafe {
+            let _ = RedrawWindow(Some(self.0.hwnd), None, None, RDW_INVALIDATE);
+        }
+    }
 }
 
 #[implement(IDropTarget)]

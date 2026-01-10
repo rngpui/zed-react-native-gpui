@@ -302,6 +302,10 @@ impl PlatformWindow for TestWindow {
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         None
     }
+
+    fn request_frame(&self) {
+        // No-op for test windows
+    }
 }
 
 pub(crate) struct TestAtlasState {

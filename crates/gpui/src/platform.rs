@@ -509,6 +509,13 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn toggle_fullscreen(&self);
     fn is_fullscreen(&self) -> bool;
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>);
+    /// Request that a frame be scheduled.
+    ///
+    /// This wakes up the frame pump if it's idle. Call this when state changes
+    /// that require a frame (dirty, composite_only, needs_present, or callbacks added).
+    /// Platform implementations should be idempotent - multiple calls before the
+    /// next frame should not queue multiple frames.
+    fn request_frame(&self);
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>);
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>);

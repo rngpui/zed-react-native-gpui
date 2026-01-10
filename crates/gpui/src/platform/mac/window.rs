@@ -1661,6 +1661,13 @@ impl PlatformWindow for MacWindow {
         let mut this = self.0.lock();
         this.renderer.render_to_image(scene)
     }
+
+    fn request_frame(&self) {
+        let this = self.0.lock();
+        if let Some(display_link) = &this.display_link {
+            display_link.request_frame();
+        }
+    }
 }
 
 impl rwh::HasWindowHandle for MacWindow {

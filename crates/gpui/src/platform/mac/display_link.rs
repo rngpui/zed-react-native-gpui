@@ -84,6 +84,17 @@ impl DisplayLink {
         }
         Ok(())
     }
+
+    /// Request that a frame be scheduled.
+    ///
+    /// This wakes up the frame pump by merging data into the dispatch source,
+    /// causing the event handler to fire on the main queue. Multiple calls
+    /// before the handler fires are coalesced into a single event.
+    pub fn request_frame(&self) {
+        unsafe {
+            dispatch_source_merge_data(self.frame_requests, 1);
+        }
+    }
 }
 
 impl Drop for DisplayLink {

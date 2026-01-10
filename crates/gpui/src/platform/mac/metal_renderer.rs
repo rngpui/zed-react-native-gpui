@@ -47,6 +47,8 @@ struct ArrayDirtyFlags {
     monochrome_sprites: bool,
     polychrome_sprites: bool,
     surfaces: bool,
+    cached_textures: bool,
+    tile_sprites: bool,
 }
 
 impl ArrayDirtyFlags {
@@ -60,6 +62,8 @@ impl ArrayDirtyFlags {
             monochrome_sprites: true,
             polychrome_sprites: true,
             surfaces: true,
+            cached_textures: true,
+            tile_sprites: true,
         }
     }
 }
@@ -81,6 +85,8 @@ struct PreviousFrameArrays {
     polychrome_sprites: Vec<PolychromeSprite>,
     polychrome_sprite_transforms: Vec<TransformationMatrix>,
     surfaces_len: usize, // Surfaces contain CVPixelBuffer, not Clone, so we compare length
+    cached_textures: Vec<crate::scene::CachedTextureSprite>,
+    tile_sprites: Vec<TileSprite>,
 }
 
 impl PreviousFrameArrays {
@@ -117,7 +123,21 @@ impl PreviousFrameArrays {
             // Surfaces contain CVPixelBuffer which can't be compared.
             // Must always mark as dirty to avoid stale GPU buffers.
             surfaces: !scene.surfaces.is_empty(),
+            cached_textures: !Self::slices_equal(&self.cached_textures, &scene.cached_textures),
+            tile_sprites: !Self::tile_sprites_equal(&self.tile_sprites, &scene.tile_sprites),
         }
+    }
+
+    fn tile_sprites_equal(a: &[TileSprite], b: &[TileSprite]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        a.iter().zip(b).all(|(a, b)| {
+            a.order == b.order
+                && a.bounds == b.bounds
+                && a.content_mask == b.content_mask
+                && a.tile_key == b.tile_key
+        })
     }
 
     /// Byte-wise comparison of two slices of repr(C) structs.
@@ -176,6 +196,12 @@ impl PreviousFrameArrays {
             .extend_from_slice(&scene.polychrome_sprite_transforms);
 
         self.surfaces_len = scene.surfaces.len();
+
+        self.cached_textures.clear();
+        self.cached_textures.extend_from_slice(&scene.cached_textures);
+
+        self.tile_sprites.clear();
+        self.tile_sprites.extend_from_slice(&scene.tile_sprites);
     }
 }
 
@@ -903,14 +929,17 @@ impl MetalRenderer {
             && !self.array_dirty_flags.backdrop_blurs
             && !self.array_dirty_flags.monochrome_sprites
             && !self.array_dirty_flags.polychrome_sprites
-            && !self.array_dirty_flags.surfaces;
+            && !self.array_dirty_flags.surfaces
+            && !self.array_dirty_flags.cached_textures
+            && !self.array_dirty_flags.tile_sprites;
 
         self.pending_dirty_ranges.clear();
-        // If all arrays are byte-identical to previous frame, we can skip all uploads
+        // Only allow instance-buffer reuse when *all* draw-affecting arrays are unchanged.
+        // If we can't reuse, we must write instances even if the scene didn't report dirty ranges.
+        self.incremental_draw = all_arrays_clean;
         if !all_arrays_clean {
             self.pending_dirty_ranges.extend_from_slice(dirty_ranges);
         }
-        self.incremental_draw = true;
         self.draw(scene);
 
         // Update previous frame arrays for next frame comparison.

@@ -1760,4 +1760,31 @@ impl PlatformWindow for X11Window {
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         self.0.state.borrow().renderer.gpu_specs().into()
     }
+
+    fn request_frame(&self) {
+        let state = self.0.state.borrow();
+        // Send a synthetic Expose event to trigger a frame
+        let expose = xproto::ExposeEvent {
+            response_type: xproto::EXPOSE_EVENT,
+            sequence: 0,
+            window: self.0.x_window,
+            x: 0,
+            y: 0,
+            width: state.bounds.size.width.0 as u16,
+            height: state.bounds.size.height.0 as u16,
+            count: 0,
+        };
+        drop(state);
+        check_reply(
+            || "X11 SendEvent for Expose failed.",
+            self.0.xcb.send_event(
+                false,
+                self.0.x_window,
+                xproto::EventMask::EXPOSURE,
+                expose,
+            ),
+        )
+        .log_err();
+        xcb_flush(&self.0.xcb);
+    }
 }

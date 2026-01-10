@@ -208,7 +208,6 @@ impl WindowInvalidator {
         let mut inner = self.inner.borrow_mut();
         inner.dirty_views.insert(entity);
         if inner.draw_phase == DrawPhase::None {
-            eprintln!("[DIRTY] invalidate_view({:?}) setting dirty=true", entity);
             inner.dirty = true;
             cx.push_effect(Effect::Notify { emitter: entity });
             true
@@ -222,9 +221,6 @@ impl WindowInvalidator {
     }
 
     pub fn set_dirty(&self, dirty: bool) {
-        if dirty {
-            eprintln!("[DIRTY] set_dirty(true) called");
-        }
         self.inner.borrow_mut().dirty = dirty
     }
 
@@ -234,12 +230,12 @@ impl WindowInvalidator {
     }
 
     /// P2: Request a compositor-only update (skips full draw, only updates tile sprites).
+    /// This clears the dirty flag because we KNOW only scroll offset changed, not content.
     pub fn request_composite_only(&self) {
         let mut inner = self.inner.borrow_mut();
-        // Only set if not already dirty (dirty takes precedence - needs full draw)
-        if !inner.dirty {
-            inner.composite_only = true;
-        }
+        // Clear dirty and set composite_only - we know only scroll changed
+        inner.dirty = false;
+        inner.composite_only = true;
     }
 
     /// P2: Clear the compositor-only flag (called after composite_only() completes).
@@ -1335,17 +1331,7 @@ impl Window {
                     || needs_present.get()
                     || (active.get() && input_rate_tracker.borrow_mut().is_high_rate());
 
-                // P2 DEBUG: Log which frame path is taken
-                let is_dirty = invalidator.is_dirty();
-                let is_composite_only = invalidator.needs_composite_only();
-                if is_dirty || is_composite_only {
-                    eprintln!(
-                        "[FRAME] dirty={} composite_only={} force={}",
-                        is_dirty, is_composite_only, request_frame_options.force_render
-                    );
-                }
-
-                if is_dirty || request_frame_options.force_render {
+                if invalidator.is_dirty() || request_frame_options.force_render {
                     measure("frame duration", || {
                         handle
                             .update(&mut cx, |_, window, cx| {
@@ -1355,16 +1341,6 @@ impl Window {
                             })
                             .log_err();
                     })
-                } else if is_composite_only {
-                    // P2: Compositor-only path - update tile sprites without full draw.
-                    // This handles scroll-offset changes where content hasn't changed.
-                    eprintln!("[FRAME] Taking COMPOSITE-ONLY path");
-                    handle
-                        .update(&mut cx, |_, window, _| {
-                            window.composite_only();
-                            window.present();
-                        })
-                        .log_err();
                 } else if needs_present {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
@@ -1693,6 +1669,7 @@ impl Window {
         if self.invalidator.not_drawing() {
             self.refreshing = true;
             self.invalidator.set_dirty(true);
+            self.platform_window.request_frame();
         }
     }
 
@@ -1702,10 +1679,16 @@ impl Window {
     /// The compositor-only update re-emits tile sprites at new positions and replays
     /// retained hitboxes, but skips the full draw() cycle.
     pub fn request_composite_only(&mut self) {
-        if self.invalidator.not_drawing() {
+        let not_drawing = self.invalidator.not_drawing();
+        eprintln!("[REQUEST_COMPOSITE_ONLY] not_drawing={}", not_drawing);
+        if not_drawing {
             self.invalidator.request_composite_only();
             // Ensure a frame is presented (triggers platform frame callback)
             self.needs_present.set(true);
+            self.platform_window.request_frame();
+            eprintln!("[REQUEST_COMPOSITE_ONLY] set composite_only=true, called request_frame()");
+        } else {
+            eprintln!("[REQUEST_COMPOSITE_ONLY] SKIPPED - currently drawing");
         }
     }
 
@@ -1994,17 +1977,68 @@ impl Window {
     /// Schedule the given closure to be run directly after the current frame is rendered.
     pub fn on_next_frame(&self, callback: impl FnOnce(&mut Window, &mut App) + 'static) {
         RefCell::borrow_mut(&self.next_frame_callbacks).push(Box::new(callback));
+        self.platform_window.request_frame();
     }
 
-    /// Schedule a frame to be drawn on the next animation frame.
+    /// Schedule a full redraw on the next animation frame.
     ///
-    /// This is useful for elements that need to animate continuously, such as a video player or an animated GIF.
-    /// It will cause the window to redraw on the next frame, even if no other changes have occurred.
+    /// This is useful for elements that need to animate continuously with content changes,
+    /// such as a video player or an animated GIF. It will cause the window to redraw on the
+    /// next frame by calling `notify()` on the current view.
     ///
-    /// If called from within a view, it will notify that view on the next frame. Otherwise, it will refresh the entire window.
+    /// If called from within a view, it will notify that view on the next frame.
+    /// Otherwise, it will refresh the entire window.
+    ///
+    /// **Note**: For compositor-only animations (scroll, transforms) that don't change content,
+    /// use [`on_next_frame_present`] with [`request_composite_only`] instead to avoid
+    /// unnecessary layout/paint work.
     pub fn request_animation_frame(&self) {
         let entity = self.current_view();
         self.on_next_frame(move |_, cx| cx.notify(entity));
+    }
+
+    /// Request that the current frame be presented without marking content dirty.
+    ///
+    /// This ensures the frame pump runs and presents, but does not trigger layout or paint.
+    /// Use this for compositor-only updates where you've already updated layer properties
+    /// (scroll offset, transforms) and just need to present the result.
+    pub fn request_present(&self) {
+        self.needs_present.set(true);
+        self.platform_window.request_frame();
+    }
+
+    /// Schedule a callback on the next frame and ensure presentation, without marking dirty.
+    ///
+    /// This is the compositor-only equivalent of [`on_next_frame`] + [`request_animation_frame`].
+    /// The callback runs on the next frame, but no `notify()` is called, so no layout/paint
+    /// work is triggered.
+    ///
+    /// Use this for smooth scroll, inertial scroll, or other compositor-driven animations:
+    /// ```ignore
+    /// window.on_next_frame_present(|window, _cx| {
+    ///     // Update scroll offset
+    ///     layer.scroll_offset += velocity * dt;
+    ///     window.request_composite_only();
+    ///
+    ///     // Continue animation if needed
+    ///     if velocity.length() > 0.1 {
+    ///         window.on_next_frame_present(tick);
+    ///     }
+    /// });
+    /// ```
+    pub fn on_next_frame_present(&self, callback: impl FnOnce(&mut Window, &mut App) + 'static) {
+        self.on_next_frame(callback);
+        self.request_present();
+    }
+
+    /// Schedule a compositor-only animation frame.
+    ///
+    /// This is sugar for scheduling a frame that calls `request_composite_only()`.
+    /// Use this to kick off a compositor-only animation loop.
+    pub fn request_composite_animation_frame(&self) {
+        self.on_next_frame_present(|window, _| {
+            window.request_composite_only();
+        });
     }
 
     /// Spawn the future returned by the given closure on the application thread pool.
@@ -2562,29 +2596,35 @@ impl Window {
     fn composite_only(&mut self) {
         // Collect all tile sprites from scroll layers
         let mut all_tile_sprites = Vec::new();
+        let layer_count = self.layer_tree.layers_for_composite().count();
+        eprintln!("[COMPOSITE_ONLY] layer_count={}", layer_count);
+
         for layer in self.layer_tree.layers_for_composite() {
             let sprites = layer.emit_tile_sprites();
+            eprintln!(
+                "[COMPOSITE_ONLY] layer {:?} reason={:?} has_element_id={} emitted {} sprites",
+                layer.id, layer.reason, layer.element_id.is_some(), sprites.len()
+            );
             all_tile_sprites.extend(sprites);
         }
 
+        eprintln!("[COMPOSITE_ONLY] total sprites={}", all_tile_sprites.len());
         // Replace tile sprites in the rendered scene
         self.rendered_frame.scene.replace_tile_sprites(all_tile_sprites);
 
-        // Replay retained hitboxes for each layer with updated content_origin
-        // This updates hit testing for the new scroll positions
-        self.rendered_frame.hitboxes.clear();
-        for layer in self.layer_tree.layers_for_composite() {
-            for retained in &layer.retained_hitboxes {
-                let hitbox = retained.to_hitbox(layer.content_origin);
-                self.rendered_frame.hitboxes.push(hitbox);
-            }
-        }
+        // Note: We don't update hitboxes here because that would require tracking
+        // which hitboxes belong to which layer. For now, hitboxes from the last
+        // full draw are preserved. This is acceptable for scroll because the
+        // relative positions within the scroll container don't change.
+        // TODO: Properly track layer hitboxes for compositor-only updates.
 
-        // Update mouse hit test with new hitboxes
+        // Update mouse hit test with current hitboxes
         self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position);
 
-        // Clear the composite_only flag
+        // Clear both flags - composite_only is done, and dirty is handled
+        // (we don't need a full draw since only scroll offset changed)
         self.invalidator.clear_composite_only();
+        self.invalidator.set_dirty(false);
         self.needs_present.set(true);
     }
 

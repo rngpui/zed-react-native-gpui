@@ -3378,27 +3378,18 @@ impl Interactivity {
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
 
-            // P0.3/P2: Determine if this is a layer-based scroll container.
+            // P0.3: Determine if this is a layer-based scroll container.
             // Layer containers use tiled rendering and don't need view invalidation on scroll.
             // This replicates the logic from should_create_layer().
-            let layer_global_id = self.element_id.as_ref().and_then(|_element_id| {
+            let is_layer_container = self.element_id.is_some() && {
                 let bounds = hitbox.bounds;
                 let content_size = self.content_size;
                 let is_scroll = overflow.x == Overflow::Scroll || overflow.y == Overflow::Scroll;
                 let min_excess = Pixels(256.0);
                 let large_content = content_size.width > bounds.size.width + min_excess
                     || content_size.height > bounds.size.height + min_excess;
-                if is_scroll && large_content {
-                    // Use current_global_element_id() since we're inside with_element_id
-                    // and the element_id is already on the stack
-                    Some(window.current_global_element_id())
-                } else {
-                    None
-                }
-            });
-
-            // P2: Capture viewport_origin for updating layer.content_origin on scroll
-            let viewport_origin = hitbox.bounds.origin;
+                is_scroll && large_content
+            };
 
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
@@ -3432,27 +3423,12 @@ impl Interactivity {
                     scroll_offset.y += delta_y;
                     scroll_offset.x += delta_x;
                     if *scroll_offset != old_scroll_offset {
-                        // P2: For layer-based scroll containers, update layer scroll offset
-                        // and request compositor-only update (no element tree traversal).
-                        if let Some(ref global_id) = layer_global_id {
-                            if let Some(layer_id) = window.layer_tree().find_by_element_id(global_id) {
-                                let new_scroll = *scroll_offset;
-                                if let Some(layer) = window.layer_tree_mut().get_mut(layer_id) {
-                                    layer.scroll_offset = new_scroll;
-                                    layer.content_origin = Point {
-                                        x: viewport_origin.x + new_scroll.x,
-                                        y: viewport_origin.y + new_scroll.y,
-                                    };
-                                }
-                                eprintln!("[SCROLL] Layer found, calling request_composite_only()");
-                                window.request_composite_only();
-                            } else {
-                                // Layer not found, fall back to refresh
-                                eprintln!("[SCROLL] Layer NOT found, falling back to refresh()");
-                                window.refresh();
-                            }
+                        // P0.3: For layer-based scroll containers, use refresh() instead of notify().
+                        // This schedules a frame without invalidating the view tree, since
+                        // layer DisplayLists are scroll-offset invariant after P0.2.
+                        if is_layer_container {
+                            window.refresh();
                         } else {
-                            eprintln!("[SCROLL] Not a layer container, using notify()");
                             cx.notify(current_view);
                         }
                     }
