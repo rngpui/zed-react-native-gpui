@@ -180,6 +180,9 @@ impl DispatchPhase {
 
 struct WindowInvalidatorInner {
     pub dirty: bool,
+    /// P2: Flag for compositor-only updates (scroll offset changed, no content change).
+    /// When set, the frame callback skips full draw() and only updates tile sprites.
+    pub composite_only: bool,
     pub draw_phase: DrawPhase,
     pub dirty_views: FxHashSet<EntityId>,
 }
@@ -194,6 +197,7 @@ impl WindowInvalidator {
         WindowInvalidator {
             inner: Rc::new(RefCell::new(WindowInvalidatorInner {
                 dirty: true,
+                composite_only: false,
                 draw_phase: DrawPhase::None,
                 dirty_views: FxHashSet::default(),
             })),
@@ -218,6 +222,25 @@ impl WindowInvalidator {
 
     pub fn set_dirty(&self, dirty: bool) {
         self.inner.borrow_mut().dirty = dirty
+    }
+
+    /// P2: Check if compositor-only update is needed (scroll offset changed, no content change).
+    pub fn needs_composite_only(&self) -> bool {
+        self.inner.borrow().composite_only
+    }
+
+    /// P2: Request a compositor-only update (skips full draw, only updates tile sprites).
+    pub fn request_composite_only(&self) {
+        let mut inner = self.inner.borrow_mut();
+        // Only set if not already dirty (dirty takes precedence - needs full draw)
+        if !inner.dirty {
+            inner.composite_only = true;
+        }
+    }
+
+    /// P2: Clear the compositor-only flag (called after composite_only() completes).
+    pub fn clear_composite_only(&self) {
+        self.inner.borrow_mut().composite_only = false
     }
 
     pub fn set_phase(&self, phase: DrawPhase) {
@@ -1318,6 +1341,15 @@ impl Window {
                             })
                             .log_err();
                     })
+                } else if invalidator.needs_composite_only() {
+                    // P2: Compositor-only path - update tile sprites without full draw.
+                    // This handles scroll-offset changes where content hasn't changed.
+                    handle
+                        .update(&mut cx, |_, window, _| {
+                            window.composite_only();
+                            window.present();
+                        })
+                        .log_err();
                 } else if needs_present {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
@@ -1646,6 +1678,19 @@ impl Window {
         if self.invalidator.not_drawing() {
             self.refreshing = true;
             self.invalidator.set_dirty(true);
+        }
+    }
+
+    /// P2: Request a compositor-only update (no element tree traversal).
+    ///
+    /// This is used when only layer properties (scroll offset, transform) have changed.
+    /// The compositor-only update re-emits tile sprites at new positions and replays
+    /// retained hitboxes, but skips the full draw() cycle.
+    pub fn request_composite_only(&mut self) {
+        if self.invalidator.not_drawing() {
+            self.invalidator.request_composite_only();
+            // Ensure a frame is presented (triggers platform frame callback)
+            self.needs_present.set(true);
         }
     }
 
@@ -2225,6 +2270,16 @@ impl Window {
         result
     }
 
+    /// Compute the GlobalElementId for an element ID in the current context.
+    ///
+    /// P2: Used by scroll handlers to look up layers by element ID.
+    pub fn global_element_id(&mut self, element_id: &ElementId) -> GlobalElementId {
+        self.element_id_stack.push(element_id.clone());
+        let global_id = GlobalElementId(Arc::from(&*self.element_id_stack));
+        self.element_id_stack.pop();
+        global_id
+    }
+
     /// Executes the provided function with the specified rem size.
     ///
     /// This method must only be called as part of element drawing.
@@ -2470,6 +2525,43 @@ impl Window {
             .draw_incremental(&self.rendered_frame.scene, self.rendered_frame.scene.dirty_batch_ranges());
         self.needs_present.set(false);
         profiling::finish_frame!();
+    }
+
+    /// P2: Compositor-only update - update tile sprites without full draw.
+    ///
+    /// This is called when only scroll offsets have changed (no content change).
+    /// We skip the element tree traversal and just:
+    /// 1. Emit new tile sprites based on current scroll offsets
+    /// 2. Replay retained hitboxes with updated positions
+    /// 3. Clear the composite_only flag
+    #[profiling::function]
+    fn composite_only(&mut self) {
+        // Collect all tile sprites from scroll layers
+        let mut all_tile_sprites = Vec::new();
+        for layer in self.layer_tree.layers_for_composite() {
+            let sprites = layer.emit_tile_sprites();
+            all_tile_sprites.extend(sprites);
+        }
+
+        // Replace tile sprites in the rendered scene
+        self.rendered_frame.scene.replace_tile_sprites(all_tile_sprites);
+
+        // Replay retained hitboxes for each layer with updated content_origin
+        // This updates hit testing for the new scroll positions
+        self.rendered_frame.hitboxes.clear();
+        for layer in self.layer_tree.layers_for_composite() {
+            for retained in &layer.retained_hitboxes {
+                let hitbox = retained.to_hitbox(layer.content_origin);
+                self.rendered_frame.hitboxes.push(hitbox);
+            }
+        }
+
+        // Update mouse hit test with new hitboxes
+        self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position);
+
+        // Clear the composite_only flag
+        self.invalidator.clear_composite_only();
+        self.needs_present.set(true);
     }
 
     fn prepaint_render_layers(

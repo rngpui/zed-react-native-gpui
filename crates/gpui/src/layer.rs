@@ -21,11 +21,17 @@
 
 use crate::display_list::DisplayList;
 use crate::property_trees::PropertyTrees;
-use crate::scene::TransformationMatrix;
+use crate::scene::{TileCoord, TileKey, TileSprite, TransformationMatrix};
 use crate::window::{AnyMouseListener, Hitbox};
-use crate::{Bounds, ContentMask, GlobalElementId, HitboxBehavior, HitboxId, Pixels, Point, Size};
+use crate::{
+    point, size, Bounds, ContentMask, GlobalElementId, HitboxBehavior, HitboxId, Pixels, Point,
+    ScaledPixels, Size,
+};
 use collections::FxHashMap;
 use std::sync::Arc;
+
+/// Tile size in scaled pixels (matches TileCache).
+const TILE_SIZE: u32 = 512;
 
 /// Unique identifier for a layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -181,6 +187,18 @@ pub struct Layer {
     /// Viewport size for scroll containers.
     pub viewport_size: Size<Pixels>,
 
+    /// P2: Viewport origin in window space (bounds.origin from paint).
+    /// Used for compositor-only tile sprite emission.
+    pub viewport_origin: Point<Pixels>,
+
+    /// P2: Ancestor clip mask (outer_clip_for_tiles from paint).
+    /// Used for compositor-only tile sprite emission.
+    pub outer_clip: ContentMask<Pixels>,
+
+    /// P2: Scale factor for converting to ScaledPixels.
+    /// Used for compositor-only tile sprite emission.
+    pub scale_factor: f32,
+
     /// Content changed, rebuild DisplayList.
     pub needs_repaint: bool,
 
@@ -232,6 +250,9 @@ impl Layer {
             content_bounds: Bounds::default(),
             content_size: Size::default(),
             viewport_size: Size::default(),
+            viewport_origin: Point::default(),
+            outer_clip: ContentMask::default(),
+            scale_factor: 1.0,
             needs_repaint: true,
             needs_rasterize: false,
             needs_composite: false,
@@ -299,6 +320,102 @@ impl Layer {
             // First frame or after layer recreation - need to allocate
             self.display_list = Some(Arc::new(DisplayList::new(element_id.clone())));
         }
+    }
+
+    /// P2: Emit TileSprite primitives for visible tiles based on current scroll offset.
+    ///
+    /// This is used during compositor-only updates where the element tree is not traversed.
+    /// Returns a Vec of TileSprite that should be inserted into the Scene.
+    pub(crate) fn emit_tile_sprites(&self) -> Vec<TileSprite> {
+        let Some(ref element_id) = self.element_id else {
+            return Vec::new();
+        };
+
+        // Skip if this is the root layer or not a scroll container
+        if self.reason != LayerReason::ScrollContainer {
+            return Vec::new();
+        }
+
+        let scale_factor = self.scale_factor;
+        let tile_size_px = TILE_SIZE as f32 / scale_factor;
+        let scroll_offset = self.scroll_offset;
+        let viewport = Bounds {
+            origin: self.viewport_origin,
+            size: self.viewport_size,
+        };
+        let outer_clip = &self.outer_clip;
+
+        // scroll_offset is negative (scroll down = negative y)
+        let content_top_left_x = -scroll_offset.x.0;
+        let content_top_left_y = -scroll_offset.y.0;
+
+        let min_tile = TileCoord {
+            x: (content_top_left_x / tile_size_px).floor() as i32,
+            y: (content_top_left_y / tile_size_px).floor() as i32,
+        };
+
+        let max_tile = TileCoord {
+            x: ((content_top_left_x + viewport.size.width.0) / tile_size_px).ceil() as i32 - 1,
+            y: ((content_top_left_y + viewport.size.height.0) / tile_size_px).ceil() as i32 - 1,
+        };
+
+        let mut sprites = Vec::new();
+        for tile_y in min_tile.y..=max_tile.y {
+            for tile_x in min_tile.x..=max_tile.x {
+                let coord = TileCoord { x: tile_x, y: tile_y };
+
+                // Calculate content-space bounds for this tile
+                let tile_content_origin = Point {
+                    x: Pixels(coord.x as f32 * tile_size_px),
+                    y: Pixels(coord.y as f32 * tile_size_px),
+                };
+                let tile_content_size = Size {
+                    width: Pixels(tile_size_px),
+                    height: Pixels(tile_size_px),
+                };
+
+                // Calculate where this tile should appear on screen
+                let screen_origin = Point {
+                    x: viewport.origin.x + tile_content_origin.x + scroll_offset.x,
+                    y: viewport.origin.y + tile_content_origin.y + scroll_offset.y,
+                };
+
+                let tile_sprite = TileSprite {
+                    order: 0, // Will be set by insert_primitive
+                    _pad: 0,
+                    bounds: Bounds {
+                        origin: point(
+                            ScaledPixels(screen_origin.x.0 * scale_factor),
+                            ScaledPixels(screen_origin.y.0 * scale_factor),
+                        ),
+                        size: size(
+                            ScaledPixels(tile_content_size.width.0 * scale_factor),
+                            ScaledPixels(tile_content_size.height.0 * scale_factor),
+                        ),
+                    },
+                    content_mask: ContentMask {
+                        bounds: Bounds {
+                            origin: point(
+                                ScaledPixels(outer_clip.bounds.origin.x.0 * scale_factor),
+                                ScaledPixels(outer_clip.bounds.origin.y.0 * scale_factor),
+                            ),
+                            size: size(
+                                ScaledPixels(outer_clip.bounds.size.width.0 * scale_factor),
+                                ScaledPixels(outer_clip.bounds.size.height.0 * scale_factor),
+                            ),
+                        },
+                    },
+                    tile_key: TileKey {
+                        container_id: element_id.clone(),
+                        coord,
+                    },
+                };
+
+                sprites.push(tile_sprite);
+            }
+        }
+
+        sprites
     }
 }
 

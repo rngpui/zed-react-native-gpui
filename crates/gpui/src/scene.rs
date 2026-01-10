@@ -116,6 +116,16 @@ impl Scene {
         self.display_lists.insert(element_id, display_list);
     }
 
+    /// P2: Replace all tile sprites for compositor-only updates.
+    ///
+    /// This is used when scroll offset changes but content hasn't changed.
+    /// We clear existing tile sprites and insert new ones with updated positions.
+    /// The paint_operations are unchanged (tiles still reference the same containers).
+    pub fn replace_tile_sprites(&mut self, sprites: Vec<TileSprite>) {
+        self.tile_sprites.clear();
+        self.tile_sprites = sprites;
+    }
+
     /// Insert primitives from a TileRasterResult directly into the Scene.
     /// This is used for the root layer which doesn't use tiling - its DisplayList
     /// is rasterized and the primitives are added directly to the Scene.
