@@ -4608,8 +4608,15 @@ impl Window {
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
 
-        self.layout_engine.as_mut().unwrap().request_layout_with_id(
+        // Convert GlobalElementId to ComputedElementId for layout caching.
+        // Uses a sentinel type for now - type-based differentiation can be added later.
+        let computed_id = crate::display_list::ComputedElementId::from_global(
             element_id,
+            std::any::TypeId::of::<()>(),
+        );
+
+        self.layout_engine.as_mut().unwrap().request_layout_with_id(
+            computed_id,
             style,
             rem_size,
             scale_factor,
@@ -4633,12 +4640,18 @@ impl Window {
     {
         self.invalidator.debug_assert_prepaint();
 
+        // Convert GlobalElementId to ComputedElementId for layout caching.
+        let computed_id = crate::display_list::ComputedElementId::from_global(
+            element_id,
+            std::any::TypeId::of::<()>(),
+        );
+
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
         self.layout_engine
             .as_mut()
             .unwrap()
-            .request_measured_layout_with_id(element_id, style, rem_size, scale_factor, measure)
+            .request_measured_layout_with_id(computed_id, style, rem_size, scale_factor, measure)
     }
 
     /// Returns layout cache statistics and resets the counters.

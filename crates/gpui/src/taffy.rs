@@ -1,6 +1,6 @@
 use crate::{
-    AbsoluteLength, App, Bounds, DefiniteLength, Edges, GlobalElementId, Length, Pixels, Point,
-    Size, Style, Window, point, size,
+    AbsoluteLength, App, Bounds, DefiniteLength, Edges, Length, Pixels, Point,
+    Size, Style, Window, display_list::ComputedElementId, point, size,
 };
 use collections::{FxHashMap, FxHashSet};
 use stacksafe::{StackSafe, stacksafe};
@@ -47,7 +47,7 @@ pub struct TaffyLayoutEngine {
     computed_layouts: FxHashSet<LayoutId>,
     layout_bounds_scratch_space: Vec<LayoutId>,
     /// Maps element IDs to their Taffy node IDs for reuse across frames
-    element_to_node: FxHashMap<GlobalElementId, NodeId>,
+    element_to_node: FxHashMap<ComputedElementId, NodeId>,
     /// Current frame generation
     generation: u64,
     /// Statistics for cache performance
@@ -113,7 +113,7 @@ impl TaffyLayoutEngine {
     /// Reuses the existing Taffy node if available.
     pub fn request_layout_with_id(
         &mut self,
-        element_id: &GlobalElementId,
+        element_id: ComputedElementId,
         style: Style,
         rem_size: Pixels,
         scale_factor: f32,
@@ -121,7 +121,7 @@ impl TaffyLayoutEngine {
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
 
-        if let Some(&node_id) = self.element_to_node.get(element_id) {
+        if let Some(&node_id) = self.element_to_node.get(&element_id) {
             // Reuse existing node
             if let Some(context) = self.taffy.get_node_context_mut(node_id) {
                 context.last_access = self.generation;
@@ -169,7 +169,7 @@ impl TaffyLayoutEngine {
                     .expect(EXPECT_MESSAGE);
             }
 
-            self.element_to_node.insert(element_id.clone(), node_id);
+            self.element_to_node.insert(element_id, node_id);
             self.stats.misses += 1;
             node_id.into()
         }
@@ -179,7 +179,7 @@ impl TaffyLayoutEngine {
     /// Reuses the existing Taffy node if available (but always updates the measure function).
     pub fn request_measured_layout_with_id(
         &mut self,
-        element_id: &GlobalElementId,
+        element_id: ComputedElementId,
         style: Style,
         rem_size: Pixels,
         scale_factor: f32,
@@ -203,7 +203,7 @@ impl TaffyLayoutEngine {
         > = Box::new(measure);
         let measure_fn: NodeMeasureFn = StackSafe::new(boxed);
 
-        if let Some(&node_id) = self.element_to_node.get(element_id) {
+        if let Some(&node_id) = self.element_to_node.get(&element_id) {
             // Reuse existing node - update style and measure function
             self.taffy.set_style(node_id, taffy_style).expect(EXPECT_MESSAGE);
 
@@ -236,7 +236,7 @@ impl TaffyLayoutEngine {
                 )
                 .expect(EXPECT_MESSAGE);
 
-            self.element_to_node.insert(element_id.clone(), node_id);
+            self.element_to_node.insert(element_id, node_id);
             self.stats.misses += 1;
             node_id.into()
         }
