@@ -24,7 +24,7 @@ use crate::{
     MousePressureEvent, MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render,
     ScrollWheelEvent, SharedString, Size, Style, StyleRefinement, Styled, Task, TooltipId,
     Visibility, Window, WindowControlArea, point, px, size, style_content_hash,
-    window::{PaintIndex, PrepaintStateIndex, SubtreeCacheEntry, SubtreeCacheHit},
+    window::{HitboxKey, PaintIndex, PrepaintStateIndex, SubtreeCacheEntry, SubtreeCacheHit},
 };
 use collections::HashMap;
 use refineable::Refineable;
@@ -1630,9 +1630,22 @@ impl Div {
         // Also stored in layer for compositor-only updates.
         let outer_clip_for_tiles = window.content_mask();
 
-        // Set layer properties
+        // Set layer properties and check for changes that require repaint
         {
             let layer = window.layer_tree_mut().get_mut(layer_id).unwrap();
+
+            // Check if viewport size changed (e.g., window resize).
+            // This requires repaint because children may reflow (e.g., flex-wrap).
+            if layer.viewport_size != bounds.size {
+                layer.needs_repaint = true;
+            }
+
+            // Check if content size changed (e.g., children added/removed).
+            // This requires repaint because content layout changed.
+            if layer.content_size != content_size {
+                layer.needs_repaint = true;
+            }
+
             layer.scroll_offset = scroll_offset;
             layer.content_size = content_size;
             layer.viewport_size = bounds.size;
@@ -2716,7 +2729,7 @@ impl Interactivity {
                                             }
 
                                             if let Some(group) = self.group.clone() {
-                                                GroupHitboxes::push(group, hitbox.id, cx);
+                                                GroupHitboxes::push(group, hitbox.key, cx);
                                             }
 
                                             if let Some(area) = self.window_control {
@@ -3024,7 +3037,7 @@ impl Interactivity {
         }
 
         if let Some(group_hover) = self.group_hover_style.as_ref() {
-            if let Some(group_hitbox_id) = GroupHitboxes::get(&group_hover.group, cx) {
+            if let Some(group_hitbox_key) = GroupHitboxes::get(&group_hover.group, cx) {
                 let hover_state = element_state
                     .as_ref()
                     .and_then(|element| element.hover_state.as_ref())
@@ -3032,7 +3045,7 @@ impl Interactivity {
                 let current_view = window.current_view();
 
                 window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
-                    let group_hovered = group_hitbox_id.is_hovered(window);
+                    let group_hovered = group_hitbox_key.is_hovered(window);
                     let was_group_hovered = hover_state
                         .as_ref()
                         .is_some_and(|state| state.borrow().group);
@@ -3302,7 +3315,7 @@ impl Interactivity {
                 window.on_mouse_event(move |_: &MouseDownEvent, phase, window, _cx| {
                     if phase == DispatchPhase::Bubble && !window.default_prevented() {
                         let group_hovered = active_group_hitbox
-                            .is_some_and(|group_hitbox_id| group_hitbox_id.is_hovered(window));
+                            .is_some_and(|group_hitbox_key| group_hitbox_key.is_hovered(window));
                         let element_hovered = hitbox.is_hovered(window);
                         if group_hovered || element_hovered {
                             *active_state.borrow_mut() = ElementClickedState {
@@ -3514,8 +3527,8 @@ impl Interactivity {
         if !cx.has_active_drag() {
             if let Some(group_hover) = self.group_hover_style.as_ref() {
                 let is_group_hovered =
-                    if let Some(group_hitbox_id) = GroupHitboxes::get(&group_hover.group, cx) {
-                        group_hitbox_id.is_hovered(window)
+                    if let Some(group_hitbox_key) = GroupHitboxes::get(&group_hover.group, cx) {
+                        group_hitbox_key.is_hovered(window)
                     } else if let Some(element_state) = element_state.as_ref() {
                         element_state
                             .hover_state
@@ -3559,10 +3572,10 @@ impl Interactivity {
 
                 if can_drop {
                     for (state_type, group_drag_style) in &self.group_drag_over_styles {
-                        if let Some(group_hitbox_id) =
+                        if let Some(group_hitbox_key) =
                             GroupHitboxes::get(&group_drag_style.group, cx)
                             && *state_type == drag.value.as_ref().type_id()
-                            && group_hitbox_id.is_hovered(window)
+                            && group_hitbox_key.is_hovered(window)
                         {
                             style.refine(&group_drag_style.style);
                         }
@@ -3924,12 +3937,12 @@ fn handle_tooltip_check_visible_and_update(
 }
 
 #[derive(Default)]
-pub(crate) struct GroupHitboxes(HashMap<SharedString, SmallVec<[HitboxId; 1]>>);
+pub(crate) struct GroupHitboxes(HashMap<SharedString, SmallVec<[HitboxKey; 1]>>);
 
 impl Global for GroupHitboxes {}
 
 impl GroupHitboxes {
-    pub fn get(name: &SharedString, cx: &mut App) -> Option<HitboxId> {
+    pub fn get(name: &SharedString, cx: &mut App) -> Option<HitboxKey> {
         cx.default_global::<Self>()
             .0
             .get(name)
@@ -3937,12 +3950,12 @@ impl GroupHitboxes {
             .cloned()
     }
 
-    pub fn push(name: SharedString, hitbox_id: HitboxId, cx: &mut App) {
+    pub fn push(name: SharedString, hitbox_key: HitboxKey, cx: &mut App) {
         cx.default_global::<Self>()
             .0
             .entry(name)
             .or_default()
-            .push(hitbox_id);
+            .push(hitbox_key);
     }
 
     pub fn pop(name: &SharedString, cx: &mut App) {

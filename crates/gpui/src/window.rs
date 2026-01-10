@@ -580,13 +580,14 @@ pub(crate) type AnyMouseListener =
 
 #[derive(Clone)]
 pub(crate) struct CursorStyleRequest {
-    pub(crate) hitbox_id: Option<HitboxId>,
+    pub(crate) hitbox_key: Option<HitboxKey>,
     pub(crate) style: CursorStyle,
 }
 
 #[derive(Default, Eq, PartialEq)]
 pub(crate) struct HitTest {
     pub(crate) ids: SmallVec<[HitboxId; 8]>,
+    pub(crate) keys: SmallVec<[HitboxKey; 8]>,
     pub(crate) hover_hitbox_count: usize,
 }
 
@@ -617,6 +618,26 @@ pub struct HitboxKey {
     pub element_id: crate::display_list::ComputedElementId,
     /// Index of the hitbox within the element (most elements have 1).
     pub local_index: u16,
+}
+
+impl HitboxKey {
+    /// Checks if the hitbox with this key is currently hovered. See [`Hitbox::is_hovered`] for
+    /// details.
+    pub fn is_hovered(self, window: &Window) -> bool {
+        let hit_test = &window.mouse_hit_test;
+        for key in hit_test.keys.iter().take(hit_test.hover_hitbox_count) {
+            if self == *key {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Checks if the hitbox contains the mouse and should handle scroll events. See
+    /// [`Hitbox::should_handle_scroll`] for details.
+    pub fn should_handle_scroll(self, window: &Window) -> bool {
+        window.mouse_hit_test.keys.contains(&self)
+    }
 }
 
 impl HitboxId {
@@ -687,7 +708,7 @@ impl Hitbox {
     /// hover styling, etc. In contrast, scrolling is about finding the current outer scrollable
     /// container.
     pub fn is_hovered(&self, window: &Window) -> bool {
-        self.id.is_hovered(window)
+        self.key.is_hovered(window)
     }
 
     /// Checks if the hitbox contains the mouse and should handle scroll events. Typically this
@@ -697,7 +718,7 @@ impl Hitbox {
     /// This can return `false` even when the hitbox contains the mouse, if a hitbox in front of
     /// this sets `HitboxBehavior::BlockMouse` (`InteractiveElement::occlude`).
     pub fn should_handle_scroll(&self, window: &Window) -> bool {
-        self.id.should_handle_scroll(window)
+        self.key.should_handle_scroll(window)
     }
 }
 
@@ -943,10 +964,10 @@ impl Frame {
         self.cursor_styles
             .iter()
             .rev()
-            .fold_while(None, |style, request| match request.hitbox_id {
+            .fold_while(None, |style, request| match request.hitbox_key {
                 None => Done(Some(request.style)),
-                Some(hitbox_id) => Continue(
-                    style.or_else(|| hitbox_id.is_hovered(window).then_some(request.style)),
+                Some(hitbox_key) => Continue(
+                    style.or_else(|| hitbox_key.is_hovered(window).then_some(request.style)),
                 ),
             })
             .into_inner()
@@ -959,6 +980,7 @@ impl Frame {
             let bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
             if bounds.contains(&position) {
                 hit_test.ids.push(hitbox.id);
+                hit_test.keys.push(hitbox.key);
                 if !set_hover_hitbox_count
                     && hitbox.behavior == HitboxBehavior::BlockMouseExceptScroll
                 {
@@ -2492,6 +2514,13 @@ impl Window {
         self.rendered_frame.hit_test(position).ids
     }
 
+    /// Hit-test the rendered frame at the given window position.
+    ///
+    /// Returns hitbox keys from topmost to bottommost.
+    pub fn hit_test_keys(&self, position: Point<Pixels>) -> SmallVec<[HitboxKey; 8]> {
+        self.rendered_frame.hit_test(position).keys
+    }
+
     /// The current state of the keyboard's modifiers
     pub fn modifiers(&self) -> Modifiers {
         self.modifiers
@@ -3539,7 +3568,7 @@ impl Window {
     pub fn set_cursor_style(&mut self, style: CursorStyle, hitbox: &Hitbox) {
         self.invalidator.debug_assert_paint();
         self.next_frame.cursor_styles.push(CursorStyleRequest {
-            hitbox_id: Some(hitbox.id),
+            hitbox_key: Some(hitbox.key),
             style,
         });
     }
@@ -3551,7 +3580,7 @@ impl Window {
     pub fn set_window_cursor_style(&mut self, style: CursorStyle) {
         self.invalidator.debug_assert_paint();
         self.next_frame.cursor_styles.push(CursorStyleRequest {
-            hitbox_id: None,
+            hitbox_key: None,
             style,
         })
     }
