@@ -2732,7 +2732,7 @@ impl Interactivity {
                                                 window,
                                                 cx,
                                             );
-                                            self.paint_scroll_listener(hitbox, &style, window, cx);
+                                            self.paint_scroll_listener(global_id, hitbox, &style, window, cx);
                                         }
 
                                         self.paint_keyboard_listeners(window, cx);
@@ -3369,6 +3369,7 @@ impl Interactivity {
 
     fn paint_scroll_listener(
         &self,
+        global_id: Option<&GlobalElementId>,
         hitbox: &Hitbox,
         style: &Style,
         window: &mut Window,
@@ -3385,14 +3386,20 @@ impl Interactivity {
             // P0.3: Determine if this is a layer-based scroll container.
             // Layer containers use tiled rendering and don't need view invalidation on scroll.
             // This replicates the logic from should_create_layer().
-            let is_layer_container = self.element_id.is_some() && {
+            let layer_global_id = if self.element_id.is_some() {
                 let bounds = hitbox.bounds;
                 let content_size = self.content_size;
                 let is_scroll = overflow.x == Overflow::Scroll || overflow.y == Overflow::Scroll;
                 let min_excess = Pixels(256.0);
                 let large_content = content_size.width > bounds.size.width + min_excess
                     || content_size.height > bounds.size.height + min_excess;
-                is_scroll && large_content
+                if is_scroll && large_content {
+                    global_id.cloned()
+                } else {
+                    None
+                }
+            } else {
+                None
             };
 
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
@@ -3427,12 +3434,27 @@ impl Interactivity {
                     scroll_offset.y += delta_y;
                     scroll_offset.x += delta_x;
                     if *scroll_offset != old_scroll_offset {
-                        // P0.3: For layer-based scroll containers, use refresh() instead of notify().
-                        // This schedules a frame without invalidating the view tree, since
-                        // layer DisplayLists are scroll-offset invariant after P0.2.
-                        if is_layer_container {
-                            window.refresh();
+                        // P2: For layer-based scroll containers, update layer properties directly
+                        // and use compositor-only update instead of full draw.
+                        if let Some(ref gid) = layer_global_id {
+                            // Update the layer's scroll_offset and content_origin
+                            let layer_id = window.layer_tree().find_by_element_id(gid);
+                            eprintln!("[SCROLL] layer lookup gid={:?} -> layer_id={:?}", gid, layer_id);
+                            if let Some(layer_id) = layer_id {
+                                if let Some(layer) = window.layer_tree_mut().get_mut(layer_id) {
+                                    let new_scroll_offset = *scroll_offset;
+                                    layer.scroll_offset = new_scroll_offset;
+                                    // content_origin = viewport_origin + scroll_offset
+                                    layer.content_origin = Point {
+                                        x: layer.viewport_origin.x + new_scroll_offset.x,
+                                        y: layer.viewport_origin.y + new_scroll_offset.y,
+                                    };
+                                    eprintln!("[SCROLL] Updated layer content_origin={:?}", layer.content_origin);
+                                }
+                            }
+                            window.request_composite_only();
                         } else {
+                            eprintln!("[SCROLL] No layer_global_id, calling notify");
                             cx.notify(current_view);
                         }
                     }

@@ -207,10 +207,14 @@ impl WindowInvalidator {
     pub fn invalidate_view(&self, entity: EntityId, cx: &mut App) -> bool {
         let mut inner = self.inner.borrow_mut();
         // If content is being invalidated, compositor-only updates are no longer sufficient.
+        let was_composite_only = inner.composite_only;
         inner.composite_only = false;
         inner.dirty_views.insert(entity);
         if inner.draw_phase == DrawPhase::None {
             inner.dirty = true;
+            if was_composite_only {
+                eprintln!("[INVALIDATE_VIEW] was composite_only, now dirty! entity={:?}", entity);
+            }
             cx.push_effect(Effect::Notify { emitter: entity });
             true
         } else {
@@ -603,6 +607,18 @@ pub enum WindowControlArea {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct HitboxId(u64);
 
+/// Stable identity for a hitbox, derived from the owning element's identity plus a per-element index.
+///
+/// This is designed to survive repaint/rebuild of unrelated subtrees so compositor-driven input
+/// state (hover, capture) can persist across frames.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct HitboxKey {
+    /// Identity of the element that inserted this hitbox.
+    pub element_id: crate::display_list::ComputedElementId,
+    /// Index of the hitbox within the element (most elements have 1).
+    pub local_index: u16,
+}
+
 impl HitboxId {
     /// Checks if the hitbox with this ID is currently hovered. Except when handling
     /// `ScrollWheelEvent`, this is typically what you want when determining whether to handle mouse
@@ -644,6 +660,8 @@ impl Default for HitboxId {
 pub struct Hitbox {
     /// A unique identifier for the hitbox.
     pub id: HitboxId,
+    /// Stable identity for this hitbox (per-element).
+    pub key: HitboxKey,
     /// The bounds of the hitbox.
     #[deref]
     pub bounds: Bounds<Pixels>,
@@ -1030,6 +1048,12 @@ pub struct Window {
     /// Stack of child counters for per-element caching.
     /// Each entry tracks how many children have been painted at that level.
     element_child_counters: Vec<u32>,
+    /// Stack of computed element IDs during prepaint.
+    /// Used to derive stable `HitboxKey`s for hitboxes inserted in prepaint.
+    prepaint_computed_element_id_stack: Vec<crate::display_list::ComputedElementId>,
+    /// Stack of per-element hitbox counters during prepaint.
+    /// Used to assign `HitboxKey.local_index`.
+    prepaint_hitbox_local_index_stack: Vec<u16>,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -1328,6 +1352,8 @@ impl Window {
 
                 // Composite-only updates require presenting, but do not require a full draw().
                 let composite_only = invalidator.needs_composite_only();
+                let is_dirty = invalidator.is_dirty();
+                eprintln!("[FRAME] dirty={} composite_only={} force_render={}", is_dirty, composite_only, request_frame_options.force_render);
 
                 // Keep presenting if input was recently arriving at a high rate (>= 60fps).
                 // Once high-rate input is detected, we sustain presentation for 1 second
@@ -1337,7 +1363,8 @@ impl Window {
                     || composite_only
                     || (active.get() && input_rate_tracker.borrow_mut().is_high_rate());
 
-                if invalidator.is_dirty() || request_frame_options.force_render {
+                if is_dirty || request_frame_options.force_render {
+                    eprintln!("[FRAME] Taking FULL DRAW path");
                     measure("frame duration", || {
                         handle
                             .update(&mut cx, |_, window, cx| {
@@ -1348,6 +1375,7 @@ impl Window {
                             .log_err();
                     })
                 } else if composite_only {
+                    eprintln!("[FRAME] Taking COMPOSITE_ONLY path");
                     handle
                         .update(&mut cx, |_, window, _| {
                             window.composite_only();
@@ -1536,6 +1564,8 @@ impl Window {
             layer_tree: crate::layer::LayerTree::new(),
             element_path_stack: Vec::new(),
             element_child_counters: Vec::new(),
+            prepaint_computed_element_id_stack: Vec::new(),
+            prepaint_hitbox_local_index_stack: Vec::new(),
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
@@ -2493,6 +2523,9 @@ impl Window {
         // Reset element path tracking for per-element caching
         self.element_path_stack.clear();
         self.element_child_counters.clear();
+        // Reset prepaint identity tracking for hitbox keys.
+        self.prepaint_computed_element_id_stack.clear();
+        self.prepaint_hitbox_local_index_stack.clear();
         // Phase 5: Reset frame stats
         self.view_stats.reset();
         cx.entities.clear_accessed();
@@ -2622,10 +2655,13 @@ impl Window {
             );
         }
 
-        // Collect all tile sprites from scroll layers
+        // Collect all tile sprites from scroll layers and update hitboxes
         let mut all_tile_sprites = Vec::new();
         let layer_count = self.layer_tree.layers_for_composite().count();
         eprintln!("[COMPOSITE_ONLY] layer_count={}", layer_count);
+
+        // Collect layer data for hitbox updates (layer_id, content_origin, retained_hitboxes, hitbox_range)
+        let mut layer_hitbox_updates: Vec<(Point<Pixels>, Vec<crate::layer::RetainedHitbox>, std::ops::Range<usize>)> = Vec::new();
 
         for layer in self.layer_tree.layers_for_composite() {
             let mut sprites = layer.emit_tile_sprites();
@@ -2637,10 +2673,21 @@ impl Window {
                 }
             }
             eprintln!(
-                "[COMPOSITE_ONLY] layer {:?} reason={:?} has_element_id={} emitted {} sprites",
-                layer.id, layer.reason, layer.element_id.is_some(), sprites.len()
+                "[COMPOSITE_ONLY] layer {:?} reason={:?} has_element_id={} emitted {} sprites retained_hitboxes={}",
+                layer.id, layer.reason, layer.element_id.is_some(), sprites.len(), layer.retained_hitboxes.len()
             );
             all_tile_sprites.extend(sprites);
+
+            // Collect hitbox update data for layers with retained hitboxes
+            if !layer.retained_hitboxes.is_empty() {
+                if let Some(range) = layer.hitbox_range.clone() {
+                    layer_hitbox_updates.push((
+                        layer.content_origin,
+                        layer.retained_hitboxes.clone(),
+                        range,
+                    ));
+                }
+            }
         }
 
         // Ensure the scene's TileSprites remain sorted by order for batch iteration.
@@ -2650,11 +2697,22 @@ impl Window {
         // Replace tile sprites in the rendered scene
         self.rendered_frame.scene.replace_tile_sprites(all_tile_sprites);
 
-        // Note: We don't update hitboxes here because that would require tracking
-        // which hitboxes belong to which layer. For now, hitboxes from the last
-        // full draw are preserved. This is acceptable for scroll because the
-        // relative positions within the scroll container don't change.
-        // TODO: Properly track layer hitboxes for compositor-only updates.
+        // P2: Update hitboxes for each layer with retained hitboxes.
+        // Transform retained hitboxes from layer-local coords to window coords using
+        // the current content_origin (which includes the updated scroll offset).
+        for (content_origin, retained_hitboxes, range) in layer_hitbox_updates {
+            eprintln!(
+                "[COMPOSITE_ONLY] Updating {} hitboxes in range {:?} with content_origin={:?}",
+                retained_hitboxes.len(), range, content_origin
+            );
+            // Update each hitbox in the range with its transformed position
+            for (i, retained) in retained_hitboxes.iter().enumerate() {
+                let hitbox_idx = range.start + i;
+                if hitbox_idx < range.end && hitbox_idx < self.rendered_frame.hitboxes.len() {
+                    self.rendered_frame.hitboxes[hitbox_idx] = retained.to_hitbox(content_origin);
+                }
+            }
+        }
 
         // Update mouse hit test with current hitboxes
         self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position);
@@ -2784,6 +2842,13 @@ impl Window {
         }
 
         self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
+
+        // Reset element identity tracking before paint. Prepaint computes element IDs to seed
+        // stable `HitboxKey`s; paint uses the same identity stacks for per-element caching.
+        debug_assert!(self.prepaint_computed_element_id_stack.is_empty());
+        debug_assert!(self.prepaint_hitbox_local_index_stack.is_empty());
+        self.element_path_stack.clear();
+        self.element_child_counters.clear();
 
         // Now actually paint the elements.
         self.invalidator.set_phase(DrawPhase::Paint);
@@ -3815,7 +3880,9 @@ impl Window {
     /// This enables automatic caching without requiring explicit element IDs.
     ///
     /// Note: This pushes onto the element path stack to track position
-    /// for child elements. The corresponding pop happens in finalize_element_paint().
+    /// for child elements. The corresponding pop happens via:
+    /// - paint: `finalize_element_paint` / `finalize_element_subtree_skip` / `pop_element_path`
+    /// - prepaint: `end_element_prepaint_identity`
     pub(crate) fn compute_element_id<E: 'static>(
         &mut self,
         global_id: Option<&GlobalElementId>,
@@ -3853,6 +3920,21 @@ impl Window {
         self.element_child_counters.push(0);
 
         computed_id
+    }
+
+    pub(crate) fn begin_element_prepaint_identity(
+        &mut self,
+        id: crate::display_list::ComputedElementId,
+    ) {
+        self.prepaint_computed_element_id_stack.push(id);
+        self.prepaint_hitbox_local_index_stack.push(0);
+    }
+
+    pub(crate) fn end_element_prepaint_identity(&mut self) {
+        self.prepaint_computed_element_id_stack.pop();
+        self.prepaint_hitbox_local_index_stack.pop();
+        // Pop from element path stack to balance the push in compute_element_id.
+        self.pop_element_path();
     }
 
     /// Begin per-element tracking in the current layer's DisplayList (Phase 20).
@@ -4007,6 +4089,12 @@ impl Window {
     pub fn transact<T, U>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, U>) -> Result<T, U> {
         self.invalidator.debug_assert_prepaint();
         let index = self.prepaint_index();
+        // Prepaint may be retried (autoscroll). Restore identity stacks on failure so computed IDs
+        // and hitbox keys remain stable across retries.
+        let element_path_stack = self.element_path_stack.clone();
+        let element_child_counters = self.element_child_counters.clone();
+        let prepaint_computed_element_id_stack = self.prepaint_computed_element_id_stack.clone();
+        let prepaint_hitbox_local_index_stack = self.prepaint_hitbox_local_index_stack.clone();
         let result = f(self);
         if result.is_err() {
             self.next_frame.hitboxes.truncate(index.hitboxes_index);
@@ -4023,6 +4111,10 @@ impl Window {
                 .accessed_element_states
                 .truncate(index.accessed_element_states_index);
             self.text_system.truncate_layouts(index.line_layout_index);
+            self.element_path_stack = element_path_stack;
+            self.element_child_counters = element_child_counters;
+            self.prepaint_computed_element_id_stack = prepaint_computed_element_id_stack;
+            self.prepaint_hitbox_local_index_stack = prepaint_hitbox_local_index_stack;
         }
         result
     }
@@ -5153,11 +5245,27 @@ impl Window {
     pub fn insert_hitbox(&mut self, bounds: Bounds<Pixels>, behavior: HitboxBehavior) -> Hitbox {
         self.invalidator.debug_assert_prepaint();
 
+        let element_id = self
+            .prepaint_computed_element_id_stack
+            .last()
+            .copied()
+            .expect("insert_hitbox must be called during element prepaint");
+        let local_index = self
+            .prepaint_hitbox_local_index_stack
+            .last_mut()
+            .expect("insert_hitbox must be called during element prepaint");
+        let key = HitboxKey {
+            element_id,
+            local_index: *local_index,
+        };
+        *local_index = local_index.saturating_add(1);
+
         let content_mask = self.content_mask();
         let mut id = self.next_hitbox_id;
         self.next_hitbox_id = self.next_hitbox_id.next();
         let hitbox = Hitbox {
             id,
+            key,
             bounds,
             content_mask,
             behavior,

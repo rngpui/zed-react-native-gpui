@@ -22,7 +22,7 @@
 use crate::display_list::DisplayList;
 use crate::property_trees::PropertyTrees;
 use crate::scene::{TileCoord, TileKey, TileSprite, TransformationMatrix};
-use crate::window::{AnyMouseListener, Hitbox};
+use crate::window::{AnyMouseListener, Hitbox, HitboxKey};
 use crate::{
     point, size, Bounds, ContentMask, GlobalElementId, HitboxBehavior, HitboxId, Pixels, Point,
     ScaledPixels, Size,
@@ -67,6 +67,8 @@ pub enum LayerReason {
 pub struct RetainedHitbox {
     /// The original hitbox ID (preserved so existing mouse listeners work).
     pub id: HitboxId,
+    /// Stable identity for this hitbox.
+    pub key: HitboxKey,
     /// Bounds in layer-local (content) coordinates.
     /// To get window coordinates: origin + layer.content_origin
     pub bounds: Bounds<Pixels>,
@@ -81,6 +83,7 @@ impl RetainedHitbox {
     pub fn from_hitbox(hitbox: &Hitbox, content_origin: Point<Pixels>) -> Self {
         Self {
             id: hitbox.id,
+            key: hitbox.key,
             bounds: Bounds {
                 origin: Point {
                     x: hitbox.bounds.origin.x - content_origin.x,
@@ -105,6 +108,7 @@ impl RetainedHitbox {
     pub fn to_hitbox(&self, content_origin: Point<Pixels>) -> Hitbox {
         Hitbox {
             id: self.id,
+            key: self.key,
             bounds: Bounds {
                 origin: Point {
                     x: self.bounds.origin.x + content_origin.x,
@@ -729,6 +733,16 @@ mod tests {
     use crate::ElementId;
     use std::sync::Arc;
 
+    fn test_hitbox_key() -> HitboxKey {
+        use std::any::TypeId;
+
+        let local_id = crate::display_list::LocalElementId::Index(0);
+        HitboxKey {
+            element_id: crate::display_list::ComputedElementId::new(0, &local_id, TypeId::of::<()>()),
+            local_index: 0,
+        }
+    }
+
     fn test_element_id(n: u64) -> GlobalElementId {
         GlobalElementId(Arc::from([ElementId::Integer(n)]))
     }
@@ -803,6 +817,7 @@ mod tests {
         // and verify to_hitbox transforms them correctly
         let retained = RetainedHitbox {
             id: HitboxId::default(), // Uses default ID
+            key: test_hitbox_key(),
             bounds: Bounds {
                 origin: Point {
                     x: px(50.0),  // layer-local
@@ -852,6 +867,7 @@ mod tests {
         // This represents a hitbox at (100, 500) in content space
         let retained = RetainedHitbox {
             id: HitboxId::default(),
+            key: test_hitbox_key(),
             bounds: Bounds {
                 origin: Point {
                     x: px(100.0),
@@ -911,6 +927,7 @@ mod tests {
             let layer = tree.get_mut(layer_id).unwrap();
             layer.retained_hitboxes.push(RetainedHitbox {
                 id: HitboxId::default(),
+                key: test_hitbox_key(),
                 bounds: Bounds {
                     origin: Point {
                         x: px(0.0),

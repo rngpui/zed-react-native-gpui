@@ -474,6 +474,10 @@ impl<E: Element> Drawable<E> {
                     debug_assert_eq!(&*global_id.as_ref().unwrap().0, &*window.element_id_stack);
                 }
 
+                // Compute stable identity during prepaint so hitboxes can derive stable keys.
+                let computed_id = window.compute_element_id::<E>(global_id.as_ref());
+                window.begin_element_prepaint_identity(computed_id);
+
                 let bounds = window.layout_bounds(layout_id);
                 let node_id = window.next_frame.dispatch_tree.push_node();
                 let prepaint = self.element.prepaint(
@@ -485,6 +489,8 @@ impl<E: Element> Drawable<E> {
                     cx,
                 );
                 window.next_frame.dispatch_tree.pop_node();
+
+                window.end_element_prepaint_identity();
 
                 if global_id.is_some() {
                     window.element_id_stack.pop();
