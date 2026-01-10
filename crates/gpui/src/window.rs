@@ -940,6 +940,9 @@ pub struct Window {
     render_layers: FxHashMap<ElementId, RenderLayerRegistration>,
     next_render_layer_seq: usize,
     pub(crate) dirty_views: FxHashSet<EntityId>,
+    /// Cache of view sizes for automatic view caching.
+    /// Allows skipping render() in request_layout when views are clean.
+    pub(crate) view_cache_sizes: FxHashMap<EntityId, Size<Pixels>>,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
     default_prevented: bool,
@@ -1428,6 +1431,7 @@ impl Window {
             render_layers: FxHashMap::default(),
             next_render_layer_seq: 0,
             dirty_views: FxHashSet::default(),
+            view_cache_sizes: FxHashMap::default(),
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
             default_prevented: true,

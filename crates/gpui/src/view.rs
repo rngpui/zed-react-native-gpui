@@ -167,19 +167,38 @@ impl Element for AnyView {
         window.with_rendered_view(self.entity_id(), |window| {
             // Disable caching when inspecting so that mouse_hit_test has all hitboxes.
             let caching_disabled = window.is_inspector_picking(cx);
-            match self.cached_style.as_ref() {
-                Some(style) if !caching_disabled => {
+
+            // Explicit cached_style path (user-provided style)
+            if let Some(style) = self.cached_style.as_ref() {
+                if !caching_disabled {
                     let mut root_style = Style::default();
                     root_style.refine(style);
                     let layout_id = window.request_layout(root_style, None, cx);
-                    (layout_id, None)
-                }
-                _ => {
-                    let mut element = (self.render)(self, window, cx);
-                    let layout_id = element.request_layout(window, cx);
-                    (layout_id, Some(element))
+                    return (layout_id, None);
                 }
             }
+
+            // Automatic view caching: if view is clean and we have a cached size,
+            // skip render() and use fixed-size layout.
+            let entity_id = self.entity_id();
+            let can_use_cache = !caching_disabled
+                && !window.refreshing
+                && !window.dirty_views.contains(&entity_id);
+
+            if can_use_cache {
+                if let Some(&cached_size) = window.view_cache_sizes.get(&entity_id) {
+                    // Use fixed-size layout matching cached bounds
+                    let mut root_style = Style::default();
+                    root_style.size = cached_size.map(|px| px.into());
+                    let layout_id = window.request_layout(root_style, None, cx);
+                    return (layout_id, None);
+                }
+            }
+
+            // Default path: render the element
+            let mut element = (self.render)(self, window, cx);
+            let layout_id = element.request_layout(window, cx);
+            (layout_id, Some(element))
         })
     }
 
@@ -193,9 +212,13 @@ impl Element for AnyView {
         cx: &mut App,
     ) -> Option<AnyElement> {
         window.set_view_id(self.entity_id());
-        window.with_rendered_view(self.entity_id(), |window| {
+        let entity_id = self.entity_id();
+        window.with_rendered_view(entity_id, |window| {
+            // If element was rendered in request_layout, prepaint it and cache the size.
             if let Some(mut element) = element.take() {
                 element.prepaint(window, cx);
+                // Update cached size for automatic view caching
+                window.view_cache_sizes.insert(entity_id, bounds.size);
                 return Some(element);
             }
 
@@ -209,7 +232,7 @@ impl Element for AnyView {
                         && element_state.cache_key.bounds == bounds
                         && element_state.cache_key.content_mask == content_mask
                         && element_state.cache_key.text_style == text_style
-                        && !window.dirty_views.contains(&self.entity_id())
+                        && !window.dirty_views.contains(&entity_id)
                         && !window.refreshing
                     {
                         let prepaint_start = window.prepaint_index();
@@ -233,6 +256,9 @@ impl Element for AnyView {
 
                     let prepaint_end = window.prepaint_index();
                     window.refreshing = refreshing;
+
+                    // Update cached size for automatic view caching
+                    window.view_cache_sizes.insert(entity_id, bounds.size);
 
                     (
                         Some(element),
@@ -264,7 +290,14 @@ impl Element for AnyView {
     ) {
         window.with_rendered_view(self.entity_id(), |window| {
             let caching_disabled = window.is_inspector_picking(cx);
-            if self.cached_style.is_some() && !caching_disabled {
+
+            // Use paint caching if:
+            // 1. Explicit cached_style is set, OR
+            // 2. Automatic caching (element is None from cache hit in prepaint)
+            let use_paint_caching =
+                !caching_disabled && (self.cached_style.is_some() || element.is_none());
+
+            if use_paint_caching {
                 window.with_element_state::<AnyViewState, _>(
                     global_id.unwrap(),
                     |element_state, window| {
