@@ -284,8 +284,8 @@ impl Render for CacheBench {
                                 let bg_color = hsl_to_rgb(hue, 0.6, 0.3);
                                 let border_color = hsl_to_rgb(hue, 0.8, 0.5);
 
-                                // Note: Cells intentionally have no ID to avoid nested RTT captures.
-                                // The grid-container handles RTT for the entire grid.
+                                // Cells don't need explicit IDs - ComputedElementId provides
+                                // automatic stable identity based on tree position.
                                 div()
                                     .w(px(CELL_SIZE))
                                     .h(px(CELL_SIZE))

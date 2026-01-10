@@ -1017,6 +1017,8 @@ pub struct Window {
     pub(crate) view_cache_sizes: FxHashMap<EntityId, Size<Pixels>>,
     /// View rendering statistics (Phase 5: Instrumentation).
     view_stats: ViewStats,
+    /// Previous frame's statistics for reporting (Phase 5: Instrumentation).
+    previous_frame_stats: FrameStats,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
     default_prevented: bool,
@@ -1507,6 +1509,7 @@ impl Window {
             dirty_views: FxHashSet::default(),
             view_cache_sizes: FxHashMap::default(),
             view_stats: ViewStats::default(),
+            previous_frame_stats: FrameStats::default(),
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
             default_prevented: true,
@@ -2149,15 +2152,22 @@ impl Window {
         self.view_stats.views_skipped += 1;
     }
 
-    /// Get the current frame's statistics.
+    /// Get the previous frame's statistics.
     ///
     /// Returns combined statistics from all caching layers:
     /// - View rendering (rendered vs skipped)
     /// - Layout cache (hits vs misses)
     /// - Paint cache (element hits/misses, subtree skips, dirty regions)
     ///
-    /// Statistics are reset at the start of each frame in `draw()`.
+    /// Note: Returns stats from the PREVIOUS frame because the current frame's
+    /// stats are still being accumulated. Stats are captured at the end of each
+    /// frame in `draw()`.
     pub fn frame_stats(&self) -> FrameStats {
+        self.previous_frame_stats.clone()
+    }
+
+    /// Collect the current frame's statistics (internal use).
+    fn collect_frame_stats(&self) -> FrameStats {
         // Get layout stats
         let layout_stats = self
             .layout_engine
@@ -2383,6 +2393,9 @@ impl Window {
         self.layout_engine.as_mut().unwrap().end_frame();
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
+
+        // Phase 5: Capture frame stats before they're reset in the next frame
+        self.previous_frame_stats = self.collect_frame_stats();
 
         self.invalidator.set_phase(DrawPhase::Focus);
         let previous_focus_path = self.rendered_frame.focus_path();
@@ -3713,6 +3726,15 @@ impl Window {
         if let Some(ref mut display_list) = layer.display_list {
             display_list.finalize_element();
         }
+    }
+
+    /// Pop the element path stack without doing any caching work.
+    ///
+    /// Called to balance compute_element_id's push when an element doesn't use caching.
+    /// This ensures the path stack stays consistent for child index computation.
+    pub(crate) fn pop_element_path(&mut self) {
+        self.element_path_stack.pop();
+        self.element_child_counters.pop();
     }
 
     /// Perform prepaint on child elements in a "retryable" manner, so that any side effects

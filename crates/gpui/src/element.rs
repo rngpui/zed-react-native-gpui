@@ -524,7 +524,11 @@ impl<E: Element> Drawable<E> {
                 }
 
                 // Phase 20: Per-element caching
-                // Only do the tracking overhead if the element supports caching (non-zero hash)
+                // Compute element ID and maintain path stack for ALL elements.
+                // This ensures consistent child indices for cache key stability.
+                let computed_id = window.compute_element_id::<E>(global_id.as_ref());
+
+                // Only do caching overhead if the element supports it (non-zero hash)
                 let input_hash = self
                     .element
                     .content_hash(global_id.as_ref(), bounds, window, cx)
@@ -535,7 +539,6 @@ impl<E: Element> Drawable<E> {
                 if input_hash != 0 {
                     // Element supports caching - do full per-element tracking
                     use crate::display_list::PaintCacheResult;
-                    let computed_id = window.compute_element_id::<E>(global_id.as_ref());
                     let cache_result = window.begin_element_paint(computed_id, input_hash);
 
                     match cache_result {
@@ -560,7 +563,7 @@ impl<E: Element> Drawable<E> {
                         }
                     }
                 } else {
-                    // No caching - skip tracking overhead, paint directly
+                    // No caching - paint directly, but still maintain path stack
                     self.element.paint(
                         global_id.as_ref(),
                         inspector_id.as_ref(),
@@ -570,6 +573,8 @@ impl<E: Element> Drawable<E> {
                         window,
                         cx,
                     );
+                    // Pop path stack to balance the push in compute_element_id
+                    window.pop_element_path();
                 }
 
                 if global_id.is_some() {
