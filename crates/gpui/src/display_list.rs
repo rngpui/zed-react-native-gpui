@@ -40,6 +40,40 @@ use smallvec::SmallVec;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Statistics for paint cache performance (Phase 5: Instrumentation).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct PaintCacheStats {
+    /// Number of element cache hits (own items reused)
+    pub element_hits: u64,
+    /// Number of element cache misses (element repainted)
+    pub element_misses: u64,
+    /// Number of subtree skips (entire subtree reused, paint() not called)
+    pub subtree_skips: u64,
+    /// Number of elements painted (includes both hits and misses)
+    pub elements_painted: u64,
+    /// Number of dirty regions added
+    pub dirty_regions_added: u64,
+}
+
+impl PaintCacheStats {
+    /// Reset all counters to zero.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// Result of checking element paint cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaintCacheResult {
+    /// Cache miss - element must repaint.
+    Miss,
+    /// Cache hit for this element's own items, but children still need to paint.
+    Hit,
+    /// Entire subtree can be skipped - element AND all children are cached.
+    /// The caller should NOT call element.paint() at all.
+    SubtreeSkip,
+}
+
 /// Unique identifier for a display list layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct DisplayListId(pub u64);
@@ -397,6 +431,9 @@ pub(crate) struct ElementEntry {
     /// Range of items owned directly by this element AFTER children.
     /// Items in this range are typically borders (painted on top of content).
     pub items_after_children: Range<usize>,
+    /// Full range of items including this element and all descendants (Phase 3: Subtree Skip).
+    /// When subtree_cache_valid is true, this entire range can be copied to skip subtree paint.
+    pub subtree_items: Range<usize>,
     /// Combined bounds of own items only (not including children).
     pub own_bounds: Bounds<Pixels>,
     /// Hash of element inputs (for change detection).
@@ -405,6 +442,14 @@ pub(crate) struct ElementEntry {
     /// IDs of child elements painted during this element's paint.
     /// Used for hierarchical invalidation if needed.
     pub children: SmallVec<[ComputedElementId; 8]>,
+    /// True if this element AND all its descendants had cache hits (Phase 3: Subtree Skip).
+    /// When true, the entire subtree_items range can be copied on the next frame
+    /// if input_hash still matches.
+    pub subtree_cache_valid: bool,
+    /// True if this element registered any event handlers during paint.
+    /// Elements with event handlers cannot use SubtreeSkip because handlers
+    /// must be re-registered every frame.
+    pub has_event_handlers: bool,
 }
 
 impl ElementEntry {
@@ -444,6 +489,8 @@ struct ElementPaintStackEntry {
     /// copied from the previous frame. New items for this element should
     /// be skipped (but children still paint normally).
     cache_hit: bool,
+    /// True if this element registered any event handlers during paint.
+    has_event_handlers: bool,
 }
 
 /// Grid-based spatial index for fast item lookup by bounds.
@@ -740,7 +787,17 @@ impl DisplayList {
             input_hash,
             children: SmallVec::new(),
             cache_hit,
+            has_event_handlers: false,
         });
+    }
+
+    /// Mark the current element as having registered event handlers.
+    /// Called from Window::on_mouse_event to track which elements need
+    /// to re-register handlers every frame (cannot use SubtreeSkip).
+    pub fn mark_current_element_has_handlers(&mut self) {
+        if let Some(entry) = self.element_paint_stack.last_mut() {
+            entry.has_event_handlers = true;
+        }
     }
 
     /// Check if the current element has a cache hit (Phase 20).
@@ -774,6 +831,7 @@ impl DisplayList {
     /// 1. Records the element's own item range and bounds
     /// 2. Registers this element as a child of the parent (if any)
     /// 3. Stores the entry for later lookup
+    /// 4. Computes subtree_cache_valid for Phase 3 subtree skip optimization
     pub fn finalize_element(&mut self) -> Option<Bounds<Pixels>> {
         let entry = self.element_paint_stack.pop()?;
         let current_len = self.items.len();
@@ -787,6 +845,9 @@ impl DisplayList {
         let items_after_children_start = entry.children_items_end.unwrap_or(own_items_end);
         let items_after_children = items_after_children_start..current_len;
 
+        // Full subtree range (Phase 3: Subtree Skip)
+        let subtree_items = entry.start_index..current_len;
+
         // Calculate bounds of all own items (before + after children)
         let own_bounds = self.calculate_bounds_for_range(entry.start_index, own_items_end);
         let after_bounds = self.calculate_bounds_for_range(items_after_children_start, current_len);
@@ -797,6 +858,33 @@ impl DisplayList {
         } else {
             own_bounds.union(&after_bounds)
         };
+
+        // Check if any child has event handlers (propagate up the tree)
+        let any_child_has_handlers = entry.children.iter().any(|child_id| {
+            self.element_entries
+                .get(child_id)
+                .is_some_and(|child_entry| child_entry.has_event_handlers)
+        });
+        let has_event_handlers = entry.has_event_handlers || any_child_has_handlers;
+
+        // Phase 3: Subtree Skip - check if entire subtree can be safely skipped.
+        // Subtree is valid for skip ONLY if:
+        // 1. This element had a cache hit (entry.cache_hit)
+        // 2. All children also have subtree_cache_valid = true
+        // 3. Neither this element NOR any children have event handlers
+        //    (handlers must be re-registered every frame)
+        let all_children_valid = entry.children.iter().all(|child_id| {
+            self.element_entries
+                .get(child_id)
+                .is_some_and(|child_entry| child_entry.subtree_cache_valid)
+        });
+        let subtree_cache_valid = entry.cache_hit && all_children_valid && !has_event_handlers;
+
+        // Phase 4: Dirty region invalidation.
+        // When an element has a cache miss, mark its bounds as dirty for tile invalidation.
+        if !entry.cache_hit && combined_bounds.size.width.0 > 0.0 && combined_bounds.size.height.0 > 0.0 {
+            self.invalidate_region(combined_bounds);
+        }
 
         // Register this element as a child of the parent and update parent's children_items_end
         if let Some(parent) = self.element_paint_stack.last_mut() {
@@ -811,9 +899,12 @@ impl DisplayList {
             ElementEntry {
                 own_items: entry.start_index..own_items_end,
                 items_after_children,
+                subtree_items,
                 own_bounds: combined_bounds,
                 input_hash: entry.input_hash,
                 children: entry.children,
+                subtree_cache_valid,
+                has_event_handlers,
             },
         );
 

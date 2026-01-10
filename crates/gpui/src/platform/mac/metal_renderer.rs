@@ -2195,6 +2195,10 @@ impl MetalRenderer {
     /// **Threaded Rasterization (Phase 15)**: The CPU-bound work (converting DisplayItems
     /// to Scene primitives via `rasterize_tile()`) is performed in parallel using rayon,
     /// while the GPU work (Metal rendering) remains sequential on the main thread.
+    ///
+    /// **Phase 4 (Dirty Region Invalidation)**: Before rendering tiles, we check dirty
+    /// regions from each display list and mark intersecting tiles for re-rasterization.
+    /// This enables O(dirty_tiles) work instead of O(all_tiles) when content changes.
     fn rasterize_tiles_from_display_lists(&mut self, scene: &Scene) {
         let tile_sprites = &scene.tile_sprites;
         if tile_sprites.is_empty() {
@@ -2204,6 +2208,21 @@ impl MetalRenderer {
         // Get scale factor from layer contents scale
         // macOS retina displays typically use 2.0, non-retina use 1.0
         let scale_factor = self.layer.contents_scale() as f32;
+
+        // Phase 4: Invalidate tiles based on dirty regions from display lists.
+        // This marks tiles for re-rasterization even if their generation hasn't changed.
+        let mut containers_to_clear: Vec<crate::GlobalElementId> = Vec::new();
+        for (container_id, display_list) in &scene.display_lists {
+            let dirty_regions = display_list.dirty_regions();
+            if !dirty_regions.is_empty() {
+                self.tile_cache.invalidate_tiles_for_dirty_regions(
+                    container_id,
+                    dirty_regions,
+                    scale_factor,
+                );
+                containers_to_clear.push(container_id.clone());
+            }
+        }
 
         // Collect tiles that need rendering as TileRasterJobs
         let mut jobs: Vec<TileRasterJob> = Vec::new();
@@ -2227,7 +2246,14 @@ impl MetalRenderer {
                 content_generation,
             );
 
-            if needs_render {
+            // Phase 4: Also check dirty region invalidation
+            let invalidated = self.tile_cache.is_tile_invalidated(
+                container_id,
+                coord,
+                content_generation,
+            );
+
+            if needs_render || invalidated {
                 jobs.push(TileRasterJob {
                     container_id: container_id.clone(),
                     coord,
@@ -2235,6 +2261,11 @@ impl MetalRenderer {
                     priority: TilePriority::VISIBLE,
                 });
             }
+        }
+
+        // Phase 4: Clear invalidated tiles after collecting jobs
+        for container_id in containers_to_clear {
+            self.tile_cache.clear_invalidated_tiles(&container_id);
         }
 
         if jobs.is_empty() {

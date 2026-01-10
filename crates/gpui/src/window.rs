@@ -3463,9 +3463,10 @@ impl Window {
     /// Called at the start of an element's paint() method. Tracks the element's
     /// own display items separately from its children.
     ///
-    /// Returns true if there was a cache hit (element unchanged from previous frame).
-    /// On cache hit, the element's own items will be copied from the previous display list,
-    /// and primitives for this element should be skipped (but children still paint normally).
+    /// Returns:
+    /// - `Miss`: Element changed, must repaint
+    /// - `Hit`: Element's own items cached, but children still need to paint
+    /// - `SubtreeSkip`: Entire subtree cached, skip element.paint() entirely
     ///
     /// Note: Caching only happens when `input_hash != 0`. An input_hash of 0 means
     /// the element should always repaint (default behavior for elements that don't
@@ -3474,23 +3475,28 @@ impl Window {
         &mut self,
         id: crate::display_list::ComputedElementId,
         input_hash: u64,
-    ) -> bool {
+    ) -> crate::display_list::PaintCacheResult {
+        use crate::display_list::PaintCacheResult;
+
         let layer = self.layer_tree.current_layer_mut();
 
         // Check for cache hit in previous frame's display list.
         // Only cache when input_hash != 0 (0 means "always repaint").
-        let cache_hit = if input_hash != 0 {
+        let (cache_hit, subtree_skip) = if input_hash != 0 && !self.refreshing {
             if let Some(ref prev_list) = layer.previous_display_list {
                 if let Some(prev_entry) = prev_list.get_element_entry(&id) {
-                    prev_entry.input_hash == input_hash
+                    let hit = prev_entry.input_hash == input_hash;
+                    // Subtree skip: element cached AND entire subtree was valid last frame
+                    let skip = hit && prev_entry.subtree_cache_valid;
+                    (hit, skip)
                 } else {
-                    false
+                    (false, false)
                 }
             } else {
-                false
+                (false, false)
             }
         } else {
-            false
+            (false, false)
         };
 
         // Begin tracking in current display list FIRST (to set start_index correctly)
@@ -3498,9 +3504,19 @@ impl Window {
             display_list.begin_element(id, input_hash, cache_hit);
         }
 
-        // If cache hit, copy items from previous frame AFTER begin_element
-        // so copied items fall within the element's tracked range
-        if cache_hit {
+        if subtree_skip {
+            // Subtree skip: entire subtree is cached AND has no event handlers.
+            // Copy all items and skip paint() entirely.
+            if let Some(ref prev_list) = layer.previous_display_list {
+                if let Some(prev_entry) = prev_list.get_element_entry(&id) {
+                    if let Some(ref mut current_list) = layer.display_list {
+                        current_list.copy_items_from_range(prev_list, prev_entry.subtree_items.clone());
+                    }
+                }
+            }
+            PaintCacheResult::SubtreeSkip
+        } else if cache_hit {
+            // Normal cache hit: copy only own items, children still paint
             if let Some(ref prev_list) = layer.previous_display_list {
                 if let Some(prev_entry) = prev_list.get_element_entry(&id) {
                     if let Some(ref mut current_list) = layer.display_list {
@@ -3508,9 +3524,10 @@ impl Window {
                     }
                 }
             }
+            PaintCacheResult::Hit
+        } else {
+            PaintCacheResult::Miss
         }
-
-        cache_hit
     }
 
     /// Finalize per-element tracking in the current layer's DisplayList (Phase 20).
@@ -3544,6 +3561,22 @@ impl Window {
         }
 
         // Finalize in display list
+        if let Some(ref mut display_list) = layer.display_list {
+            display_list.finalize_element();
+        }
+    }
+
+    /// Finalize element tracking when entire subtree was skipped (Phase 3: Subtree Skip).
+    ///
+    /// Called instead of finalize_element_paint when begin_element_paint returned SubtreeSkip.
+    /// The subtree items were already copied in begin_element_paint.
+    pub(crate) fn finalize_element_subtree_skip(&mut self) {
+        // Pop from element path stack (to balance push in compute_element_id)
+        self.element_path_stack.pop();
+        self.element_child_counters.pop();
+
+        // Finalize in display list - subtree was already copied
+        let layer = self.layer_tree.current_layer_mut();
         if let Some(ref mut display_list) = layer.display_list {
             display_list.finalize_element();
         }
@@ -4957,6 +4990,14 @@ impl Window {
         mut listener: impl FnMut(&Event, DispatchPhase, &mut Window, &mut App) + 'static,
     ) {
         self.invalidator.debug_assert_paint();
+
+        // Mark current element as having event handlers.
+        // Elements with handlers cannot use SubtreeSkip because handlers
+        // must be re-registered every frame.
+        let layer = self.layer_tree.current_layer_mut();
+        if let Some(ref mut display_list) = layer.display_list {
+            display_list.mark_current_element_has_handlers();
+        }
 
         self.next_frame.mouse_listeners.push(Some(Box::new(
             move |event: &dyn Any, phase: DispatchPhase, window: &mut Window, cx: &mut App| {

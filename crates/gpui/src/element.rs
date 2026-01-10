@@ -534,23 +534,31 @@ impl<E: Element> Drawable<E> {
 
                 if input_hash != 0 {
                     // Element supports caching - do full per-element tracking
+                    use crate::display_list::PaintCacheResult;
                     let computed_id = window.compute_element_id::<E>(global_id.as_ref());
-                    window.begin_element_paint(computed_id, input_hash);
+                    let cache_result = window.begin_element_paint(computed_id, input_hash);
 
-                    // Always call paint() - it handles children and other side effects.
-                    // Caching happens at primitive insertion level: insert_primitive_internal
-                    // checks current_element_has_cache_hit() and skips if cached.
-                    self.element.paint(
-                        global_id.as_ref(),
-                        inspector_id.as_ref(),
-                        bounds,
-                        &mut request_layout,
-                        &mut prepaint,
-                        window,
-                        cx,
-                    );
-
-                    window.finalize_element_paint(computed_id);
+                    match cache_result {
+                        PaintCacheResult::SubtreeSkip => {
+                            // Entire subtree cached AND no event handlers - skip paint() entirely.
+                            // Items already copied in begin_element_paint.
+                            window.finalize_element_subtree_skip();
+                        }
+                        PaintCacheResult::Hit | PaintCacheResult::Miss => {
+                            // Either cache miss (repaint) or hit (own items cached but paint children).
+                            // Caching happens at primitive insertion level.
+                            self.element.paint(
+                                global_id.as_ref(),
+                                inspector_id.as_ref(),
+                                bounds,
+                                &mut request_layout,
+                                &mut prepaint,
+                                window,
+                                cx,
+                            );
+                            window.finalize_element_paint(computed_id);
+                        }
+                    }
                 } else {
                     // No caching - skip tracking overhead, paint directly
                     self.element.paint(
