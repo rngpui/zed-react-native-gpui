@@ -410,6 +410,11 @@ impl LayerTree {
         self.layers.get(&LayerId::ROOT).expect("Root layer should exist")
     }
 
+    /// Iterate over all layers (Phase 5: Instrumentation).
+    pub fn layers(&self) -> impl Iterator<Item = &Layer> {
+        self.layers.values()
+    }
+
     /// Push a layer onto the stack.
     ///
     /// If a layer for this element_id already exists, reuses it (preserving its

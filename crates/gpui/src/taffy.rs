@@ -109,6 +109,11 @@ impl TaffyLayoutEngine {
         self.stats
     }
 
+    /// Returns a copy of the current stats (Phase 5: Instrumentation).
+    pub fn stats(&self) -> LayoutCacheStats {
+        self.stats
+    }
+
     /// Request layout for an element with a known identity.
     /// Reuses the existing Taffy node if available.
     pub fn request_layout_with_id(

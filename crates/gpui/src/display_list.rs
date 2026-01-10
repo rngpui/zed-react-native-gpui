@@ -718,6 +718,8 @@ pub(crate) struct DisplayList {
     /// Stack for tracking element painting state.
     /// Pushed by begin_element_v2(), popped by finalize_element().
     element_paint_stack: Vec<ElementPaintStackEntry>,
+    /// Paint cache statistics for this display list (Phase 5: Instrumentation).
+    stats: PaintCacheStats,
 }
 
 impl DisplayList {
@@ -734,6 +736,7 @@ impl DisplayList {
             // Phase 20: Per-element tracking
             element_entries: FxHashMap::default(),
             element_paint_stack: Vec::new(),
+            stats: PaintCacheStats::default(),
         }
     }
 
@@ -750,6 +753,8 @@ impl DisplayList {
         self.element_entries.clear();
         self.element_paint_stack.clear();
         self.generation += 1;
+        // Phase 5: Reset stats for new frame
+        self.stats.reset();
     }
 
     // ========================================================================
@@ -1024,6 +1029,7 @@ impl DisplayList {
 
         if !dominated {
             self.dirty_regions.push(bounds);
+            self.stats.dirty_regions_added += 1;
         }
     }
 
@@ -1049,6 +1055,33 @@ impl DisplayList {
     /// Get the dirty regions.
     pub fn dirty_regions(&self) -> &[Bounds<Pixels>] {
         &self.dirty_regions
+    }
+
+    // ========================================================================
+    // Phase 5: Instrumentation
+    // ========================================================================
+
+    /// Record a cache hit for an element (element reused own items).
+    pub fn record_element_hit(&mut self) {
+        self.stats.element_hits += 1;
+        self.stats.elements_painted += 1;
+    }
+
+    /// Record a cache miss for an element (element repainted).
+    pub fn record_element_miss(&mut self) {
+        self.stats.element_misses += 1;
+        self.stats.elements_painted += 1;
+    }
+
+    /// Record a subtree skip (entire subtree reused, paint() not called).
+    pub fn record_subtree_skip(&mut self) {
+        self.stats.subtree_skips += 1;
+        self.stats.elements_painted += 1;
+    }
+
+    /// Get the paint cache statistics for this display list.
+    pub fn stats(&self) -> &PaintCacheStats {
+        &self.stats
     }
 
     /// Check if a given bounds intersects any dirty region.

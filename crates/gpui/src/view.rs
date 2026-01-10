@@ -191,11 +191,15 @@ impl Element for AnyView {
                     let mut root_style = Style::default();
                     root_style.size = cached_size.map(|px| px.into());
                     let layout_id = window.request_layout(root_style, None, cx);
+                    // Phase 5: Record view skip
+                    window.record_view_skipped();
                     return (layout_id, None);
                 }
             }
 
             // Default path: render the element
+            // Phase 5: Record view render
+            window.record_view_rendered();
             let mut element = (self.render)(self, window, cx);
             let layout_id = element.request_layout(window, cx);
             (layout_id, Some(element))

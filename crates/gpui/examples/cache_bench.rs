@@ -21,7 +21,7 @@
 use std::time::Instant;
 
 use gpui::{
-    Application, Bounds, Context, LayoutCacheStats, MeasureCacheStats, Render,
+    Application, Bounds, Context, FrameStats, LayoutCacheStats, MeasureCacheStats, Render,
     TextShapeCacheStats, TitlebarOptions, Window, WindowBounds, WindowOptions,
     div, prelude::*, px, rgb, size,
 };
@@ -51,6 +51,7 @@ struct CacheBench {
     text_cache_stats: TextShapeCacheStats,
     measure_cache_stats: MeasureCacheStats,
     layout_cache_stats: LayoutCacheStats,
+    frame_stats: FrameStats,
     frame_count: u64,
 }
 
@@ -62,6 +63,7 @@ impl CacheBench {
             text_cache_stats: TextShapeCacheStats::default(),
             measure_cache_stats: MeasureCacheStats::default(),
             layout_cache_stats: LayoutCacheStats::default(),
+            frame_stats: FrameStats::default(),
             frame_count: 0,
         }
     }
@@ -85,6 +87,8 @@ impl CacheBench {
         self.text_cache_stats = window.take_text_shape_cache_stats();
         self.measure_cache_stats = window.take_measure_cache_stats();
         self.layout_cache_stats = window.take_layout_cache_stats();
+        // Phase 5: Capture frame stats (views, paint cache)
+        self.frame_stats = window.frame_stats();
         self.frame_count += 1;
 
         (fps, avg_frame_time)
@@ -120,6 +124,22 @@ impl Render for CacheBench {
         let layout_total = layout_stats.hits + layout_stats.misses;
         let layout_hit_rate = if layout_total > 0 {
             (layout_stats.hits as f32 / layout_total as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        // Phase 5: View and Paint cache stats
+        let frame_stats = &self.frame_stats;
+        let view_total = frame_stats.views.views_rendered + frame_stats.views.views_skipped;
+        let view_hit_rate = if view_total > 0 {
+            (frame_stats.views.views_skipped as f32 / view_total as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        let paint_total = frame_stats.paint.element_hits + frame_stats.paint.element_misses;
+        let paint_hit_rate = if paint_total > 0 {
+            (frame_stats.paint.element_hits as f32 / paint_total as f32) * 100.0
         } else {
             0.0
         };
@@ -200,6 +220,39 @@ impl Render for CacheBench {
                             .child(stat_box("Misses", format!("{}", layout_stats.misses), rgb(0xf38ba8)))
                             .child(stat_box("Hit Rate", format!("{:.1}%", layout_hit_rate), rgb(0xf9e2af)))
                             .child(stat_box("Pruned", format!("{}", layout_stats.pruned), rgb(0x89dceb))),
+                    )
+                    // Phase 5: View Cache stats
+                    .child(
+                        div()
+                            .text_color(rgb(0x9399b2))
+                            .text_sm()
+                            .mt_2()
+                            .child("View Cache"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_4()
+                            .child(stat_box("Rendered", format!("{}", frame_stats.views.views_rendered), rgb(0xf38ba8)))
+                            .child(stat_box("Skipped", format!("{}", frame_stats.views.views_skipped), rgb(0xa6e3a1)))
+                            .child(stat_box("Hit Rate", format!("{:.1}%", view_hit_rate), rgb(0xf9e2af))),
+                    )
+                    // Phase 5: Paint Cache stats
+                    .child(
+                        div()
+                            .text_color(rgb(0x9399b2))
+                            .text_sm()
+                            .mt_2()
+                            .child("Paint Cache"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_4()
+                            .child(stat_box("Hits", format!("{}", frame_stats.paint.element_hits), rgb(0xa6e3a1)))
+                            .child(stat_box("Misses", format!("{}", frame_stats.paint.element_misses), rgb(0xf38ba8)))
+                            .child(stat_box("Subtree Skips", format!("{}", frame_stats.paint.subtree_skips), rgb(0xcba6f7)))
+                            .child(stat_box("Hit Rate", format!("{:.1}%", paint_hit_rate), rgb(0xf9e2af))),
                     ),
             )
             .child(

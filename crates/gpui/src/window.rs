@@ -68,6 +68,78 @@ pub(crate) const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(864.));
 const DEFAULT_TEXT_SHAPE_CACHE_ENTRIES: usize = 5_000;
 const DEFAULT_MEASURE_CACHE_ENTRIES: usize = 10_000;
 
+// ============================================================================
+// Phase 5: Instrumentation - Frame Statistics
+// ============================================================================
+
+/// Statistics for view rendering (Phase 5: Instrumentation).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct ViewStats {
+    /// Number of views that were rendered (render() called).
+    pub views_rendered: u64,
+    /// Number of views that were skipped (used cached layout/prepaint).
+    pub views_skipped: u64,
+}
+
+impl ViewStats {
+    /// Reset all counters to zero.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// Combined frame statistics for all caching layers (Phase 5: Instrumentation).
+///
+/// Use `Window::frame_stats()` to get the current frame's statistics.
+/// Statistics are reset at the start of each frame.
+#[derive(Default, Clone, Debug)]
+pub struct FrameStats {
+    /// View rendering statistics.
+    pub views: ViewStats,
+    /// Layout cache statistics (from TaffyLayoutEngine).
+    pub layout: crate::taffy::LayoutCacheStats,
+    /// Paint cache statistics aggregated across all display lists.
+    pub paint: crate::display_list::PaintCacheStats,
+}
+
+impl std::fmt::Display for FrameStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Frame Stats:\n\
+             \x20 Views: {} rendered, {} skipped ({:.1}% hit)\n\
+             \x20 Layout: {} hits, {} misses, {} pruned ({:.1}% hit)\n\
+             \x20 Paint: {} hits, {} misses, {} subtree skips, {} dirty regions ({:.1}% hit)",
+            self.views.views_rendered,
+            self.views.views_skipped,
+            if self.views.views_rendered + self.views.views_skipped > 0 {
+                100.0 * self.views.views_skipped as f64
+                    / (self.views.views_rendered + self.views.views_skipped) as f64
+            } else {
+                0.0
+            },
+            self.layout.hits,
+            self.layout.misses,
+            self.layout.pruned,
+            if self.layout.hits + self.layout.misses > 0 {
+                100.0 * self.layout.hits as f64 / (self.layout.hits + self.layout.misses) as f64
+            } else {
+                0.0
+            },
+            self.paint.element_hits,
+            self.paint.element_misses,
+            self.paint.subtree_skips,
+            self.paint.dirty_regions_added,
+            if self.paint.element_hits + self.paint.element_misses > 0 {
+                100.0 * self.paint.element_hits as f64
+                    / (self.paint.element_hits + self.paint.element_misses) as f64
+            } else {
+                0.0
+            },
+        )
+    }
+}
+
 /// A 6:5 aspect ratio minimum window size to be used for functional,
 /// additional-to-main-Zed windows, like the settings and rules library windows.
 pub const DEFAULT_ADDITIONAL_WINDOW_SIZE: Size<Pixels> = Size {
@@ -943,6 +1015,8 @@ pub struct Window {
     /// Cache of view sizes for automatic view caching.
     /// Allows skipping render() in request_layout when views are clean.
     pub(crate) view_cache_sizes: FxHashMap<EntityId, Size<Pixels>>,
+    /// View rendering statistics (Phase 5: Instrumentation).
+    view_stats: ViewStats,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
     default_prevented: bool,
@@ -1432,6 +1506,7 @@ impl Window {
             next_render_layer_seq: 0,
             dirty_views: FxHashSet::default(),
             view_cache_sizes: FxHashMap::default(),
+            view_stats: ViewStats::default(),
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
             default_prevented: true,
@@ -2060,6 +2135,56 @@ impl Window {
         self.scale_factor
     }
 
+    // ========================================================================
+    // Phase 5: Instrumentation
+    // ========================================================================
+
+    /// Record that a view was rendered (render() was called).
+    pub(crate) fn record_view_rendered(&mut self) {
+        self.view_stats.views_rendered += 1;
+    }
+
+    /// Record that a view was skipped (cached layout/prepaint reused).
+    pub(crate) fn record_view_skipped(&mut self) {
+        self.view_stats.views_skipped += 1;
+    }
+
+    /// Get the current frame's statistics.
+    ///
+    /// Returns combined statistics from all caching layers:
+    /// - View rendering (rendered vs skipped)
+    /// - Layout cache (hits vs misses)
+    /// - Paint cache (element hits/misses, subtree skips, dirty regions)
+    ///
+    /// Statistics are reset at the start of each frame in `draw()`.
+    pub fn frame_stats(&self) -> FrameStats {
+        // Get layout stats
+        let layout_stats = self
+            .layout_engine
+            .as_ref()
+            .map(|e| e.stats())
+            .unwrap_or_default();
+
+        // Aggregate paint stats from all display lists in the layer tree
+        let mut paint_stats = crate::display_list::PaintCacheStats::default();
+        for layer in self.layer_tree.layers() {
+            if let Some(ref display_list) = layer.display_list {
+                let layer_stats = display_list.stats();
+                paint_stats.element_hits += layer_stats.element_hits;
+                paint_stats.element_misses += layer_stats.element_misses;
+                paint_stats.subtree_skips += layer_stats.subtree_skips;
+                paint_stats.elements_painted += layer_stats.elements_painted;
+                paint_stats.dirty_regions_added += layer_stats.dirty_regions_added;
+            }
+        }
+
+        FrameStats {
+            views: self.view_stats,
+            layout: layout_stats,
+            paint: paint_stats,
+        }
+    }
+
     /// The size of an em for the base font of the application. Adjusting this value allows the
     /// UI to scale, just like zooming a web page.
     pub fn rem_size(&self) -> Pixels {
@@ -2232,6 +2357,8 @@ impl Window {
         // Reset element path tracking for per-element caching
         self.element_path_stack.clear();
         self.element_child_counters.clear();
+        // Phase 5: Reset frame stats
+        self.view_stats.reset();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
         self.invalidator.set_dirty(false);
@@ -3511,6 +3638,7 @@ impl Window {
                 if let Some(prev_entry) = prev_list.get_element_entry(&id) {
                     if let Some(ref mut current_list) = layer.display_list {
                         current_list.copy_items_from_range(prev_list, prev_entry.subtree_items.clone());
+                        current_list.record_subtree_skip();
                     }
                 }
             }
@@ -3521,11 +3649,16 @@ impl Window {
                 if let Some(prev_entry) = prev_list.get_element_entry(&id) {
                     if let Some(ref mut current_list) = layer.display_list {
                         current_list.copy_items_from_range(prev_list, prev_entry.own_items.clone());
+                        current_list.record_element_hit();
                     }
                 }
             }
             PaintCacheResult::Hit
         } else {
+            // Cache miss: record it
+            if let Some(ref mut current_list) = layer.display_list {
+                current_list.record_element_miss();
+            }
             PaintCacheResult::Miss
         }
     }
