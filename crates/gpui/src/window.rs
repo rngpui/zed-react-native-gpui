@@ -206,6 +206,8 @@ impl WindowInvalidator {
 
     pub fn invalidate_view(&self, entity: EntityId, cx: &mut App) -> bool {
         let mut inner = self.inner.borrow_mut();
+        // If content is being invalidated, compositor-only updates are no longer sufficient.
+        inner.composite_only = false;
         inner.dirty_views.insert(entity);
         if inner.draw_phase == DrawPhase::None {
             inner.dirty = true;
@@ -1324,11 +1326,15 @@ impl Window {
                         .log_err();
                 }
 
+                // Composite-only updates require presenting, but do not require a full draw().
+                let composite_only = invalidator.needs_composite_only();
+
                 // Keep presenting if input was recently arriving at a high rate (>= 60fps).
                 // Once high-rate input is detected, we sustain presentation for 1 second
                 // to prevent display underclocking during active input.
                 let needs_present = request_frame_options.require_presentation
                     || needs_present.get()
+                    || composite_only
                     || (active.get() && input_rate_tracker.borrow_mut().is_high_rate());
 
                 if invalidator.is_dirty() || request_frame_options.force_render {
@@ -1341,6 +1347,13 @@ impl Window {
                             })
                             .log_err();
                     })
+                } else if composite_only {
+                    handle
+                        .update(&mut cx, |_, window, _| {
+                            window.composite_only();
+                            window.present();
+                        })
+                        .log_err();
                 } else if needs_present {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
@@ -2485,6 +2498,8 @@ impl Window {
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
         self.invalidator.set_dirty(false);
+        // A full draw rebuilds scene state, so compositor-only updates are no longer pending.
+        self.invalidator.clear_composite_only();
         self.requested_autoscroll = None;
 
         // Restore the previously-used input handler.
@@ -2594,19 +2609,42 @@ impl Window {
     /// 3. Clear the composite_only flag
     #[profiling::function]
     fn composite_only(&mut self) {
+        // Preserve draw ordering by reusing the order assigned during the last full draw.
+        // In the normal path, `Scene::insert_primitive` assigns `TileSprite.order`. In the
+        // compositor-only path, we bypass insertion, so we must carry it forward ourselves.
+        let mut tile_order_by_container: FxHashMap<GlobalElementId, u32> = FxHashMap::default();
+        for sprite in &self.rendered_frame.scene.tile_sprites {
+            let container_id = sprite.tile_key.container_id.clone();
+            let entry = tile_order_by_container.entry(container_id).or_insert(sprite.order);
+            debug_assert_eq!(
+                *entry, sprite.order,
+                "tile sprites for a single container should share a stable order"
+            );
+        }
+
         // Collect all tile sprites from scroll layers
         let mut all_tile_sprites = Vec::new();
         let layer_count = self.layer_tree.layers_for_composite().count();
         eprintln!("[COMPOSITE_ONLY] layer_count={}", layer_count);
 
         for layer in self.layer_tree.layers_for_composite() {
-            let sprites = layer.emit_tile_sprites();
+            let mut sprites = layer.emit_tile_sprites();
+            if let Some(container_id) = &layer.element_id {
+                if let Some(order) = tile_order_by_container.get(container_id) {
+                    for sprite in &mut sprites {
+                        sprite.order = *order;
+                    }
+                }
+            }
             eprintln!(
                 "[COMPOSITE_ONLY] layer {:?} reason={:?} has_element_id={} emitted {} sprites",
                 layer.id, layer.reason, layer.element_id.is_some(), sprites.len()
             );
             all_tile_sprites.extend(sprites);
         }
+
+        // Ensure the scene's TileSprites remain sorted by order for batch iteration.
+        all_tile_sprites.sort_by_key(|sprite| sprite.order);
 
         eprintln!("[COMPOSITE_ONLY] total sprites={}", all_tile_sprites.len());
         // Replace tile sprites in the rendered scene
@@ -3316,6 +3354,8 @@ impl Window {
             order: 0, // Will be set by insert_primitive_internal
             _pad: 0,
             bounds: bounds.scale(scale),
+            stable_bounds: bounds.scale(scale),
+            scroll_offset: Point::default(),
             content_mask: content_mask.scale(scale),
             tile_key: TileKey {
                 container_id,

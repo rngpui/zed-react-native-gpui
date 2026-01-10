@@ -339,6 +339,10 @@ impl Layer {
         let scale_factor = self.scale_factor;
         let tile_size_px = TILE_SIZE as f32 / scale_factor;
         let scroll_offset = self.scroll_offset;
+        let scroll_offset_scaled = point(
+            ScaledPixels(scroll_offset.x.0 * scale_factor),
+            ScaledPixels(scroll_offset.y.0 * scale_factor),
+        );
         let viewport = Bounds {
             origin: self.viewport_origin,
             size: self.viewport_size,
@@ -376,14 +380,24 @@ impl Layer {
 
                 // Calculate where this tile should appear on screen
                 let screen_origin = Point {
-                    x: viewport.origin.x + tile_content_origin.x + scroll_offset.x,
-                    y: viewport.origin.y + tile_content_origin.y + scroll_offset.y,
+                    x: viewport.origin.x + tile_content_origin.x,
+                    y: viewport.origin.y + tile_content_origin.y,
                 };
 
                 let tile_sprite = TileSprite {
                     order: 0, // Will be set by insert_primitive
                     _pad: 0,
                     bounds: Bounds {
+                        origin: point(
+                            ScaledPixels(screen_origin.x.0 * scale_factor) + scroll_offset_scaled.x,
+                            ScaledPixels(screen_origin.y.0 * scale_factor) + scroll_offset_scaled.y,
+                        ),
+                        size: size(
+                            ScaledPixels(tile_content_size.width.0 * scale_factor),
+                            ScaledPixels(tile_content_size.height.0 * scale_factor),
+                        ),
+                    },
+                    stable_bounds: Bounds {
                         origin: point(
                             ScaledPixels(screen_origin.x.0 * scale_factor),
                             ScaledPixels(screen_origin.y.0 * scale_factor),
@@ -393,6 +407,7 @@ impl Layer {
                             ScaledPixels(tile_content_size.height.0 * scale_factor),
                         ),
                     },
+                    scroll_offset: scroll_offset_scaled,
                     content_mask: ContentMask {
                         bounds: Bounds {
                             origin: point(

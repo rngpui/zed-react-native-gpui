@@ -1480,8 +1480,14 @@ pub(crate) struct TileSprite {
     pub order: DrawOrder,
     /// Padding for alignment
     pub _pad: u32,
-    /// Screen bounds where this tile should be drawn
+    /// Screen-space bounds where this tile should be drawn (includes scroll offset).
     pub bounds: Bounds<ScaledPixels>,
+    /// Stable (scroll-offset invariant) bounds used for GPU instance data.
+    ///
+    /// During compositor-driven scrolling, `bounds` changes every frame, but this does not.
+    pub stable_bounds: Bounds<ScaledPixels>,
+    /// Scroll translation applied during composition (in scaled pixels).
+    pub scroll_offset: Point<ScaledPixels>,
     /// Content mask for clipping (viewport bounds)
     pub content_mask: ContentMask<ScaledPixels>,
     /// Key to look up the tile's texture in TileCache

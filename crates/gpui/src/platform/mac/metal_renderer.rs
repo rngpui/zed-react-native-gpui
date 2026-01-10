@@ -134,7 +134,7 @@ impl PreviousFrameArrays {
         }
         a.iter().zip(b).all(|(a, b)| {
             a.order == b.order
-                && a.bounds == b.bounds
+                && a.stable_bounds == b.stable_bounds
                 && a.content_mask == b.content_mask
                 && a.tile_key == b.tile_key
         })
@@ -1988,6 +1988,7 @@ impl MetalRenderer {
         &mut self,
         bounds: Bounds<ScaledPixels>,
         content_mask: ContentMask<ScaledPixels>,
+        translation: [f32; 2],
         uv_bounds: Bounds<f32>,
         texture: &metal::TextureRef,
         viewport_size: Size<DevicePixels>,
@@ -2020,6 +2021,11 @@ impl MetalRenderer {
             CachedTextureInputIndex::ViewportSize as u64,
             mem::size_of_val(&viewport_size) as u64,
             &viewport_size as *const Size<DevicePixels> as *const _,
+        );
+        command_encoder.set_vertex_bytes(
+            CachedTextureInputIndex::Translation as u64,
+            mem::size_of_val(&translation) as u64,
+            &translation as *const [f32; 2] as *const _,
         );
         command_encoder.set_fragment_texture(
             CachedTextureInputIndex::Texture as u64,
@@ -2773,6 +2779,7 @@ impl MetalRenderer {
                 let ok = self.draw_cached_texture(
                     sprite.bounds,
                     sprite.content_mask.clone(),
+                    [0.0, 0.0],
                     sprite.uv_bounds,
                     &texture,
                     viewport_size,
@@ -2984,8 +2991,9 @@ impl MetalRenderer {
                 };
 
                 let ok = self.draw_cached_texture(
-                    sprite.bounds,
+                    sprite.stable_bounds,
                     sprite.content_mask.clone(),
+                    [sprite.scroll_offset.x.0, sprite.scroll_offset.y.0],
                     uv_bounds,
                     &texture,
                     viewport_size,
@@ -3250,6 +3258,8 @@ enum CachedTextureInputIndex {
     Sprites = 1,
     ViewportSize = 2,
     Texture = 3,
+    /// Per-draw-call translation (e.g., scroll offset) applied in the vertex shader.
+    Translation = 4,
 }
 
 /// GPU-side struct for rendering cached textures.

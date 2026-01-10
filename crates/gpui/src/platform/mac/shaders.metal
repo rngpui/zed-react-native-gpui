@@ -1064,13 +1064,18 @@ vertex CachedTextureVertexOutput cached_texture_vertex(
     uint sprite_id [[instance_id]],
     constant float2 *unit_vertices [[buffer(CachedTextureInputIndex_Vertices)]],
     constant CachedTextureSpriteGpu *sprites [[buffer(CachedTextureInputIndex_Sprites)]],
-    constant Size_DevicePixels *viewport_size [[buffer(CachedTextureInputIndex_ViewportSize)]]) {
+    constant Size_DevicePixels *viewport_size [[buffer(CachedTextureInputIndex_ViewportSize)]],
+    constant float2 *translation [[buffer(CachedTextureInputIndex_Translation)]]) {
   float2 unit_vertex = unit_vertices[unit_vertex_id];
   CachedTextureSpriteGpu sprite = sprites[sprite_id];
 
+  Bounds_ScaledPixels bounds = sprite.bounds;
+  bounds.origin.x += translation[0].x;
+  bounds.origin.y += translation[0].y;
+
   float4 device_position =
-      to_device_position(unit_vertex, sprite.bounds, viewport_size);
-  float4 clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds,
+      to_device_position(unit_vertex, bounds, viewport_size);
+  float4 clip_distance = distance_from_clip_rect(unit_vertex, bounds,
                                                  sprite.content_mask.bounds);
 
   // Compute texture coordinates from UV bounds

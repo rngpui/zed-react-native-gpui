@@ -1798,9 +1798,13 @@ impl Div {
                 .scene
                 .insert_display_list(global_id.clone(), arc_display_list);
         }
-        for tile_sprite in tile_sprites {
-            window.next_frame.scene.insert_primitive(tile_sprite);
-        }
+        // Insert tile sprites within a single scene paint layer so they receive a stable
+        // z-order based on the scroll container's viewport (not individual tile bounds).
+        window.paint_layer(bounds, |window| {
+            for tile_sprite in tile_sprites {
+                window.next_frame.scene.insert_primitive(tile_sprite);
+            }
+        });
 
         // Pop the layer from the layer tree
         window.pop_layer();
