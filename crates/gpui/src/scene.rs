@@ -107,14 +107,13 @@ impl Scene {
 
     /// Insert a display list for a scroll container.
     ///
-    /// Builds the spatial index for efficient tile rasterization queries.
+    /// P1.1: Takes Arc<DisplayList> directly from Layer for O(1) insertion.
+    /// Caller must ensure spatial index is built before calling.
     /// Display list items contain pre-baked world transforms and clips from insert time.
-    /// The DisplayList is wrapped in Arc for cheap cloning during parallel tile rasterization.
-    pub fn insert_display_list(&mut self, element_id: GlobalElementId, mut display_list: DisplayList) {
-        // Build spatial index for efficient tile rasterization queries
-        display_list.ensure_spatial_index_built();
+    pub fn insert_display_list(&mut self, element_id: GlobalElementId, display_list: Arc<DisplayList>) {
+        // Note: spatial index should be built by caller (Layer) before passing
         // Note: transforms are baked into items at insert time, no separate bake pass needed
-        self.display_lists.insert(element_id, Arc::new(display_list));
+        self.display_lists.insert(element_id, display_list);
     }
 
     /// Insert primitives from a TileRasterResult directly into the Scene.

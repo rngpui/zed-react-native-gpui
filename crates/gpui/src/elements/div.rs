@@ -1613,7 +1613,9 @@ impl Div {
         let scale_factor = window.scale_factor();
 
         // Get content mask for clipping tiles at viewport edges
-        let Some(content_mask) = style.overflow_mask(bounds, window.rem_size()) else {
+        // P1.2: We only need to check if overflow exists, not the local mask value.
+        // outer_clip_for_tiles (captured later) includes ancestor clips.
+        let Some(_local_overflow_mask) = style.overflow_mask(bounds, window.rem_size()) else {
             // No content mask means no overflow clipping - fall back to normal painting
             for child in children.iter_mut() {
                 child.paint(window, cx);
@@ -1665,6 +1667,12 @@ impl Div {
             .map(|l| l.has_retained_hitboxes())
             .unwrap_or(false);
 
+        // P1.2: Capture ancestor + viewport clip BEFORE any detached mask operations.
+        // TileSprites need this for proper clipping at composition time.
+        // This includes ancestor clips that would otherwise be lost when we paint
+        // with a detached mask (which is isolated from parent clips).
+        let outer_clip_for_tiles = window.content_mask();
+
         if needs_repaint {
             // Prepare layer for repaint: move display_list to previous_display_list for cache lookup,
             // create new empty display_list for new items
@@ -1679,9 +1687,10 @@ impl Div {
             // a monotonic generation per container. Without this sync, tiles with
             // rendered_generation >= 1 would be wrongly considered valid when
             // display_list.generation resets to 0.
+            // P1.1: Use Arc::make_mut for mutable access to Arc<DisplayList>
             if let Some(layer) = window.layer_tree_mut().get_mut(layer_id) {
-                if let Some(display_list) = layer.display_list.as_mut() {
-                    display_list.generation = tile_cache_generation;
+                if let Some(arc) = layer.display_list.as_mut() {
+                    Arc::make_mut(arc).generation = tile_cache_generation;
                 }
             }
 
@@ -1757,14 +1766,24 @@ impl Div {
             window.capture_layer_hitboxes(layer_id);
         }
 
-        // Copy layer's DisplayList to Scene for renderer access.
+        // P1.1: Share layer's DisplayList with Scene via Arc (O(1) instead of O(n) clone).
+        // Build spatial index first, then Arc::clone for cheap sharing.
         // Note: PropertyTrees are not needed since transforms/clips are baked into DisplayItem at insert time.
+        {
+            let layer = window.layer_tree_mut().get_mut(layer_id).unwrap();
+            if let Some(ref mut arc_display_list) = layer.display_list {
+                if !arc_display_list.items.is_empty() {
+                    // Build spatial index before sharing (requires mutable access)
+                    Arc::make_mut(arc_display_list).ensure_spatial_index_built();
+                }
+            }
+        }
         let layer = window.layer_tree().get(layer_id).unwrap();
-        if let Some(display_list) = &layer.display_list {
-            if !display_list.items.is_empty() {
+        if let Some(arc_display_list) = &layer.display_list {
+            if !arc_display_list.items.is_empty() {
                 window.next_frame.scene.insert_display_list(
                     global_id.clone(),
-                    display_list.clone(),
+                    Arc::clone(arc_display_list),
                 );
             }
         }
@@ -1820,15 +1839,18 @@ impl Div {
                             crate::ScaledPixels(tile_content_size.height.0 * scale_factor),
                         ),
                     },
+                    // P1.2: Use outer_clip_for_tiles which includes ancestor clips.
+                    // This ensures tiles are clipped correctly when scroll containers
+                    // are nested inside other clipping ancestors.
                     content_mask: ContentMask {
                         bounds: crate::Bounds {
                             origin: crate::point(
-                                crate::ScaledPixels(content_mask.bounds.origin.x.0 * scale_factor),
-                                crate::ScaledPixels(content_mask.bounds.origin.y.0 * scale_factor),
+                                crate::ScaledPixels(outer_clip_for_tiles.bounds.origin.x.0 * scale_factor),
+                                crate::ScaledPixels(outer_clip_for_tiles.bounds.origin.y.0 * scale_factor),
                             ),
                             size: crate::size(
-                                crate::ScaledPixels(content_mask.bounds.size.width.0 * scale_factor),
-                                crate::ScaledPixels(content_mask.bounds.size.height.0 * scale_factor),
+                                crate::ScaledPixels(outer_clip_for_tiles.bounds.size.width.0 * scale_factor),
+                                crate::ScaledPixels(outer_clip_for_tiles.bounds.size.height.0 * scale_factor),
                             ),
                         },
                     },

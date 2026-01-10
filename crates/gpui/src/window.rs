@@ -3221,10 +3221,12 @@ impl Window {
             world_clip,
         ) {
             // All layers now have a display list (including root)
-            let display_list = layer
+            // P1.1: Use Arc::make_mut for mutable access to Arc<DisplayList>
+            let arc = layer
                 .display_list
                 .as_mut()
                 .expect("Layer should have display list");
+            let display_list = Arc::make_mut(arc);
             // Extend display list bounds based on item type
             use crate::display_list::DisplayItem;
             match &item {
@@ -3699,8 +3701,9 @@ impl Window {
         };
 
         // Begin tracking in current display list FIRST (to set start_index correctly)
-        if let Some(ref mut display_list) = layer.display_list {
-            display_list.begin_element(id, input_hash, cache_hit);
+        // P1.1: Use Arc::make_mut for mutable access to Arc<DisplayList>
+        if let Some(ref mut arc) = layer.display_list {
+            Arc::make_mut(arc).begin_element(id, input_hash, cache_hit);
         }
 
         if subtree_skip {
@@ -3708,7 +3711,8 @@ impl Window {
             // Copy all items and skip paint() entirely.
             if let Some(ref prev_list) = layer.previous_display_list {
                 if let Some(prev_entry) = prev_list.get_element_entry(&id) {
-                    if let Some(ref mut current_list) = layer.display_list {
+                    if let Some(ref mut arc) = layer.display_list {
+                        let current_list = Arc::make_mut(arc);
                         current_list.copy_items_from_range(prev_list, prev_entry.subtree_items.clone());
                         current_list.record_subtree_skip();
                     }
@@ -3719,7 +3723,8 @@ impl Window {
             // Normal cache hit: copy only own items, children still paint
             if let Some(ref prev_list) = layer.previous_display_list {
                 if let Some(prev_entry) = prev_list.get_element_entry(&id) {
-                    if let Some(ref mut current_list) = layer.display_list {
+                    if let Some(ref mut arc) = layer.display_list {
+                        let current_list = Arc::make_mut(arc);
                         current_list.copy_items_from_range(prev_list, prev_entry.own_items.clone());
                         current_list.record_element_hit();
                     }
@@ -3728,8 +3733,8 @@ impl Window {
             PaintCacheResult::Hit
         } else {
             // Cache miss: record it
-            if let Some(ref mut current_list) = layer.display_list {
-                current_list.record_element_miss();
+            if let Some(ref mut arc) = layer.display_list {
+                Arc::make_mut(arc).record_element_miss();
             }
             PaintCacheResult::Miss
         }
@@ -3748,13 +3753,14 @@ impl Window {
 
         // If this element had a cache hit, copy items_after_children from previous frame
         // (these are items like borders that are painted after children)
+        // P1.1: Use Arc::make_mut for mutable access to Arc<DisplayList>
         if let Some(ref display_list) = layer.display_list {
             if display_list.current_element_has_cache_hit() {
                 if let Some(ref prev_list) = layer.previous_display_list {
                     if let Some(prev_entry) = prev_list.get_element_entry(&element_id) {
                         if !prev_entry.items_after_children.is_empty() {
-                            if let Some(ref mut current_list) = layer.display_list {
-                                current_list.copy_items_from_range(
+                            if let Some(ref mut arc) = layer.display_list {
+                                Arc::make_mut(arc).copy_items_from_range(
                                     prev_list,
                                     prev_entry.items_after_children.clone(),
                                 );
@@ -3766,8 +3772,8 @@ impl Window {
         }
 
         // Finalize in display list
-        if let Some(ref mut display_list) = layer.display_list {
-            display_list.finalize_element();
+        if let Some(ref mut arc) = layer.display_list {
+            Arc::make_mut(arc).finalize_element();
         }
     }
 
@@ -3781,9 +3787,10 @@ impl Window {
         self.element_child_counters.pop();
 
         // Finalize in display list - subtree was already copied
+        // P1.1: Use Arc::make_mut for mutable access to Arc<DisplayList>
         let layer = self.layer_tree.current_layer_mut();
-        if let Some(ref mut display_list) = layer.display_list {
-            display_list.finalize_element();
+        if let Some(ref mut arc) = layer.display_list {
+            Arc::make_mut(arc).finalize_element();
         }
     }
 
@@ -5208,9 +5215,10 @@ impl Window {
         // Mark current element as having event handlers.
         // Elements with handlers cannot use SubtreeSkip because handlers
         // must be re-registered every frame.
+        // P1.1: Use Arc::make_mut for mutable access to Arc<DisplayList>
         let layer = self.layer_tree.current_layer_mut();
-        if let Some(ref mut display_list) = layer.display_list {
-            display_list.mark_current_element_has_handlers();
+        if let Some(ref mut arc) = layer.display_list {
+            Arc::make_mut(arc).mark_current_element_has_handlers();
         }
 
         self.next_frame.mouse_listeners.push(Some(Box::new(

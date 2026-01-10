@@ -25,6 +25,7 @@ use crate::scene::TransformationMatrix;
 use crate::window::{AnyMouseListener, Hitbox};
 use crate::{Bounds, ContentMask, GlobalElementId, HitboxBehavior, HitboxId, Pixels, Point, Size};
 use collections::FxHashMap;
+use std::sync::Arc;
 
 /// Unique identifier for a layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -159,12 +160,13 @@ pub struct Layer {
     pub clip: Option<Bounds<Pixels>>,
 
     /// Content rendered to this layer (None for root layer).
-    pub(crate) display_list: Option<DisplayList>,
+    /// Wrapped in Arc for cheap cloning to Scene. Use Arc::make_mut for mutation.
+    pub(crate) display_list: Option<Arc<DisplayList>>,
 
     /// Previous frame's display list (for per-element cache lookup).
     /// At frame start, current display_list is swapped here, then cleared.
     /// Elements can then look up their previous items and copy if unchanged.
-    pub(crate) previous_display_list: Option<DisplayList>,
+    pub(crate) previous_display_list: Option<Arc<DisplayList>>,
 
     /// Property trees for transforms and clips.
     /// Used by DisplayItems to reference transforms/clips by node ID.
@@ -211,8 +213,8 @@ pub struct Layer {
 impl Layer {
     /// Create a new layer.
     fn new(id: LayerId, element_id: Option<GlobalElementId>, reason: LayerReason) -> Self {
-        // All layers with an element_id get a display list
-        let display_list = element_id.clone().map(DisplayList::new);
+        // All layers with an element_id get a display list (wrapped in Arc)
+        let display_list = element_id.clone().map(|id| Arc::new(DisplayList::new(id)));
         Self {
             id,
             element_id,
@@ -277,6 +279,10 @@ impl Layer {
     ///
     /// P1 optimization: Reuses DisplayList allocations by swapping and clearing
     /// instead of allocating new Vec each frame.
+    ///
+    /// P1.1: Uses Arc for cheap cloning to Scene. Arc::make_mut provides
+    /// mutable access without cloning when refcount is 1 (which is the case
+    /// after Scene drops its reference at end of frame).
     pub fn prepare_for_repaint(&mut self) {
         // Swap current and previous display lists.
         // After swap:
@@ -285,12 +291,13 @@ impl Layer {
         std::mem::swap(&mut self.display_list, &mut self.previous_display_list);
 
         // Clear and reuse the display list (or create new if none exists)
-        if let Some(ref mut display_list) = self.display_list {
-            // Reuse existing allocation - clear() increments generation
-            display_list.clear();
+        if let Some(ref mut arc_display_list) = self.display_list {
+            // Arc::make_mut gives mutable access. If refcount is 1, no clone.
+            // Scene's Arc should have been dropped by now, so this should be cheap.
+            Arc::make_mut(arc_display_list).clear();
         } else if let Some(ref element_id) = self.element_id {
             // First frame or after layer recreation - need to allocate
-            self.display_list = Some(DisplayList::new(element_id.clone()));
+            self.display_list = Some(Arc::new(DisplayList::new(element_id.clone())));
         }
     }
 }
