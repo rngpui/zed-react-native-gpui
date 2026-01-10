@@ -3381,7 +3381,7 @@ impl Interactivity {
             // P0.3/P2: Determine if this is a layer-based scroll container.
             // Layer containers use tiled rendering and don't need view invalidation on scroll.
             // This replicates the logic from should_create_layer().
-            let layer_global_id = self.element_id.as_ref().and_then(|element_id| {
+            let layer_global_id = self.element_id.as_ref().and_then(|_element_id| {
                 let bounds = hitbox.bounds;
                 let content_size = self.content_size;
                 let is_scroll = overflow.x == Overflow::Scroll || overflow.y == Overflow::Scroll;
@@ -3389,8 +3389,9 @@ impl Interactivity {
                 let large_content = content_size.width > bounds.size.width + min_excess
                     || content_size.height > bounds.size.height + min_excess;
                 if is_scroll && large_content {
-                    // Compute global_id for layer lookup
-                    Some(window.global_element_id(element_id))
+                    // Use current_global_element_id() since we're inside with_element_id
+                    // and the element_id is already on the stack
+                    Some(window.current_global_element_id())
                 } else {
                     None
                 }
@@ -3443,12 +3444,15 @@ impl Interactivity {
                                         y: viewport_origin.y + new_scroll.y,
                                     };
                                 }
+                                eprintln!("[SCROLL] Layer found, calling request_composite_only()");
                                 window.request_composite_only();
                             } else {
                                 // Layer not found, fall back to refresh
+                                eprintln!("[SCROLL] Layer NOT found, falling back to refresh()");
                                 window.refresh();
                             }
                         } else {
+                            eprintln!("[SCROLL] Not a layer container, using notify()");
                             cx.notify(current_view);
                         }
                     }

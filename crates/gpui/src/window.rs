@@ -1331,7 +1331,17 @@ impl Window {
                     || needs_present.get()
                     || (active.get() && input_rate_tracker.borrow_mut().is_high_rate());
 
-                if invalidator.is_dirty() || request_frame_options.force_render {
+                // P2 DEBUG: Log which frame path is taken
+                let is_dirty = invalidator.is_dirty();
+                let is_composite_only = invalidator.needs_composite_only();
+                if is_dirty || is_composite_only {
+                    eprintln!(
+                        "[FRAME] dirty={} composite_only={} force={}",
+                        is_dirty, is_composite_only, request_frame_options.force_render
+                    );
+                }
+
+                if is_dirty || request_frame_options.force_render {
                     measure("frame duration", || {
                         handle
                             .update(&mut cx, |_, window, cx| {
@@ -1341,9 +1351,10 @@ impl Window {
                             })
                             .log_err();
                     })
-                } else if invalidator.needs_composite_only() {
+                } else if is_composite_only {
                     // P2: Compositor-only path - update tile sprites without full draw.
                     // This handles scroll-offset changes where content hasn't changed.
+                    eprintln!("[FRAME] Taking COMPOSITE-ONLY path");
                     handle
                         .update(&mut cx, |_, window, _| {
                             window.composite_only();
@@ -2278,6 +2289,15 @@ impl Window {
         let global_id = GlobalElementId(Arc::from(&*self.element_id_stack));
         self.element_id_stack.pop();
         global_id
+    }
+
+    /// Get the current GlobalElementId from the element_id_stack.
+    ///
+    /// P2: Used by scroll handlers when already inside `with_element_id` where
+    /// the element_id is already on the stack. Unlike `global_element_id()`,
+    /// this does not push anything - it just snapshots the current stack state.
+    pub fn current_global_element_id(&self) -> GlobalElementId {
+        GlobalElementId(Arc::from(&*self.element_id_stack))
     }
 
     /// Executes the provided function with the specified rem size.
