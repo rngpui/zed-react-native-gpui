@@ -3408,6 +3408,65 @@ impl Window {
         self.content_mask_stack.pop();
     }
 
+    /// Push a "detached" content mask that does NOT intersect with the current mask
+    /// and creates a clip node parented to ROOT (not the current clip stack).
+    ///
+    /// This is used for scroll layer content recording where we want the full content
+    /// bounds to be painted, not clipped to the viewport. The viewport clip is applied
+    /// later at composition time via TileSprite.content_mask.
+    ///
+    /// Must be paired with `pop_content_mask_detached`.
+    pub(crate) fn push_content_mask_detached(&mut self, mask: ContentMask<Pixels>) {
+        self.invalidator.debug_assert_paint_or_prepaint();
+
+        // Create clip node with parent = ROOT, NOT the current clip stack.
+        // This ensures the layer DisplayList items are scroll-offset invariant.
+        let (layer_id, clip_node) = {
+            let layer = self.layer_tree.current_layer_mut();
+            let current_layer_id = layer.id;
+            let clip_bounds_in_content = Bounds {
+                origin: Point {
+                    x: mask.bounds.origin.x - layer.content_origin.x,
+                    y: mask.bounds.origin.y - layer.content_origin.y,
+                },
+                size: mask.bounds.size,
+            };
+            // IMPORTANT: Parent = ROOT, not the current clip stack.
+            // This detaches the clip from viewport/ancestor clips.
+            let clip_node = layer.property_trees.push_clip(
+                ClipNodeId::ROOT,
+                clip_bounds_in_content,
+                TransformNodeId::ROOT,
+            );
+            (current_layer_id, clip_node)
+        };
+        self.clip_node_stack.push((layer_id, clip_node));
+        // IMPORTANT: Push without intersecting - use the mask as-is.
+        self.content_mask_stack.push(mask);
+    }
+
+    /// Pop a detached content mask from the stack.
+    /// Must be paired with a previous `push_content_mask_detached`.
+    pub(crate) fn pop_content_mask_detached(&mut self) {
+        self.clip_node_stack.pop();
+        self.content_mask_stack.pop();
+    }
+
+    /// Execute a closure with a detached content mask that does NOT inherit
+    /// from the current mask stack.
+    ///
+    /// This is the closure form of push/pop_content_mask_detached.
+    pub(crate) fn with_content_mask_detached<R>(
+        &mut self,
+        mask: ContentMask<Pixels>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.push_content_mask_detached(mask);
+        let result = f(self);
+        self.pop_content_mask_detached();
+        result
+    }
+
     /// Updates the global element offset relative to the current offset. This is used to implement
     /// scrolling. This method should only be called during element drawing.
     pub fn with_element_offset<R>(

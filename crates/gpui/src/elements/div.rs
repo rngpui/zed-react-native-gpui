@@ -1696,7 +1696,7 @@ impl Div {
             window.begin_layer_hitbox_capture(layer_id);
 
             // CRITICAL: For tiled rendering, paint ALL content, not just visible viewport.
-            // Push a full-content mask so all content is rendered.
+            // Use a DETACHED content mask so DisplayList items are scroll-offset invariant.
             let content_origin = Point {
                 x: bounds.origin.x + scroll_offset.x,
                 y: bounds.origin.y + scroll_offset.y,
@@ -1707,8 +1707,10 @@ impl Div {
                     size: content_size,
                 },
             };
-            // Phase 0.1: Use push_content_mask which also creates clip nodes
-            window.push_content_mask(full_content_mask);
+            // P0.2: Use detached mask - does NOT intersect with viewport/ancestor clips.
+            // This ensures DisplayList items have scroll-offset invariant world_clip.
+            // The viewport clip is applied at composition time via TileSprite.content_mask.
+            window.push_content_mask_detached(full_content_mask);
 
             // Paint all children - primitives go to layer's DisplayList via insert_primitive_internal
             // (because layer is on the stack, is_inside_layer() returns true)
@@ -1716,8 +1718,8 @@ impl Div {
                 child.paint(window, cx);
             }
 
-            // Pop the full-content mask and its clip node
-            window.pop_content_mask();
+            // Pop the detached content mask and its clip node
+            window.pop_content_mask_detached();
 
             // Capture hitboxes and listeners for future reuse
             window.capture_layer_hitboxes(layer_id);
@@ -3415,6 +3417,20 @@ impl Interactivity {
             let line_height = window.line_height();
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
+
+            // P0.3: Determine if this is a layer-based scroll container.
+            // Layer containers use tiled rendering and don't need view invalidation on scroll.
+            // This replicates the logic from should_create_layer().
+            let is_layer_container = self.element_id.is_some() && {
+                let bounds = hitbox.bounds;
+                let content_size = self.content_size;
+                let is_scroll = overflow.x == Overflow::Scroll || overflow.y == Overflow::Scroll;
+                let min_excess = Pixels(256.0);
+                let large_content = content_size.width > bounds.size.width + min_excess
+                    || content_size.height > bounds.size.height + min_excess;
+                is_scroll && large_content
+            };
+
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
                     let mut scroll_offset = scroll_offset.borrow_mut();
@@ -3447,7 +3463,14 @@ impl Interactivity {
                     scroll_offset.y += delta_y;
                     scroll_offset.x += delta_x;
                     if *scroll_offset != old_scroll_offset {
-                        cx.notify(current_view);
+                        // P0.3: For layer-based scroll containers, use refresh() instead of notify().
+                        // This schedules a frame without invalidating the view tree, since
+                        // layer DisplayLists are scroll-offset invariant after P0.2.
+                        if is_layer_container {
+                            window.refresh();
+                        } else {
+                            cx.notify(current_view);
+                        }
                     }
                 }
             });
