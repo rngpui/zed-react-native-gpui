@@ -208,6 +208,7 @@ impl WindowInvalidator {
         let mut inner = self.inner.borrow_mut();
         inner.dirty_views.insert(entity);
         if inner.draw_phase == DrawPhase::None {
+            eprintln!("[DIRTY] invalidate_view({:?}) setting dirty=true", entity);
             inner.dirty = true;
             cx.push_effect(Effect::Notify { emitter: entity });
             true
@@ -221,6 +222,9 @@ impl WindowInvalidator {
     }
 
     pub fn set_dirty(&self, dirty: bool) {
+        if dirty {
+            eprintln!("[DIRTY] set_dirty(true) called");
+        }
         self.inner.borrow_mut().dirty = dirty
     }
 
