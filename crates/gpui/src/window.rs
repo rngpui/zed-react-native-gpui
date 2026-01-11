@@ -2855,6 +2855,8 @@ impl Window {
                 layer.viewport_origin,
                 layer.outer_clip.clone(),
                 layer.scale_factor,
+                layer.scroll_offset,
+                layer.content_origin,
                 layer.retained_hitboxes.clone(),
                 layer.hitbox_range.clone(),
                 layer.children.clone(),
@@ -2862,9 +2864,25 @@ impl Window {
             layer_tree_snapshot.layers.insert(layer.id, layer_snapshot);
         }
 
-        // Capture hitbox data
-        let hitbox_snapshot = HitboxSnapshot::new();
-        // TODO: Populate hitbox snapshot from rendered_frame.hitboxes
+        // Capture hitbox data from layers' retained hitboxes
+        let mut hitbox_snapshot = HitboxSnapshot::new();
+        for layer in self.layer_tree.layers() {
+            if !layer.retained_hitboxes.is_empty() {
+                let start_index = hitbox_snapshot.hitboxes.len();
+                for retained in &layer.retained_hitboxes {
+                    hitbox_snapshot.hitboxes.push(crate::frame_snapshot::HitboxData {
+                        id: retained.id,
+                        key: retained.key,
+                        bounds: retained.bounds,
+                        content_mask: retained.content_mask.clone(),
+                        behavior: retained.behavior,
+                        layer_id: layer.id,
+                    });
+                }
+                let end_index = hitbox_snapshot.hitboxes.len();
+                hitbox_snapshot.layer_hitbox_ranges.insert(layer.id, start_index..end_index);
+            }
+        }
 
         FrameSnapshot {
             layers: std::sync::Arc::new(layer_tree_snapshot),
@@ -2888,29 +2906,146 @@ impl Window {
     ///
     /// This is used during compositor-only updates where we skip the element tree traversal
     /// and just update tile sprite positions based on compositor state.
+    ///
+    /// Phase 1 implementation: Uses immutable FrameSnapshot for all data instead of layer_tree.
     #[profiling::function]
     fn compositor_present(&mut self) {
+        use crate::frame_snapshot::emit_tile_sprites_from_snapshot;
+        use crate::layer::LayerReason;
+
         eprintln!("[COMPOSITOR_PRESENT] called, has_snapshot={}", self.current_snapshot.is_some());
 
-        let Some(_snapshot) = &self.current_snapshot else {
-            // No snapshot available, fall back to regular present
+        let Some(snapshot) = &self.current_snapshot else {
             eprintln!("[COMPOSITOR_PRESENT] No snapshot, falling back to present()");
             self.present();
             return;
         };
 
-        // For now, delegate to the existing compositor-only path, which:
-        // - preserves tile ordering
-        // - replays retained hitboxes and updates mouse hit testing
-        // - clears the composite_only invalidation flag
-        self.composite_only();
+        // Preserve draw ordering by reusing the order assigned during the last full draw.
+        let mut tile_order_by_container: FxHashMap<GlobalElementId, u32> = FxHashMap::default();
+        for sprite in &self.rendered_frame.scene.tile_sprites {
+            let container_id = sprite.tile_key.container_id.clone();
+            let entry = tile_order_by_container.entry(container_id).or_insert(sprite.order);
+            debug_assert_eq!(
+                *entry, sprite.order,
+                "tile sprites for a single container should share a stable order"
+            );
+        }
+
+        // Collect scroll container layer IDs from snapshot (not layer_tree)
+        let scroll_container_ids: Vec<_> = snapshot.layers.iter()
+            .filter(|(_, layer)| layer.reason == LayerReason::ScrollContainer)
+            .map(|(id, _)| *id)
+            .collect();
+
+        eprintln!("[COMPOSITOR_PRESENT] scroll_container_ids={}", scroll_container_ids.len());
+
+        // Emit tile sprites from snapshot using current scroll offsets
+        let mut all_tile_sprites = Vec::new();
+        let mut layer_hitbox_updates: Vec<(crate::LayerId, Point<Pixels>)> = Vec::new();
+
+        for &layer_id in &scroll_container_ids {
+            if let Some(layer_snapshot) = snapshot.layers.get(layer_id) {
+                // Get current scroll offset from compositor state
+                let current_scroll = self.compositor_state.scroll_offset(layer_id);
+
+                // Emit tiles using snapshot data + current scroll
+                let mut sprites = emit_tile_sprites_from_snapshot(layer_snapshot, current_scroll);
+
+                // Preserve ordering from previous frame
+                if let Some(element_id) = &layer_snapshot.element_id {
+                    if let Some(order) = tile_order_by_container.get(element_id) {
+                        for sprite in &mut sprites {
+                            sprite.order = *order;
+                        }
+                    }
+                }
+
+                eprintln!(
+                    "[COMPOSITOR_PRESENT] layer {:?} emitted {} sprites from snapshot",
+                    layer_id, sprites.len()
+                );
+                all_tile_sprites.extend(sprites);
+
+                // Compute content_origin for hitbox updates
+                // content_origin = viewport_origin + scroll_offset
+                let content_origin = Point {
+                    x: layer_snapshot.viewport_origin.x + current_scroll.x,
+                    y: layer_snapshot.viewport_origin.y + current_scroll.y,
+                };
+                layer_hitbox_updates.push((layer_id, content_origin));
+            }
+        }
+
+        // Sort tile sprites by order for batch iteration
+        all_tile_sprites.sort_by_key(|sprite| sprite.order);
+
+        eprintln!(
+            "[COMPOSITOR_PRESENT] total sprites={}",
+            all_tile_sprites.len()
+        );
+
+        // Replace tile sprites in the rendered scene
+        self.rendered_frame.scene.replace_tile_sprites(all_tile_sprites);
+
+        // Update hitboxes using snapshot data
+        for (layer_id, content_origin) in layer_hitbox_updates {
+            if let Some(range) = snapshot.hitboxes.layer_hitbox_ranges.get(&layer_id) {
+                let hitbox_data = &snapshot.hitboxes.hitboxes[range.clone()];
+                eprintln!(
+                    "[COMPOSITOR_PRESENT] Updating {} hitboxes for layer {:?} with content_origin={:?}",
+                    hitbox_data.len(), layer_id, content_origin
+                );
+
+                // Get the corresponding range in rendered_frame.hitboxes from the layer snapshot
+                if let Some(layer_snapshot) = snapshot.layers.get(layer_id) {
+                    if let Some(frame_range) = &layer_snapshot.hitbox_range {
+                        for (i, hitbox) in hitbox_data.iter().enumerate() {
+                            let hitbox_idx = frame_range.start + i;
+                            if hitbox_idx < frame_range.end && hitbox_idx < self.rendered_frame.hitboxes.len() {
+                                // Transform from layer-local to window coordinates
+                                self.rendered_frame.hitboxes[hitbox_idx] = Hitbox {
+                                    id: hitbox.id,
+                                    key: hitbox.key,
+                                    bounds: Bounds {
+                                        origin: Point {
+                                            x: hitbox.bounds.origin.x + content_origin.x,
+                                            y: hitbox.bounds.origin.y + content_origin.y,
+                                        },
+                                        size: hitbox.bounds.size,
+                                    },
+                                    content_mask: ContentMask {
+                                        bounds: Bounds {
+                                            origin: Point {
+                                                x: hitbox.content_mask.bounds.origin.x + content_origin.x,
+                                                y: hitbox.content_mask.bounds.origin.y + content_origin.y,
+                                            },
+                                            size: hitbox.content_mask.bounds.size,
+                                        },
+                                    },
+                                    behavior: hitbox.behavior,
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update mouse hit test with current hitboxes
+        self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position);
+
+        // Clear composite_only flag but preserve dirty for next frame
+        self.invalidator.clear_composite_only();
+        self.needs_present.set(true);
+
         self.present();
 
-        // Clear compositor pending changes (scroll/transform/opacity deltas have been applied).
+        // Clear compositor pending changes (scroll/transform/opacity deltas have been applied)
         self.compositor_state.clear_pending_changes();
 
-        // If content invalidation arrived while we were prioritizing composite-only (e.g. an
-        // animation frame), schedule another frame so the FULL DRAW path can run.
+        // If content invalidation arrived while we were prioritizing composite-only,
+        // schedule another frame so the FULL DRAW path can run.
         if self.invalidator.is_dirty() {
             self.platform_window.request_frame();
         }
