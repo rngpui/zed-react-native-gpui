@@ -1,8 +1,8 @@
 use super::metal_atlas::MetalAtlas;
 use crate::{
     AtlasTextureId, BackdropBlur, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite,
-    PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow,
-    Size, Surface, TransformationMatrix, Underline, point, size,
+    PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene,
+    SceneSegmentPool, Shadow, Size, Surface, TransformationMatrix, Underline, point, size,
 };
 use anyhow::Result;
 use block::ConcreteBlock;
@@ -397,7 +397,7 @@ impl MetalRenderer {
         // nothing to do
     }
 
-    pub fn draw(&mut self, scene: &Scene) {
+    pub fn draw(&mut self, scene: &Scene, segment_pool: &SceneSegmentPool) {
         let layer = self.layer.clone();
         let viewport_size = layer.drawable_size();
         let viewport_size: Size<DevicePixels> = size(
@@ -429,8 +429,13 @@ impl MetalRenderer {
         loop {
             let mut instance_buffer = self.instance_buffer_pool.lock().acquire(&self.device);
 
-            let command_buffer =
-                self.draw_primitives(scene, &mut instance_buffer, drawable, viewport_size);
+            let command_buffer = self.draw_primitives(
+                scene,
+                segment_pool,
+                &mut instance_buffer,
+                drawable,
+                viewport_size,
+            );
 
             match command_buffer {
                 Ok(command_buffer) => {
@@ -479,7 +484,11 @@ impl MetalRenderer {
     /// This does not present the frame to screen - useful for visual testing
     /// where we want to capture what would be rendered without displaying it.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn render_to_image(&mut self, scene: &Scene) -> Result<RgbaImage> {
+    pub fn render_to_image(
+        &mut self,
+        scene: &Scene,
+        segment_pool: &SceneSegmentPool,
+    ) -> Result<RgbaImage> {
         let layer = self.layer.clone();
         let viewport_size = layer.drawable_size();
         let viewport_size: Size<DevicePixels> = size(
@@ -493,8 +502,13 @@ impl MetalRenderer {
         loop {
             let mut instance_buffer = self.instance_buffer_pool.lock().acquire(&self.device);
 
-            let command_buffer =
-                self.draw_primitives(scene, &mut instance_buffer, drawable, viewport_size);
+            let command_buffer = self.draw_primitives(
+                scene,
+                segment_pool,
+                &mut instance_buffer,
+                drawable,
+                viewport_size,
+            );
 
             match command_buffer {
                 Ok(command_buffer) => {
@@ -606,6 +620,7 @@ impl MetalRenderer {
     fn draw_primitives(
         &mut self,
         scene: &Scene,
+        segment_pool: &SceneSegmentPool,
         instance_buffer: &mut InstanceBuffer,
         drawable: &metal::MetalDrawableRef,
         viewport_size: Size<DevicePixels>,
@@ -625,7 +640,7 @@ impl MetalRenderer {
             },
         );
 
-        for batch in scene.batches() {
+        for batch in scene.batches(segment_pool) {
             let ok = match batch {
                 PrimitiveBatch::Shadows(shadows, transforms) => self.draw_shadows(
                     shadows,
@@ -747,15 +762,16 @@ impl MetalRenderer {
             if !ok {
                 command_encoder.end_encoding();
                 anyhow::bail!(
-                    "scene too large: {} paths, {} shadows, {} quads, {} blurs, {} underlines, {} mono, {} poly, {} surfaces",
-                    scene.paths.len(),
-                    scene.shadows.len(),
-                    scene.quads.len(),
-                    scene.backdrop_blurs.len(),
-                    scene.underlines.len(),
-                    scene.monochrome_sprites.len(),
-                    scene.polychrome_sprites.len(),
-                    scene.surfaces.len(),
+                    "scene too large: {} paths, {} shadows, {} quads, {} blurs, {} underlines, {} mono, {} subpixel, {} poly, {} surfaces",
+                    scene.paths_len(segment_pool),
+                    scene.shadows_len(segment_pool),
+                    scene.quads_len(segment_pool),
+                    scene.backdrop_blurs_len(segment_pool),
+                    scene.underlines_len(segment_pool),
+                    scene.monochrome_sprites_len(segment_pool),
+                    scene.subpixel_sprites_len(segment_pool),
+                    scene.polychrome_sprites_len(segment_pool),
+                    scene.surfaces_len(segment_pool),
                 );
             }
         }
@@ -914,12 +930,10 @@ impl MetalRenderer {
             transforms_offset as u64,
         );
 
-        let shadow_contents = unsafe {
-            (instance_buffer.metal_buffer.contents() as *mut u8).add(shadows_offset)
-        };
-        let transform_contents = unsafe {
-            (instance_buffer.metal_buffer.contents() as *mut u8).add(transforms_offset)
-        };
+        let shadow_contents =
+            unsafe { (instance_buffer.metal_buffer.contents() as *mut u8).add(shadows_offset) };
+        let transform_contents =
+            unsafe { (instance_buffer.metal_buffer.contents() as *mut u8).add(transforms_offset) };
 
         unsafe {
             ptr::copy_nonoverlapping(

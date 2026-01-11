@@ -1,9 +1,10 @@
 use crate::{
-    ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
-    TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
-    WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
+    ActiveTooltip, AnyView, App, AvailableSpace, Bounds, DispatchPhase, Element, ElementHashing,
+    ElementId, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId,
+    IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    SharedString, Size, TextOverflow, TextRun, TextStyle, TooltipId, TruncateFrom, UpdateResult,
+    WhiteSpace, Window, WrappedLine, WrappedLineLayout, register_tooltip_mouse_handlers,
+    set_tooltip_on_window,
 };
 use anyhow::Context as _;
 use itertools::Itertools;
@@ -11,6 +12,7 @@ use smallvec::SmallVec;
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
+    hash::{Hash, Hasher},
     mem,
     ops::Range,
     rc::Rc,
@@ -19,7 +21,7 @@ use std::{
 use util::ResultExt;
 
 impl Element for &'static str {
-    type RequestLayoutState = TextLayout;
+    type RequestLayoutState = ();
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
@@ -32,26 +34,24 @@ impl Element for &'static str {
 
     fn request_layout(
         &mut self,
-        _id: Option<&GlobalElementId>,
+        _global_id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
+        _window: &mut Window,
+        _cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut state = TextLayout::default();
-        let layout_id = state.layout(SharedString::from(*self), None, window, cx);
-        (layout_id, state)
+        unreachable!("&'static str uses retained node path")
     }
 
     fn prepaint(
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        text_layout: &mut Self::RequestLayoutState,
+        _bounds: Bounds<Pixels>,
+        _text_layout: &mut Self::RequestLayoutState,
         _window: &mut Window,
         _cx: &mut App,
     ) {
-        text_layout.prepaint(bounds, self)
+        unreachable!("&'static str uses retained node path")
     }
 
     fn paint(
@@ -59,14 +59,56 @@ impl Element for &'static str {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
-        text_layout: &mut TextLayout,
+        _text_layout: &mut Self::RequestLayoutState,
         _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
+        _window: &mut Window,
+        _cx: &mut App,
     ) {
-        text_layout.paint(self, window, cx)
+        unreachable!("&'static str uses retained node path")
+    }
+
+    fn into_any(self) -> crate::AnyElement {
+        crate::AnyElement::new(self)
+    }
+
+    fn content_hash(&self) -> u64 {
+        Self::hash_values(|hasher| self.hash(hasher))
+    }
+
+    fn layout_hash(&self) -> u64 {
+        self.content_hash()
+    }
+
+    fn paint_hash(&self) -> u64 {
+        self.content_hash()
+    }
+
+    fn create_render_node(&mut self) -> Option<Box<dyn crate::RenderNode>> {
+        Some(Box::new(TextNode::new(SharedString::from(*self), None)))
+    }
+
+    fn update_render_node(
+        &mut self,
+        node: &mut dyn crate::RenderNode,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<UpdateResult> {
+        if let Some(text_node) = node.as_any_mut().downcast_mut::<TextNode>() {
+            let text_changed = text_node.text != *self;
+            let runs_changed = text_node.runs.is_some();
+            if text_changed || runs_changed {
+                text_node.update_from(SharedString::from(*self), None);
+                Some(UpdateResult::LAYOUT_CHANGED)
+            } else {
+                Some(UpdateResult::UNCHANGED)
+            }
+        } else {
+            None
+        }
     }
 }
+
+impl ElementHashing for &'static str {}
 
 impl IntoElement for &'static str {
     type Element = Self;
@@ -85,7 +127,7 @@ impl IntoElement for String {
 }
 
 impl Element for SharedString {
-    type RequestLayoutState = TextLayout;
+    type RequestLayoutState = ();
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
@@ -98,26 +140,24 @@ impl Element for SharedString {
 
     fn request_layout(
         &mut self,
-        _id: Option<&GlobalElementId>,
+        _global_id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
+        _window: &mut Window,
+        _cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut state = TextLayout::default();
-        let layout_id = state.layout(self.clone(), None, window, cx);
-        (layout_id, state)
+        unreachable!("SharedString uses retained node path")
     }
 
     fn prepaint(
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        text_layout: &mut Self::RequestLayoutState,
+        _bounds: Bounds<Pixels>,
+        _text_layout: &mut Self::RequestLayoutState,
         _window: &mut Window,
         _cx: &mut App,
     ) {
-        text_layout.prepaint(bounds, self.as_ref())
+        unreachable!("SharedString uses retained node path")
     }
 
     fn paint(
@@ -125,14 +165,56 @@ impl Element for SharedString {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
-        text_layout: &mut Self::RequestLayoutState,
+        _text_layout: &mut Self::RequestLayoutState,
         _: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
+        _window: &mut Window,
+        _cx: &mut App,
     ) {
-        text_layout.paint(self.as_ref(), window, cx)
+        unreachable!("SharedString uses retained node path")
+    }
+
+    fn into_any(self) -> crate::AnyElement {
+        crate::AnyElement::new(self)
+    }
+
+    fn content_hash(&self) -> u64 {
+        Self::hash_values(|hasher| self.hash(hasher))
+    }
+
+    fn layout_hash(&self) -> u64 {
+        self.content_hash()
+    }
+
+    fn paint_hash(&self) -> u64 {
+        self.content_hash()
+    }
+
+    fn create_render_node(&mut self) -> Option<Box<dyn crate::RenderNode>> {
+        Some(Box::new(TextNode::new(self.clone(), None)))
+    }
+
+    fn update_render_node(
+        &mut self,
+        node: &mut dyn crate::RenderNode,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<UpdateResult> {
+        if let Some(text_node) = node.as_any_mut().downcast_mut::<TextNode>() {
+            let text_changed = text_node.text != *self;
+            let runs_changed = text_node.runs.is_some();
+            if text_changed || runs_changed {
+                text_node.update_from(self.clone(), None);
+                Some(UpdateResult::LAYOUT_CHANGED)
+            } else {
+                Some(UpdateResult::UNCHANGED)
+            }
+        } else {
+            None
+        }
     }
 }
+
+impl ElementHashing for SharedString {}
 
 impl IntoElement for SharedString {
     type Element = Self;
@@ -260,7 +342,7 @@ impl Element for StyledText {
 
     fn request_layout(
         &mut self,
-        _id: Option<&GlobalElementId>,
+        _global_id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
@@ -341,7 +423,16 @@ impl TextLayout {
         } else {
             vec![text_style.to_run(text.len())]
         };
-        window.request_measured_layout(Default::default(), {
+
+        let content_hash = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut hasher);
+            font_size.0.to_bits().hash(&mut hasher);
+            line_height.0.to_bits().hash(&mut hasher);
+            hasher.finish()
+        };
+
+        window.request_measured_layout_cached(Default::default(), content_hash, {
             let element_state = self.clone();
 
             move |known_dimensions, available_space, window, cx| {
@@ -727,12 +818,13 @@ impl Element for InteractiveText {
 
     fn request_layout(
         &mut self,
-        _id: Option<&GlobalElementId>,
+        global_id: Option<&GlobalElementId>,
         inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        self.text.request_layout(None, inspector_id, window, cx)
+        self.text
+            .request_layout(global_id, inspector_id, window, cx)
     }
 
     fn prepaint(
@@ -744,11 +836,11 @@ impl Element for InteractiveText {
         window: &mut Window,
         cx: &mut App,
     ) -> Hitbox {
-        window.with_optional_element_state::<InteractiveTextState, _>(
-            global_id,
+        let global_id = *global_id.unwrap();
+        window.with_element_state::<InteractiveTextState, _>(
+            &global_id,
             |interactive_state, window| {
-                let mut interactive_state = interactive_state
-                    .map(|interactive_state| interactive_state.unwrap_or_default());
+                let mut interactive_state = interactive_state;
 
                 if let Some(interactive_state) = interactive_state.as_mut() {
                     if self.tooltip_builder.is_some() {
@@ -761,9 +853,10 @@ impl Element for InteractiveText {
                 }
 
                 self.text
-                    .prepaint(None, inspector_id, bounds, state, window, cx);
-                let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-                (hitbox, interactive_state)
+                    .prepaint(Some(&global_id), inspector_id, bounds, state, window, cx);
+                let hitbox =
+                    window.insert_hitbox_with_fiber(bounds, HitboxBehavior::Normal, global_id);
+                (hitbox, interactive_state.unwrap_or_default())
             },
         )
     }
@@ -778,10 +871,10 @@ impl Element for InteractiveText {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let current_view = window.current_view();
+        let global_id = *global_id.unwrap();
         let text_layout = self.text.layout().clone();
         window.with_element_state::<InteractiveTextState, _>(
-            global_id.unwrap(),
+            &global_id,
             |interactive_state, window| {
                 let mut interactive_state = interactive_state.unwrap_or_default();
                 if let Some(click_listener) = self.click_listener.take() {
@@ -851,7 +944,7 @@ impl Element for InteractiveText {
                                 if let Some(hover_listener) = hover_listener.as_ref() {
                                     hover_listener(updated, event.clone(), window, cx);
                                 }
-                                cx.notify(current_view);
+                                window.invalidate_fiber_paint(global_id);
                             }
                         }
                     }
@@ -908,8 +1001,15 @@ impl Element for InteractiveText {
                     );
                 }
 
-                self.text
-                    .paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
+                self.text.paint(
+                    Some(&global_id),
+                    inspector_id,
+                    bounds,
+                    &mut (),
+                    &mut (),
+                    window,
+                    cx,
+                );
 
                 ((), interactive_state)
             },
@@ -922,5 +1022,341 @@ impl IntoElement for InteractiveText {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+/// Retained render node for text elements.
+///
+/// This node owns all text-specific data including the text content,
+/// optional style runs, and cached layout (shaped lines).
+pub(crate) struct TextNode {
+    /// The text content.
+    text: SharedString,
+    /// Optional styled runs.
+    runs: Option<Vec<TextRun>>,
+    /// Resolved text style captured during layout_begin.
+    /// This is the inherited text style from parent elements.
+    resolved_text_style: Option<TextStyle>,
+    /// Cached layout data (populated during measure).
+    layout: Option<TextNodeLayout>,
+    /// Bounds set during prepaint.
+    bounds: Option<Bounds<Pixels>>,
+}
+
+/// Cached layout data for TextNode.
+struct TextNodeLayout {
+    lines: SmallVec<[WrappedLine; 1]>,
+    line_height: Pixels,
+    size: Size<Pixels>,
+    text_style: TextStyle,
+}
+
+impl TextNode {
+    /// Create a new TextNode with the given text.
+    pub fn new(text: SharedString, runs: Option<Vec<TextRun>>) -> Self {
+        Self {
+            text,
+            runs,
+            resolved_text_style: None,
+            layout: None,
+            bounds: None,
+        }
+    }
+
+    /// Update this node from a descriptor.
+    pub fn update_from(&mut self, text: SharedString, runs: Option<Vec<TextRun>>) {
+        // Clear cached layout since text content may have changed
+        self.layout = None;
+        self.text = text;
+        self.runs = runs;
+    }
+}
+
+impl crate::RenderNode for TextNode {
+    fn needs_child_bounds(&self) -> bool {
+        false
+    }
+
+    fn taffy_style(&self, _rem_size: crate::Pixels, _scale_factor: f32) -> taffy::style::Style {
+        taffy::style::Style::default()
+    }
+
+    fn layout_begin(&mut self, ctx: &mut crate::LayoutCtx) -> crate::LayoutFrame {
+        // Capture the inherited text style from the window stack.
+        // This is set up by parent Divs during their layout_begin.
+        self.resolved_text_style = Some(ctx.window.text_style());
+        crate::LayoutFrame {
+            handled: true,
+            ..Default::default()
+        }
+    }
+
+    fn measure(
+        &mut self,
+        known: Size<Option<Pixels>>,
+        available: Size<AvailableSpace>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Size<Pixels>> {
+        // Use the resolved text style captured during layout_begin,
+        // or fall back to window.text_style() if not available.
+        let text_style = self
+            .resolved_text_style
+            .clone()
+            .unwrap_or_else(|| window.text_style());
+        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let line_height = text_style
+            .line_height
+            .to_pixels(font_size.into(), window.rem_size());
+
+        let runs = self
+            .runs
+            .clone()
+            .unwrap_or_else(|| vec![text_style.to_run(self.text.len())]);
+
+        let wrap_width = if text_style.white_space == WhiteSpace::Normal {
+            known.width.or(match available.width {
+                AvailableSpace::Definite(x) => Some(x),
+                _ => None,
+            })
+        } else {
+            None
+        };
+
+        let (truncate_width, truncation_affix, truncate_from) =
+            if let Some(text_overflow) = text_style.text_overflow.clone() {
+                let width = known.width.or(match available.width {
+                    AvailableSpace::Definite(x) => match text_style.line_clamp {
+                        Some(max_lines) => Some(x * max_lines),
+                        None => Some(x),
+                    },
+                    _ => None,
+                });
+
+                match text_overflow {
+                    TextOverflow::Truncate(s) => (width, s, TruncateFrom::End),
+                    TextOverflow::TruncateStart(s) => (width, s, TruncateFrom::Start),
+                }
+            } else {
+                (None, "".into(), TruncateFrom::End)
+            };
+
+        // Check if we can reuse cached layout
+        if let Some(ref layout) = self.layout {
+            if truncate_width.is_none() {
+                return Some(layout.size);
+            }
+        }
+
+        let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+        let (text, runs) = if let Some(truncate_width) = truncate_width {
+            line_wrapper.truncate_line(
+                self.text.clone(),
+                truncate_width,
+                &truncation_affix,
+                &runs,
+                truncate_from,
+            )
+        } else {
+            (self.text.clone(), std::borrow::Cow::Borrowed(&*runs))
+        };
+
+        let Some(lines) = window
+            .text_system()
+            .shape_text(text, font_size, &runs, wrap_width, text_style.line_clamp)
+            .log_err()
+        else {
+            self.layout = Some(TextNodeLayout {
+                lines: Default::default(),
+                line_height,
+                size: Size::default(),
+                text_style,
+            });
+            return Some(Size::default());
+        };
+
+        let mut text_size: Size<Pixels> = Size::default();
+        for line in &lines {
+            let line_size = line.size(line_height);
+            text_size.height += line_size.height;
+            text_size.width = text_size.width.max(line_size.width).ceil();
+        }
+
+        self.layout = Some(TextNodeLayout {
+            lines,
+            line_height,
+            size: text_size,
+            text_style,
+        });
+
+        Some(text_size)
+    }
+
+    fn prepaint_begin(&mut self, ctx: &mut crate::PrepaintCtx) -> crate::PrepaintFrame {
+        self.bounds = Some(ctx.bounds);
+
+        crate::PrepaintFrame {
+            handled: true,
+            skip_children: true,
+            ..Default::default()
+        }
+    }
+
+    fn prepaint_end(&mut self, _ctx: &mut crate::PrepaintCtx, _frame: crate::PrepaintFrame) {
+        // Nothing to pop for text
+    }
+
+    fn paint_begin(&mut self, ctx: &mut crate::PaintCtx) -> crate::PaintFrame {
+        if let Some(ref layout) = self.layout {
+            // Use paint-time bounds directly. Text depends on up-to-date bounds for correct positioning
+            // (e.g. after window resizes). Prepaint may be replayed, so relying solely on cached
+            // prepaint bounds can lead to stale coordinates.
+            let bounds = ctx.bounds;
+            self.bounds = Some(bounds);
+
+            let mut line_origin = bounds.origin;
+            for line in &layout.lines {
+                line.paint_background(
+                    line_origin,
+                    layout.line_height,
+                    layout.text_style.text_align,
+                    Some(bounds),
+                    ctx.window,
+                    ctx.cx,
+                )
+                .log_err();
+                line.paint(
+                    line_origin,
+                    layout.line_height,
+                    layout.text_style.text_align,
+                    Some(bounds),
+                    ctx.window,
+                    ctx.cx,
+                )
+                .log_err();
+                line_origin.y += line.size(layout.line_height).height;
+            }
+        }
+
+        crate::PaintFrame {
+            handled: true,
+            skip_children: true,
+            ..Default::default()
+        }
+    }
+
+    fn paint_end(&mut self, _ctx: &mut crate::PaintCtx, _frame: crate::PaintFrame) {
+        // Nothing to pop for text
+    }
+
+    // Uses default downcasting implementations.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{self as gpui, div, px, point, size, Context, Render, RenderNode, TestAppContext};
+
+    struct RootView;
+
+    impl Render for RootView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    #[gpui::test]
+    fn test_text_node_update_render_node_preserves_layout_when_unchanged(cx: &mut TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, _| RootView);
+
+        cx.update(|window, app| {
+            let known = Size {
+                width: None,
+                height: None,
+            };
+            let available = Size {
+                width: AvailableSpace::Definite(px(500.)),
+                height: AvailableSpace::Definite(px(500.)),
+            };
+
+            // &'static str updates should preserve cached layout when unchanged.
+            let mut node = TextNode::new(SharedString::from("hello"), None);
+            node.measure(known, available, window, app);
+            assert!(node.layout.is_some());
+            let mut element: &'static str = "hello";
+            match element.update_render_node(&mut node, window, app) {
+                Some(update) => assert!(!update.any_change()),
+                None => panic!("expected &'static str to update an existing TextNode"),
+            }
+            assert!(node.layout.is_some());
+
+            element = "world";
+            match element.update_render_node(&mut node, window, app) {
+                Some(update) => assert!(update.layout_changed && update.paint_changed),
+                None => panic!("expected &'static str to update an existing TextNode"),
+            }
+            assert!(node.layout.is_none());
+
+            // SharedString updates should preserve cached layout when unchanged.
+            let mut node = TextNode::new(SharedString::from("hello"), None);
+            node.measure(known, available, window, app);
+            assert!(node.layout.is_some());
+            let mut element = SharedString::from("hello");
+            match element.update_render_node(&mut node, window, app) {
+                Some(update) => assert!(!update.any_change()),
+                None => panic!("expected SharedString to update an existing TextNode"),
+            }
+            assert!(node.layout.is_some());
+
+            element = SharedString::from("world");
+            match element.update_render_node(&mut node, window, app) {
+                Some(update) => assert!(update.layout_changed && update.paint_changed),
+                None => panic!("expected SharedString to update an existing TextNode"),
+            }
+            assert!(node.layout.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn test_text_node_paint_begin_uses_paint_bounds(cx: &mut TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, _| RootView);
+
+        cx.update(|window, app| {
+            let known = Size {
+                width: None,
+                height: None,
+            };
+            let available = Size {
+                width: AvailableSpace::Definite(px(500.)),
+                height: AvailableSpace::Definite(px(500.)),
+            };
+
+            let mut node = TextNode::new(SharedString::from("hello"), None);
+            node.measure(known, available, window, app);
+
+            let old_bounds = Bounds::new(point(px(1.), px(2.)), size(px(3.), px(4.)));
+            let new_bounds = Bounds::new(point(px(10.), px(20.)), size(px(30.), px(40.)));
+            node.bounds = Some(old_bounds);
+
+            window.invalidator.set_phase(crate::window::DrawPhase::Paint);
+            window.next_frame.scene.begin_frame();
+
+            let fiber_id = window.fiber.tree.create_placeholder_fiber();
+            let mut paint_ctx = crate::PaintCtx {
+                fiber_id,
+                bounds: new_bounds,
+                child_bounds: Vec::new(),
+                inspector_id: None,
+                window,
+                cx: app,
+            };
+            node.paint_begin(&mut paint_ctx);
+
+            assert_eq!(
+                node.bounds,
+                Some(new_bounds),
+                "TextNode must use paint-time bounds to avoid stale positioning when prepaint is replayed"
+            );
+        });
     }
 }

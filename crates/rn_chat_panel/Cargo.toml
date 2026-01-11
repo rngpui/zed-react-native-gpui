@@ -67,10 +67,6 @@ rngpui.workspace = true
 rngpui_core.workspace = true
 rngpui_ffi.workspace = true
 rngpui_macros.workspace = true
-rngpui_ext_rnsvg.workspace = true
-
-# Craby-generated TurboModules (FFI layer for C++ → Rust)
-gpui_modules.workspace = true
 # Shared types crate (breaks cyclic dependency)
 rn_chat_panel_types = { path = "./crates/types" }
 # Zed-specific craby modules (theme, workspace, llm)

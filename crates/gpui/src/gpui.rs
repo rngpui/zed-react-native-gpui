@@ -10,18 +10,18 @@ extern crate self as gpui;
 mod action;
 mod app;
 
-mod arena;
 mod asset_cache;
 mod assets;
-mod bounds_tree;
 mod color;
 /// The default colors used by GPUI.
 pub mod colors;
 mod element;
 mod elements;
 mod executor;
+mod fiber;
 mod geometry;
 mod global;
+mod identity;
 mod input;
 mod inspector;
 mod interactive;
@@ -33,6 +33,7 @@ pub mod prelude;
 mod profiler;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod queue;
+mod render_node;
 mod scene;
 mod shared_string;
 mod shared_uri;
@@ -71,7 +72,6 @@ mod seal {
 pub use action::*;
 pub use anyhow::Result;
 pub use app::*;
-pub(crate) use arena::*;
 pub use asset_cache::*;
 pub use assets::*;
 pub use color::*;
@@ -79,10 +79,12 @@ pub use ctor::ctor;
 pub use element::*;
 pub use elements::*;
 pub use executor::*;
+pub(crate) use fiber::*;
 pub use geometry::*;
 pub use global::*;
 pub use gpui_macros::{AppContext, IntoElement, Render, VisualContext, register_action, test};
 pub use http_client;
+pub(crate) use identity::*;
 pub use input::*;
 pub use inspector::*;
 pub use interactive::*;
@@ -94,6 +96,7 @@ pub use profiler::*;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) use queue::{PriorityQueueReceiver, PriorityQueueSender};
 pub use refineable::*;
+pub(crate) use render_node::*;
 pub use scene::*;
 pub use shared_string::*;
 pub use shared_uri::*;
@@ -104,7 +107,6 @@ pub use styled::*;
 pub use subscription::*;
 pub use svg_renderer::*;
 pub(crate) use tab_stop::*;
-use taffy::TaffyLayoutEngine;
 pub use taffy::{AvailableSpace, LayoutId};
 #[cfg(any(test, feature = "test-support"))]
 pub use test::*;

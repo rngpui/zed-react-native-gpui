@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+MODE="${1:-html}"
+if [[ "$MODE" != "html" && "$MODE" != "text" && "$MODE" != "lcov" && "$MODE" != "clean" ]]; then
+    cat <<'EOF'
+Usage: script/coverage-gpui [html|text|lcov|clean] [-- <cargo llvm-cov args>]
+
+Examples:
+  script/coverage-gpui html
+  script/coverage-gpui text
+  script/coverage-gpui lcov
+  script/coverage-gpui html -- --nocapture
+  script/coverage-gpui clean
+EOF
+    exit 1
+fi
+
+shift || true
+
+if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
+    echo "cargo-llvm-cov is not installed. Install with: cargo install cargo-llvm-cov"
+    exit 1
+fi
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+CARGO_BIN="${CARGO:-cargo}"
+PACKAGE="${GPUI_COVERAGE_PACKAGE:-gpui_rn}"
+
+case "$MODE" in
+    html)
+        set -x
+        "$CARGO_BIN" llvm-cov -p "$PACKAGE" --features test-support --html "$@"
+        set +x
+        echo "Coverage report: target/llvm-cov/html/index.html"
+        ;;
+    text)
+        set -x
+        "$CARGO_BIN" llvm-cov -p "$PACKAGE" --features test-support "$@"
+        ;;
+    lcov)
+        set -x
+        "$CARGO_BIN" llvm-cov -p "$PACKAGE" --features test-support --lcov --output-path target/llvm-cov/lcov.info "$@"
+        set +x
+        echo "LCOV report: target/llvm-cov/lcov.info"
+        ;;
+    clean)
+        set -x
+        "$CARGO_BIN" llvm-cov clean
+        ;;
+esac

@@ -96,7 +96,7 @@ impl IntoElement for ImageCacheElement {
 }
 
 impl Element for ImageCacheElement {
-    type RequestLayoutState = SmallVec<[LayoutId; 4]>;
+    type RequestLayoutState = ();
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
@@ -116,15 +116,13 @@ impl Element for ImageCacheElement {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let image_cache = self.image_cache_provider.provide(window, cx);
         window.with_image_cache(Some(image_cache), |window| {
-            let child_layout_ids = self
-                .children
-                .iter_mut()
-                .map(|child| child.request_layout(window, cx))
-                .collect::<SmallVec<_>>();
+            for child in &mut self.children {
+                child.request_layout(window, cx);
+            }
             let mut style = Style::default();
             style.refine(&self.style);
-            let layout_id = window.request_layout(style, child_layout_ids.iter().copied(), cx);
-            (layout_id, child_layout_ids)
+            let layout_id = window.request_layout(style, [], cx);
+            (layout_id, ())
         })
     }
 

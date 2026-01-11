@@ -2642,13 +2642,9 @@ impl Workspace {
                                 let focused = window.focused(cx);
                                 window.dispatch_keystroke(keystroke.clone(), cx);
                                 if window.focused(cx) != focused {
-                                    // dispatch_keystroke may cause the focus to change.
-                                    // draw's side effect is to schedule the FocusChanged events in the current flush effect cycle
-                                    // And we need that to happen before the next keystroke to keep vim mode happy...
-                                    // (Note that the tests always do this implicitly, so you must manually test with something like:
-                                    //   "bindings": { "g z": ["workspace::SendKeystrokes", ": j <enter> u"]}
-                                    // )
-                                    window.draw(cx).clear();
+                                    // Dispatch focus change events so subsequent keystrokes
+                                    // see the updated focus state (needed for vim mode).
+                                    window.dispatch_pending_focus_events(cx);
                                 }
                             })
                             .ok();

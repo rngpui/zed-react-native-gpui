@@ -78,7 +78,6 @@ pub fn init(cx: &mut App) {
     // Register extensions before calling `rngpui::init()`.
     // `rngpui::init()` initializes the extension registry; registering after
     // that point is ignored.
-    rngpui_ext_rnsvg::init();
     native_components::init();
     rngpui::init();
 

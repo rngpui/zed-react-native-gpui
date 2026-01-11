@@ -1,3 +1,4 @@
+use crate::window::context::PaintCx;
 use crate::{
     App, Bounds, Half, Hsla, LineLayout, Pixels, Point, Result, SharedString, StrikethroughStyle,
     TextAlign, TransformationMatrix, UnderlineStyle, Window, WrapBoundary, WrappedLineLayout,
@@ -520,7 +521,7 @@ fn paint_line(
                     size: max_glyph_size,
                 };
 
-                let content_mask = window.content_mask();
+                let content_mask = PaintCx::new(window).content_mask();
                 let glyph_intersects_mask = if transform.is_unit() {
                     max_glyph_bounds.intersects(&content_mask.bounds)
                 } else {

@@ -311,6 +311,7 @@ impl DirectXRenderer {
     pub(crate) fn draw(
         &mut self,
         scene: &Scene,
+        segment_pool: &SceneSegmentPool,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
         if self.skip_draws {
@@ -322,7 +323,7 @@ impl DirectXRenderer {
             WindowBackgroundAppearance::Opaque => [1.0f32; 4],
             _ => [0.0f32; 4],
         })?;
-        for batch in scene.batches() {
+        for batch in scene.batches(segment_pool) {
             match batch {
                 PrimitiveBatch::Shadows(shadows, transforms) => self.draw_shadows(shadows, transforms),
                 PrimitiveBatch::Quads(quads, transforms) => self.draw_quads(quads, transforms),
@@ -354,16 +355,16 @@ impl DirectXRenderer {
             .context(format!(
                 "scene too large:\
                 {} paths, {} shadows, {} quads, {} blurs, {} underlines, {} mono, {} subpixel, {} poly, {} custom, {} surfaces",
-                scene.paths.len(),
-                scene.shadows.len(),
-                scene.quads.len(),
-                scene.backdrop_blurs.len(),
-                scene.underlines.len(),
-                scene.monochrome_sprites.len(),
-                scene.subpixel_sprites.len(),
-                scene.polychrome_sprites.len(),
+                scene.paths_len(segment_pool),
+                scene.shadows_len(segment_pool),
+                scene.quads_len(segment_pool),
+                scene.backdrop_blurs_len(segment_pool),
+                scene.underlines_len(segment_pool),
+                scene.monochrome_sprites_len(segment_pool),
+                scene.subpixel_sprites_len(segment_pool),
+                scene.polychrome_sprites_len(segment_pool),
                 scene.shaders.len(),
-                scene.surfaces.len(),
+                scene.surfaces_len(segment_pool),
             ))?;
         }
         self.present()
@@ -449,7 +450,11 @@ impl DirectXRenderer {
         )
     }
 
-    fn draw_quads(&mut self, quads: &[Quad], quad_transforms: &[TransformationMatrix]) -> Result<()> {
+    fn draw_quads(
+        &mut self,
+        quads: &[Quad],
+        quad_transforms: &[TransformationMatrix],
+    ) -> Result<()> {
         if quads.is_empty() {
             return Ok(());
         }
@@ -1211,7 +1216,11 @@ impl<T> PipelineState<T> {
             self.view.clone(),
             self.aux.as_ref().and_then(|aux| aux.view.clone()),
         ];
-        let view_slice = if self.aux.is_some() { &views[..2] } else { &views[..1] };
+        let view_slice = if self.aux.is_some() {
+            &views[..2]
+        } else {
+            &views[..1]
+        };
         set_pipeline_state(
             device_context,
             view_slice,
@@ -1241,7 +1250,11 @@ impl<T> PipelineState<T> {
             self.view.clone(),
             self.aux.as_ref().and_then(|aux| aux.view.clone()),
         ];
-        let view_slice = if self.aux.is_some() { &views[..2] } else { &views[..1] };
+        let view_slice = if self.aux.is_some() {
+            &views[..2]
+        } else {
+            &views[..1]
+        };
         set_pipeline_state(
             device_context,
             view_slice,

@@ -4,19 +4,18 @@
 use super::{BladeAtlas, BladeContext};
 use crate::{
     BackdropBlur, Background, Bounds, DevicePixels, GpuSpecs, MonochromeSprite, Path, Point,
-    PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, TransformationMatrix,
+    PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, SceneSegmentPool, Shadow, Size,
     Underline, get_gamma_correction_ratios,
 };
 #[cfg(any(test, feature = "test-support"))]
 use anyhow::Result;
-use blade_graphics::{self as gpu, ShaderData};
+use blade_graphics as gpu;
 use blade_util::{BufferBelt, BufferBeltDescriptor};
 use bytemuck::{Pod, Zeroable};
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
 #[cfg(target_os = "macos")]
 use media::core_video::CVMetalTextureCache;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 const MAX_FRAME_TIME_MS: u32 = 10000;
@@ -736,9 +735,21 @@ impl BladeRenderer {
         }
     }
 
-    pub fn draw(&mut self, scene: &Scene) {
+    pub fn draw(&mut self, scene: &Scene, segment_pool: &SceneSegmentPool) {
         self.command_encoder.start();
         self.atlas.before_frame(&mut self.command_encoder);
+        // Keep scene count helpers exercised for diagnostics parity across renderers.
+        let _scene_counts = (
+            scene.paths_len(segment_pool),
+            scene.shadows_len(segment_pool),
+            scene.quads_len(segment_pool),
+            scene.backdrop_blurs_len(segment_pool),
+            scene.underlines_len(segment_pool),
+            scene.monochrome_sprites_len(segment_pool),
+            scene.subpixel_sprites_len(segment_pool),
+            scene.polychrome_sprites_len(segment_pool),
+            scene.surfaces_len(segment_pool),
+        );
 
         let frame = {
             profiling::scope!("acquire frame");
@@ -775,7 +786,7 @@ impl BladeRenderer {
         );
 
         profiling::scope!("render pass");
-        for batch in scene.batches() {
+        for batch in scene.batches(segment_pool) {
             match batch {
                 PrimitiveBatch::Quads(quads, transforms) => {
                     let instance_buf = unsafe { self.instance_belt.alloc_typed(quads, &self.gpu) };
@@ -1112,7 +1123,11 @@ impl BladeRenderer {
     /// This is not yet implemented for BladeRenderer.
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
-    pub fn render_to_image(&mut self, _scene: &Scene) -> Result<RgbaImage> {
+    pub fn render_to_image(
+        &mut self,
+        _scene: &Scene,
+        _segment_pool: &SceneSegmentPool,
+    ) -> Result<RgbaImage> {
         anyhow::bail!("render_to_image is not yet implemented for BladeRenderer")
     }
 }
