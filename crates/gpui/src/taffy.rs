@@ -1,7 +1,8 @@
 use crate::{
-    AbsoluteLength, App, Bounds, DefiniteLength, Edges, Length, Pixels, Point,
+    AbsoluteLength, AnyElement, App, Bounds, DefiniteLength, Edges, Length, Pixels, Point,
     Size, Style, Window, display_list::ComputedElementId, point, size,
 };
+use bitflags::bitflags;
 use collections::{FxHashMap, FxHashSet};
 use stacksafe::{StackSafe, stacksafe};
 use std::{fmt::Debug, ops::Range};
@@ -12,6 +13,21 @@ use taffy::{
     style::AvailableSpace as TaffyAvailableSpace,
     tree::NodeId,
 };
+
+bitflags! {
+    /// Flags indicating what work needs to be done for a node.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct DirtyFlags: u8 {
+        /// The node's view needs to call render() again.
+        const NEEDS_RENDER  = 0b0001;
+        /// The node needs layout recomputation.
+        const NEEDS_LAYOUT  = 0b0010;
+        /// The node needs to be repainted.
+        const NEEDS_PAINT   = 0b0100;
+        /// At least one descendant is dirty (for tree traversal optimization).
+        const SUBTREE_DIRTY = 0b1000;
+    }
+}
 
 type NodeMeasureFn = StackSafe<
     Box<
@@ -24,10 +40,38 @@ type NodeMeasureFn = StackSafe<
     >,
 >;
 
+/// Cached prepaint state for an element (hitboxes, focus handles, etc.).
+/// Placeholder for Phase 6 implementation.
+#[derive(Default)]
+pub struct CachedPrepaint {
+    // TODO: Add prepaint cached state
+}
+
+/// Cached paint output for an element (display items).
+/// Placeholder for Phase 6 implementation.
+#[derive(Default)]
+pub struct CachedPaint {
+    // TODO: Add paint cached state (display items, bounds)
+}
+
 struct NodeContext {
+    /// Measure function for leaf nodes with intrinsic sizing.
     measure: Option<NodeMeasureFn>,
-    /// Generation when this node was last accessed
+
+    /// Generation when this node was last accessed.
     last_access: u64,
+
+    /// The element stored in this node for retention across frames.
+    element: Option<AnyElement>,
+
+    /// Dirty flags indicating what work needs to be done.
+    dirty_flags: DirtyFlags,
+
+    /// Cached prepaint state (hitboxes, etc.).
+    cached_prepaint: Option<CachedPrepaint>,
+
+    /// Cached paint output (display items).
+    cached_paint: Option<CachedPaint>,
 }
 
 /// Statistics for layout cache performance.
@@ -152,6 +196,10 @@ impl TaffyLayoutEngine {
                         NodeContext {
                             measure: None,
                             last_access: self.generation,
+                            element: None,
+                            dirty_flags: DirtyFlags::empty(),
+                            cached_prepaint: None,
+                            cached_paint: None,
                         },
                     )
                     .expect(EXPECT_MESSAGE)
@@ -169,6 +217,10 @@ impl TaffyLayoutEngine {
                         Some(NodeContext {
                             measure: None,
                             last_access: self.generation,
+                            element: None,
+                            dirty_flags: DirtyFlags::empty(),
+                            cached_prepaint: None,
+                            cached_paint: None,
                         }),
                     )
                     .expect(EXPECT_MESSAGE);
@@ -219,6 +271,10 @@ impl TaffyLayoutEngine {
                     Some(NodeContext {
                         measure: Some(measure_fn),
                         last_access: self.generation,
+                        element: None,
+                        dirty_flags: DirtyFlags::empty(),
+                        cached_prepaint: None,
+                        cached_paint: None,
                     }),
                 )
                 .expect(EXPECT_MESSAGE);
@@ -237,6 +293,10 @@ impl TaffyLayoutEngine {
                     NodeContext {
                         measure: Some(measure_fn),
                         last_access: self.generation,
+                        element: None,
+                        dirty_flags: DirtyFlags::empty(),
+                        cached_prepaint: None,
+                        cached_paint: None,
                     },
                 )
                 .expect(EXPECT_MESSAGE);
@@ -255,18 +315,27 @@ impl TaffyLayoutEngine {
         children: &[LayoutId],
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
+        let context = NodeContext {
+            measure: None,
+            last_access: self.generation,
+            element: None,
+            dirty_flags: DirtyFlags::empty(),
+            cached_prepaint: None,
+            cached_paint: None,
+        };
 
         if children.is_empty() {
             self.taffy
-                .new_leaf(taffy_style)
+                .new_leaf_with_context(taffy_style, context)
                 .expect(EXPECT_MESSAGE)
                 .into()
         } else {
-            self.taffy
+            let node_id = self.taffy
                 // This is safe because LayoutId is repr(transparent) to taffy::tree::NodeId.
                 .new_with_children(taffy_style, LayoutId::to_taffy_slice(children))
-                .expect(EXPECT_MESSAGE)
-                .into()
+                .expect(EXPECT_MESSAGE);
+            self.taffy.set_node_context(node_id, Some(context)).expect(EXPECT_MESSAGE);
+            node_id.into()
         }
     }
 
@@ -291,6 +360,10 @@ impl TaffyLayoutEngine {
                 NodeContext {
                     measure: Some(StackSafe::new(Box::new(measure))),
                     last_access: self.generation,
+                    element: None,
+                    dirty_flags: DirtyFlags::empty(),
+                    cached_prepaint: None,
+                    cached_paint: None,
                 },
             )
             .expect(EXPECT_MESSAGE)
@@ -454,6 +527,126 @@ impl TaffyLayoutEngine {
         self.absolute_layout_bounds.insert(id, bounds);
 
         bounds
+    }
+
+    // ============================================================
+    // Element Storage Methods
+    // ============================================================
+
+    /// Store an element in the node's context.
+    pub fn store_element(&mut self, id: LayoutId, element: AnyElement) {
+        if let Some(context) = self.taffy.get_node_context_mut(id.into()) {
+            context.element = Some(element);
+        }
+    }
+
+    /// Get a reference to the element stored in the node's context.
+    pub fn get_element(&self, id: LayoutId) -> Option<&AnyElement> {
+        self.taffy
+            .get_node_context(id.into())
+            .and_then(|ctx| ctx.element.as_ref())
+    }
+
+    /// Take the element from the node's context, leaving None in its place.
+    pub fn take_element(&mut self, id: LayoutId) -> Option<AnyElement> {
+        self.taffy
+            .get_node_context_mut(id.into())
+            .and_then(|ctx| ctx.element.take())
+    }
+
+    // ============================================================
+    // Dirty Flag Methods
+    // ============================================================
+
+    /// Get the dirty flags for a node.
+    pub fn get_dirty_flags(&self, id: LayoutId) -> DirtyFlags {
+        self.taffy
+            .get_node_context(id.into())
+            .map(|ctx| ctx.dirty_flags)
+            .unwrap_or(DirtyFlags::empty())
+    }
+
+    /// Set the dirty flags for a node (replaces existing flags).
+    pub fn set_dirty_flags(&mut self, id: LayoutId, flags: DirtyFlags) {
+        if let Some(context) = self.taffy.get_node_context_mut(id.into()) {
+            context.dirty_flags = flags;
+        }
+    }
+
+    /// Mark a node with dirty flags and propagate SUBTREE_DIRTY up to ancestors.
+    pub fn mark_dirty_with_flags(&mut self, id: LayoutId, flags: DirtyFlags) {
+        // Set flags on this node
+        if let Some(context) = self.taffy.get_node_context_mut(id.into()) {
+            context.dirty_flags |= flags;
+        }
+
+        // Propagate SUBTREE_DIRTY up to ancestors
+        let mut current = self.taffy.parent(id.into());
+        while let Some(parent_id) = current {
+            if let Some(context) = self.taffy.get_node_context_mut(parent_id) {
+                if context.dirty_flags.contains(DirtyFlags::SUBTREE_DIRTY) {
+                    break; // Already marked, ancestors must be too
+                }
+                context.dirty_flags |= DirtyFlags::SUBTREE_DIRTY;
+            }
+            current = self.taffy.parent(parent_id);
+        }
+    }
+
+    /// Clear all dirty flags for a node.
+    pub fn clear_dirty_flags(&mut self, id: LayoutId) {
+        if let Some(context) = self.taffy.get_node_context_mut(id.into()) {
+            context.dirty_flags = DirtyFlags::empty();
+        }
+    }
+
+    // ============================================================
+    // Cached Paint Methods
+    // ============================================================
+
+    /// Get a reference to the cached prepaint for a node.
+    pub fn get_cached_prepaint(&self, id: LayoutId) -> Option<&CachedPrepaint> {
+        self.taffy
+            .get_node_context(id.into())
+            .and_then(|ctx| ctx.cached_prepaint.as_ref())
+    }
+
+    /// Set the cached prepaint for a node.
+    pub fn set_cached_prepaint(&mut self, id: LayoutId, cached: CachedPrepaint) {
+        if let Some(context) = self.taffy.get_node_context_mut(id.into()) {
+            context.cached_prepaint = Some(cached);
+        }
+    }
+
+    /// Get a reference to the cached paint for a node.
+    pub fn get_cached_paint(&self, id: LayoutId) -> Option<&CachedPaint> {
+        self.taffy
+            .get_node_context(id.into())
+            .and_then(|ctx| ctx.cached_paint.as_ref())
+    }
+
+    /// Set the cached paint for a node.
+    pub fn set_cached_paint(&mut self, id: LayoutId, cached: CachedPaint) {
+        if let Some(context) = self.taffy.get_node_context_mut(id.into()) {
+            context.cached_paint = Some(cached);
+        }
+    }
+
+    // ============================================================
+    // Tree Traversal Methods
+    // ============================================================
+
+    /// Get the parent of a node, if it has one.
+    pub fn parent(&self, id: LayoutId) -> Option<LayoutId> {
+        self.taffy.parent(id.into()).map(LayoutId::from)
+    }
+
+    /// Get the children of a node.
+    pub fn children(&self, id: LayoutId) -> Vec<LayoutId> {
+        self.taffy
+            .children(id.into())
+            .map(|children| children.into_iter().map(LayoutId::from).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -815,5 +1008,109 @@ impl From<Size<Pixels>> for Size<AvailableSpace> {
             width: AvailableSpace::Definite(size.width),
             height: AvailableSpace::Definite(size.height),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dirty_flags_operations() {
+        let mut flags = DirtyFlags::empty();
+        assert!(flags.is_empty());
+
+        flags |= DirtyFlags::NEEDS_RENDER;
+        assert!(flags.contains(DirtyFlags::NEEDS_RENDER));
+        assert!(!flags.contains(DirtyFlags::NEEDS_LAYOUT));
+
+        flags |= DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT;
+        assert!(flags.contains(DirtyFlags::NEEDS_RENDER));
+        assert!(flags.contains(DirtyFlags::NEEDS_LAYOUT));
+        assert!(flags.contains(DirtyFlags::NEEDS_PAINT));
+        assert!(!flags.contains(DirtyFlags::SUBTREE_DIRTY));
+
+        let combined = DirtyFlags::NEEDS_RENDER | DirtyFlags::SUBTREE_DIRTY;
+        assert!(combined.intersects(DirtyFlags::NEEDS_RENDER));
+        assert!(combined.intersects(DirtyFlags::SUBTREE_DIRTY));
+        assert!(!combined.intersects(DirtyFlags::NEEDS_LAYOUT));
+    }
+
+    #[test]
+    fn test_dirty_flags_default() {
+        let flags = DirtyFlags::default();
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn test_layout_engine_dirty_flag_methods() {
+        let mut engine = TaffyLayoutEngine::new();
+        let style = Style::default();
+        let rem_size = Pixels(16.0);
+        let scale_factor = 1.0;
+
+        let layout_id = engine.request_layout(style.clone(), rem_size, scale_factor, &[]);
+
+        // Initially flags should be empty
+        assert!(engine.get_dirty_flags(layout_id).is_empty());
+
+        // Set flags
+        engine.set_dirty_flags(layout_id, DirtyFlags::NEEDS_PAINT);
+        assert!(engine.get_dirty_flags(layout_id).contains(DirtyFlags::NEEDS_PAINT));
+
+        // Clear flags
+        engine.clear_dirty_flags(layout_id);
+        assert!(engine.get_dirty_flags(layout_id).is_empty());
+    }
+
+    #[test]
+    fn test_dirty_flag_propagation() {
+        let mut engine = TaffyLayoutEngine::new();
+        let style = Style::default();
+        let rem_size = Pixels(16.0);
+        let scale_factor = 1.0;
+
+        // Create a tree: grandparent -> parent -> child
+        let grandparent = engine.request_layout(style.clone(), rem_size, scale_factor, &[]);
+        let parent = engine.request_layout(style.clone(), rem_size, scale_factor, &[]);
+        let child = engine.request_layout(style.clone(), rem_size, scale_factor, &[]);
+
+        // Re-create with proper parent-child relationships
+        engine.taffy.set_children(grandparent.into(), &[parent.into()]).unwrap();
+        engine.taffy.set_children(parent.into(), &[child.into()]).unwrap();
+
+        // Mark the child dirty
+        engine.mark_dirty_with_flags(child, DirtyFlags::NEEDS_PAINT);
+
+        // Child should have NEEDS_PAINT
+        assert!(engine.get_dirty_flags(child).contains(DirtyFlags::NEEDS_PAINT));
+
+        // Parent and grandparent should have SUBTREE_DIRTY
+        assert!(engine.get_dirty_flags(parent).contains(DirtyFlags::SUBTREE_DIRTY));
+        assert!(engine.get_dirty_flags(grandparent).contains(DirtyFlags::SUBTREE_DIRTY));
+    }
+
+    #[test]
+    fn test_tree_traversal() {
+        let mut engine = TaffyLayoutEngine::new();
+        let style = Style::default();
+        let rem_size = Pixels(16.0);
+        let scale_factor = 1.0;
+
+        // Create a tree: parent -> [child1, child2]
+        let child1 = engine.request_layout(style.clone(), rem_size, scale_factor, &[]);
+        let child2 = engine.request_layout(style.clone(), rem_size, scale_factor, &[]);
+        let parent = engine.request_layout(style.clone(), rem_size, scale_factor, &[child1, child2]);
+
+        // Test parent() method
+        assert_eq!(engine.parent(child1), Some(parent));
+        assert_eq!(engine.parent(child2), Some(parent));
+        assert_eq!(engine.parent(parent), None);
+
+        // Test children() method
+        let children = engine.children(parent);
+        assert_eq!(children.len(), 2);
+        assert!(children.contains(&child1));
+        assert!(children.contains(&child2));
     }
 }
