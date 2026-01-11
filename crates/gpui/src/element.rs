@@ -154,6 +154,16 @@ pub trait Element: 'static + IntoElement {
         CachePolicy::Default
     }
 
+    /// Returns true if this element has interactive styles (hover, active) that
+    /// change based on user interaction. Used to determine if parent elements
+    /// can safely cache this element to texture.
+    ///
+    /// Elements with interactive styles should not be cached to texture because
+    /// the cached texture would become stale when the style changes.
+    fn has_interactive_styles(&self) -> bool {
+        false
+    }
+
     /// Convert this element into a dynamically-typed [`AnyElement`].
     fn into_any(self) -> AnyElement {
         AnyElement::new(self)
@@ -361,6 +371,8 @@ trait ElementObject {
         window: &mut Window,
         cx: &mut App,
     ) -> Size<Pixels>;
+
+    fn has_interactive_styles(&self) -> bool;
 }
 
 /// A wrapper around an implementer of [`Element`] that allows it to be drawn in a window.
@@ -676,6 +688,10 @@ where
     ) -> Size<Pixels> {
         Drawable::layout_as_root(self, available_space, window, cx)
     }
+
+    fn has_interactive_styles(&self) -> bool {
+        self.element.has_interactive_styles()
+    }
 }
 
 /// A dynamically typed element that can be used to store any element type.
@@ -763,6 +779,12 @@ impl AnyElement {
     ) -> Option<FocusHandle> {
         self.layout_as_root(available_space, window, cx);
         window.with_absolute_element_offset(origin, |window| self.prepaint(window, cx))
+    }
+
+    /// Returns true if this element has interactive styles (hover, active) that
+    /// change based on user interaction.
+    pub fn has_interactive_styles(&self) -> bool {
+        self.0.has_interactive_styles()
     }
 }
 

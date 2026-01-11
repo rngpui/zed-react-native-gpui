@@ -1304,6 +1304,7 @@ pub fn div() -> Div {
         children: SmallVec::default(),
         prepaint_listener: None,
         image_cache: None,
+        has_interactive_children: false,
     }
 }
 
@@ -1313,6 +1314,9 @@ pub struct Div {
     children: SmallVec<[StackSafe<AnyElement>; 2]>,
     prepaint_listener: Option<Box<dyn Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static>>,
     image_cache: Option<Box<dyn ImageCacheProvider>>,
+    /// True if any child element has interactive styles (hover, active).
+    /// Used to determine if this Div can safely cache its subtree to texture.
+    has_interactive_children: bool,
 }
 
 impl Div {
@@ -1398,13 +1402,10 @@ impl Div {
             return false;
         }
 
-        // IMPORTANT: Exclude elements with children for now.
-        // Children might have interactive styles (hover, active) that would become
-        // stale in the cached texture. We can't easily check children's styles,
-        // so we conservatively disable RTT for containers.
-        // TODO: Add proper tracking of interactive descendants to enable RTT
-        // for containers with only non-interactive children.
-        if !self.children.is_empty() {
+        // Exclude elements with interactive children (hover, active styles).
+        // These would become stale in the cached texture since the child's
+        // appearance changes based on user interaction.
+        if self.has_interactive_children {
             return false;
         }
 
@@ -1923,8 +1924,12 @@ impl InteractiveElement for Div {
 
 impl ParentElement for Div {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
-        self.children
-            .extend(elements.into_iter().map(StackSafe::new))
+        for element in elements {
+            if element.has_interactive_styles() {
+                self.has_interactive_children = true;
+            }
+            self.children.push(StackSafe::new(element));
+        }
     }
 }
 
@@ -1938,6 +1943,13 @@ impl Element for Div {
 
     fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
         self.interactivity.source_location()
+    }
+
+    fn has_interactive_styles(&self) -> bool {
+        self.interactivity.hover_style.is_some()
+            || self.interactivity.group_hover_style.is_some()
+            || self.interactivity.active_style.is_some()
+            || self.interactivity.group_active_style.is_some()
     }
 
     fn content_hash(
