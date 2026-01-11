@@ -617,14 +617,24 @@ impl<E: Element> Drawable<E> {
                 let force_prepaint =
                     parent_force_prepaint || needs_prepaint || force_layout;
 
+                eprintln!(
+                    "[DRAWABLE request_layout] retained_id={:?} reconciling={} needs_layout={} needs_prepaint={} subtree_dirty={} force_layout={} cached_layout={:?}",
+                    retained_id, reconciling, needs_layout, needs_prepaint, subtree_dirty, force_layout, layout_id
+                );
+
                 if !reconciling && !force_layout && !subtree_dirty {
                     if let Some(layout_id) = layout_id {
+                        eprintln!(
+                            "[DRAWABLE request_layout] SKIPPING layout for {:?} - using cached layout_id={:?}",
+                            retained_id, layout_id
+                        );
                         window.mark_layout_subtree_accessed(layout_id);
                         return layout_id;
                     }
                 }
 
                 if force_layout && !matches!(self.phase, ElementDrawPhase::Start) {
+                    eprintln!("[DRAWABLE request_layout] RESETTING element for reuse");
                     self.reset_for_reuse();
                 }
 
@@ -635,6 +645,7 @@ impl<E: Element> Drawable<E> {
                     context.force_prepaint_stack.push(force_prepaint);
                 }
 
+                eprintln!("[DRAWABLE request_layout] RUNNING layout for {:?}", retained_id);
                 let layout_id = run_request_layout(self, window, cx);
 
                 if let Some(retained) = window.retained_tree.get_mut(retained_id) {
@@ -660,6 +671,7 @@ impl<E: Element> Drawable<E> {
             }
         }
 
+        eprintln!("[DRAWABLE request_layout] NO retained context - running default layout");
         run_request_layout(self, window, cx)
     }
 
@@ -834,9 +846,18 @@ impl<E: Element> Drawable<E> {
                 let force_prepaint =
                     parent_force_prepaint || needs_prepaint || needs_layout;
 
+                eprintln!(
+                    "[DRAWABLE prepaint] retained_id={:?} reconciling={} needs_prepaint={} subtree_dirty={} force_prepaint={}",
+                    retained_id, reconciling, needs_prepaint, subtree_dirty, force_prepaint
+                );
+
                 if !reconciling && !force_prepaint && !subtree_dirty {
                     if let Some(layout_id) = layout_id {
                         if let Some(prepaint_range) = window.cached_prepaint_range(layout_id) {
+                            eprintln!(
+                                "[DRAWABLE prepaint] SKIPPING prepaint for {:?} - reusing cached range",
+                                retained_id
+                            );
                             let prepaint_start = window.prepaint_index();
                             window.reuse_prepaint(prepaint_range);
                             let prepaint_end = window.prepaint_index();
@@ -856,6 +877,7 @@ impl<E: Element> Drawable<E> {
                     context.force_prepaint_stack.push(force_prepaint);
                 }
 
+                eprintln!("[DRAWABLE prepaint] RUNNING prepaint for {:?}", retained_id);
                 run_prepaint(self, window, cx);
 
                 if let Some(retained) = window.retained_tree.get_mut(retained_id) {
@@ -870,6 +892,7 @@ impl<E: Element> Drawable<E> {
             }
         }
 
+        eprintln!("[DRAWABLE prepaint] NO retained context - running default prepaint");
         run_prepaint(self, window, cx);
     }
 
@@ -1032,9 +1055,18 @@ impl<E: Element> Drawable<E> {
 
                 let force_paint = parent_force_prepaint || needs_prepaint || needs_layout;
 
+                eprintln!(
+                    "[DRAWABLE paint] retained_id={:?} reconciling={} needs_paint={} subtree_dirty={} force_paint={}",
+                    retained_id, reconciling, needs_paint, subtree_dirty, force_paint
+                );
+
                 if !reconciling && !force_paint && !needs_paint && !subtree_dirty {
                     if let Some(layout_id) = layout_id {
                         if let Some(paint_range) = window.cached_paint_range(layout_id) {
+                            eprintln!(
+                                "[DRAWABLE paint] SKIPPING paint for {:?} - reusing cached range",
+                                retained_id
+                            );
                             let paint_start = window.paint_index();
                             window.reuse_paint(paint_range);
                             let paint_end = window.paint_index();
@@ -1053,6 +1085,7 @@ impl<E: Element> Drawable<E> {
                     context.force_prepaint_stack.push(force_paint);
                 }
 
+                eprintln!("[DRAWABLE paint] RUNNING paint for {:?}", retained_id);
                 run_paint(self, window, cx);
 
                 if let Some(retained) = window.retained_tree.get_mut(retained_id) {
@@ -1068,6 +1101,7 @@ impl<E: Element> Drawable<E> {
             }
         }
 
+        eprintln!("[DRAWABLE paint] NO retained context - running default paint");
         run_paint(self, window, cx);
     }
 

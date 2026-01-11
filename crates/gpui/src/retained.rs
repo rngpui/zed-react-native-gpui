@@ -267,6 +267,11 @@ impl RetainedTree {
         element_key: Option<ElementId>,
         content_hash: u64,
     ) -> RetainedElementId {
+        eprintln!(
+            "[RETAINED reconcile_root] entity={:?} type={:?} key={:?} hash={}",
+            entity_id, element_type, element_key, content_hash
+        );
+
         if let Some(root_id) = self.view_roots.get(&entity_id).copied() {
             let matches = self
                 .elements
@@ -274,14 +279,26 @@ impl RetainedTree {
                 .is_some_and(|element| element.element_type == element_type
                     && element.element_key == element_key);
             if matches {
+                eprintln!(
+                    "[RETAINED reconcile_root] MATCHED existing root {:?} for entity {:?}",
+                    root_id, entity_id
+                );
                 self.update_content_hash(root_id, content_hash);
                 return root_id;
             }
 
+            eprintln!(
+                "[RETAINED reconcile_root] TYPE MISMATCH - removing old root {:?}",
+                root_id
+            );
             self.remove_subtree(root_id);
         }
 
         let root_id = self.create_element(element_type, element_key, content_hash);
+        eprintln!(
+            "[RETAINED reconcile_root] CREATED new root {:?} for entity {:?}",
+            root_id, entity_id
+        );
         self.view_roots.insert(entity_id, root_id);
         root_id
     }
@@ -410,7 +427,13 @@ impl RetainedTree {
 
     fn update_content_hash(&mut self, id: RetainedElementId, new_hash: u64) {
         if let Some(element) = self.elements.get_mut(id) {
-            if new_hash == 0 || element.content_hash != new_hash {
+            let old_hash = element.content_hash;
+            let hash_changed = new_hash == 0 || old_hash != new_hash;
+            if hash_changed {
+                eprintln!(
+                    "[RETAINED update_hash] id={:?} old_hash={} new_hash={} DIRTY",
+                    id, old_hash, new_hash
+                );
                 element.content_hash = new_hash;
                 element.dirty.insert(
                     DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PREPAINT | DirtyFlags::NEEDS_PAINT,
@@ -418,6 +441,11 @@ impl RetainedTree {
                 if let Some(parent_id) = element.parent {
                     self.propagate_dirty_to_ancestors(parent_id);
                 }
+            } else {
+                eprintln!(
+                    "[RETAINED update_hash] id={:?} hash={} UNCHANGED",
+                    id, new_hash
+                );
             }
         }
     }
@@ -511,6 +539,11 @@ impl RetainedTree {
         self.elements.len()
     }
 
+    /// Alias for len() for clarity in logging.
+    pub fn element_count(&self) -> usize {
+        self.elements.len()
+    }
+
     /// Check if the tree is empty.
     pub fn is_empty(&self) -> bool {
         self.elements.is_empty()
@@ -565,6 +598,15 @@ impl RetainedView {
             root: None,
             root_id: None,
             type_id: TypeId::of::<V>(),
+        }
+    }
+
+    /// Create a new retained view with an explicit type ID (for AnyView).
+    pub fn new_untyped(type_id: TypeId) -> Self {
+        Self {
+            root: None,
+            root_id: None,
+            type_id,
         }
     }
 }

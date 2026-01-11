@@ -1852,6 +1852,14 @@ impl Window {
             .or_insert_with(crate::retained::RetainedView::new::<V>)
     }
 
+    /// Get the retained view for an entity, creating it if it doesn't exist (untyped version for AnyView).
+    pub(crate) fn get_or_create_retained_view_untyped(&mut self, entity_id: EntityId) -> &mut crate::retained::RetainedView {
+        use std::any::TypeId;
+        self.retained_views
+            .entry(entity_id)
+            .or_insert_with(|| crate::retained::RetainedView::new_untyped(TypeId::of::<()>()))
+    }
+
     /// Get the retained view for an entity if it exists.
     pub(crate) fn get_retained_view(&self, entity_id: EntityId) -> Option<&crate::retained::RetainedView> {
         self.retained_views.get(&entity_id)
@@ -2747,6 +2755,11 @@ impl Window {
     /// the contents of the new [`Scene`], use [`Self::present`].
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) {
+        static FRAME_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let frame_num = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        eprintln!("\n========== FRAME {} START ==========", frame_num);
+        eprintln!("[FRAME] dirty_views count: {}", self.dirty_views.len());
+
         self.invalidate_entities();
         self.layout_engine.as_mut().unwrap().begin_frame();
         self.next_frame.dispatch_tree.begin_frame();
@@ -3183,6 +3196,14 @@ impl Window {
         // Clear composite_only flag but preserve dirty for next frame
         self.invalidator.clear_composite_only();
         self.needs_present.set(true);
+
+        eprintln!(
+            "[FRAME] END - views_rendered={} views_skipped={} retained_elements={}",
+            self.view_stats.views_rendered,
+            self.view_stats.views_skipped,
+            self.retained_tree.element_count()
+        );
+        eprintln!("========== FRAME END ==========\n");
 
         self.present();
 

@@ -1,32 +1,34 @@
-# Retained-Mode GPUI: Design & Architecture
+# Fiber Architecture for GPUI
 
 ## Executive Summary
 
-This document proposes evolving GPUI from an **immediate-mode** rendering model (rebuild everything every frame) to a **retained-artifact** model (persist paint/layout artifacts, only rebuild what changed).
+This document describes the **fiber architecture** for GPUI - a fundamental redesign that achieves **O(changed) work per frame** by separating lightweight descriptors from persistent fibers.
 
-**The Problem**: GPUI currently does O(n) work per frame regardless of what changed, resulting in ~30fps in debug mode for a static 375-element grid on an M2 Ultra.
+**The Problem**: GPUI currently does O(n) work per frame regardless of what changed, resulting in ~30fps in debug mode for a static 375-element grid.
 
-**The Solution**: Retain *artifacts* (layout nodes, display list entries, tiles, textures) across frames, track changes through entity invalidation, and only re-render/re-layout/re-paint elements that actually changed.
+**The Solution**: Split the element system into two layers:
+1. **Descriptors** - Lightweight data objects created fresh each frame (cheap)
+2. **Fibers** - Persistent nodes that cache layout/paint results (expensive work cached)
 
-**The Goal**: O(changed) work per frame, enabling 120fps in debug mode for typical UI workloads.
+**The Goal**: 120fps in debug mode. O(1) frames when nothing changes.
 
-**Key Insight**: GPUI already has significant retained-mode infrastructure. The path forward is to unify and extend these existing systems, not introduce a parallel retained element tree.
+**Key Insight**: Creating descriptors is cheap. Layout and paint are expensive. Cache the expensive work in fibers, let descriptors be ephemeral.
 
 ---
 
 ## Table of Contents
 
 1. [Problem Analysis](#1-problem-analysis)
-2. [Design Goals](#2-design-goals)
-3. [Existing Infrastructure](#3-existing-infrastructure)
-4. [Architecture Overview](#4-architecture-overview)
-5. [Core Mechanisms](#5-core-mechanisms)
-6. [Incremental Layout](#6-incremental-layout)
-7. [Incremental Paint](#7-incremental-paint)
-8. [Tile & Raster Cache Unification](#8-tile--raster-cache-unification)
+2. [Architecture Overview](#2-architecture-overview)
+3. [Data Structures](#3-data-structures)
+4. [Frame Lifecycle](#4-frame-lifecycle)
+5. [Reconciliation](#5-reconciliation)
+6. [Dirty Flag Propagation](#6-dirty-flag-propagation)
+7. [Layout Integration](#7-layout-integration)
+8. [Paint Integration](#8-paint-integration)
 9. [Implementation Plan](#9-implementation-plan)
-10. [Performance Expectations](#10-performance-expectations)
-11. [Open Questions](#11-open-questions)
+10. [API Changes](#10-api-changes)
+11. [Performance Analysis](#11-performance-analysis)
 
 ---
 
@@ -34,747 +36,1085 @@ This document proposes evolving GPUI from an **immediate-mode** rendering model 
 
 ### 1.1 Current Architecture
 
-GPUI uses an immediate-mode-inspired architecture where the element tree is rebuilt from scratch every frame:
+GPUI is immediate-mode: `render()` creates fresh element structs every frame.
 
 ```
-Every frame (regardless of what changed):
-┌─────────────────────────────────────────────────────────────┐
-│  View::render()     → Rebuild entire element tree           │
-│  request_layout()   → Touch every Taffy node                │
-│  compute_layout()   → Walk entire layout tree               │
-│  prepaint()         → Visit every element                   │
-│  paint()            → Visit every element                   │
-└─────────────────────────────────────────────────────────────┘
+Frame N (something changes):
+  render() → allocate 375 Divs → request_layout → prepaint → paint
+                ↑
+            O(n) work even if only 1 element changed
+
+Frame N+1 (nothing changed):
+  render() → allocate 375 Divs → request_layout → prepaint → paint
+                ↑
+            STILL O(n) work - no caching helps here
 ```
 
-### 1.2 The Performance Impact
+### 1.2 Why Previous Approaches Failed
 
-Using `cache_bench` as a concrete example:
-- **Grid**: 375 cells (15x25), completely static
-- **Stats overlay**: ~30 elements, only text values change
-- **Total**: ~405 elements
+**Approach 1: Retain Element Instances**
+- Elements are arena-allocated, cleared every frame
+- Retaining them requires redesigning allocation and lifetimes
+- Doesn't solve the fundamental problem of O(n) traversal
 
-**Current behavior**:
-```
-Every frame:
-├── render() rebuilds 375 grid divs (unchanged!)
-├── render() rebuilds 30 stat elements (only values change)
-├── request_layout() x 405 elements
-├── compute_layout() walks all 405 nodes
-├── prepaint() x 405 elements
-├── paint() x 405 elements
-└── Result: ~30fps in debug mode on M2 Ultra
-```
+**Approach 2: Retained Artifacts (layout nodes, paint entries)**
+- Caches expensive results but still traverses entire tree
+- `render()` still creates fresh elements before any caching kicks in
+- O(n) allocation happens before reconciliation can help
 
-**Expected behavior**:
-```
-Frame where only stats change:
-├── Check grid dirty → NO, skip 375 elements
-├── Check stats dirty → YES, update ~10 text values
-├── Layout only stats subtree
-├── Paint only changed text
-└── Result: 120fps in debug mode
-```
+**Approach 3: Retained Tree + Reconciliation**
+- Reconciles ephemeral elements against persistent tree
+- Problem: `render()` already created all elements by the time reconciliation runs
+- We've done O(n) allocation before any diffing happens
 
-### 1.3 Comparison with React Native
+### 1.3 The Core Insight
 
-React Native achieves 120fps in debug mode (even with Hermes interpreter) because:
+> **Don't create elements. Create descriptors. Only do expensive work for dirty fibers.**
 
-1. **Retained native views**: Views persist across frames
-2. **Reconciliation**: Only changed components re-render
-3. **Minimal work per frame**: O(changed) not O(total)
+Descriptors are just data - struct allocation. The expensive work is:
+1. Layout computation (Taffy calls)
+2. Prepaint (bounds, hitboxes)
+3. Paint (GPU commands)
 
-GPUI, despite being compiled Rust with GPU acceleration, is slower because it does O(n) work unconditionally.
+If we cache expensive work in persistent fibers, and descriptors are cheap, we achieve O(changed) work even though descriptor creation is O(n).
 
-### 1.4 Root Cause
+### 1.4 Comparison with React
 
-The architectural issue is not "debug mode is slow" but rather:
+React solved this exact problem:
 
-> **GPUI does O(n) work every frame when O(changed) would suffice.**
+| Concept | React | GPUI Fiber |
+|---------|-------|------------|
+| Lightweight output | JSX elements | Descriptors |
+| Persistent tree | Fiber tree | Fiber tree |
+| Diffing | Reconciliation | Reconciliation |
+| Cached work | DOM nodes, layout | Layout, paint |
 
-Debug mode amplifies this by adding a constant multiplier to all operations. But the fundamental problem is the linear work, not the constant factor.
-
-### 1.5 Why Not Retain Element Instances?
-
-The original proposal suggested retaining `AnyElement` instances across frames. This is **not feasible** with current GPUI:
-
-- `AnyElement` is `ArenaBox<dyn ElementObject>` (`src/element.rs:663`)
-- Elements are allocated in `ELEMENT_ARENA` (`src/window.rs:227`)
-- The arena is cleared every frame (`src/arena.rs:179`)
-- Elements and callbacks are intentionally dropped each frame (`src/element.rs:13`)
-
-Retaining element instances would require redesigning allocation, lifetimes, and update semantics — a massive rewrite with unclear benefits over the artifact-based approach.
+React creates JSX elements every render (cheap). The reconciler diffs them against fibers. Only changed fibers update the DOM (expensive).
 
 ---
 
-## 2. Design Goals
+## 2. Architecture Overview
 
-### 2.1 Primary Goals
-
-1. **O(changed) frame complexity**: Work done should be proportional to what changed, not total elements
-2. **120fps in debug mode**: For typical UI workloads with few changes per frame
-3. **Build on existing infrastructure**: Extend what GPUI already has, don't introduce parallel systems
-4. **Backward compatible**: Existing GPUI code should work without modification
-
-### 2.2 Secondary Goals
-
-1. **Minimal memory overhead**: Retained artifacts should not significantly increase memory usage
-2. **Predictable performance**: No surprise O(n²) behaviors
-3. **Debuggability**: Clear tools to understand why re-renders happen
-4. **Incremental adoption**: Benefits increase as more infrastructure is connected
-
-### 2.3 Non-Goals
-
-1. **Retaining element instances**: Elements remain ephemeral (arena-allocated, per-frame)
-2. **Generic reconciliation/diff**: No framework-level element diffing
-3. **Render hash from struct fields**: Too expensive, unclear benefits over entity notification
-
----
-
-## 3. Existing Infrastructure
-
-GPUI already contains significant retained-mode building blocks. The strategy is to unify and extend these, not replace them.
-
-### 3.1 Runtime Dependency Tracking & Invalidation
-
-**Already implemented:**
-- `App::detect_accessed_entities` (`src/app.rs:854`)
-- `App::record_entities_accessed` (`src/app.rs:868`)
-- `App::notify` (`src/app.rs:2165`)
-- `Window::mark_view_dirty` (`src/window.rs:1502`)
-
-Views already track which entities they read during render. When an entity is updated via `notify()`, dependent views are marked dirty.
-
-### 3.2 View Subtree Reuse (AnyView::cached)
-
-**Already implemented:**
-- `AnyView::cached` reuses prepaint/paint ranges (`src/view.rs:99`, `src/view.rs:202`)
-- Cache lookup/application (`src/window.rs:2650`, `src/window.rs:2711`)
-
-This is extremely close to "retained mode" — it caches *artifacts* (paint ranges), not element instances. Currently opt-in via `AnyView::cached(style)`.
-
-### 3.3 Layout Node Reuse
-
-**Already implemented:**
-- `TaffyLayoutEngine.element_to_node: FxHashMap<GlobalElementId, NodeId>` (`src/taffy.rs:49`)
-
-Layout nodes persist across frames for elements with explicit IDs. This avoids recreating Taffy nodes.
-
-### 3.4 Universal Element Identity & Per-Element Paint Caching
-
-**Already implemented:**
-- `ComputedElementId` (`src/display_list.rs:325`)
-- `ElementEntry` with cached paint state (`src/display_list.rs:383`)
-- Phase 20 per-element caching in Window (`src/window.rs:3408`)
-
-Every element gets a stable identity. Paint artifacts can be cached and reused per-element.
-
-### 3.5 SubtreeCache / Render-to-Texture
-
-**Already implemented:**
-- Subtree cache lookup/insert (`src/window.rs:2759`, `src/window.rs:2854`)
-- RTT capture for scroll container optimization
-
-### 3.6 DisplayList & Tile System
-
-**Already implemented:**
-- `DisplayList` with spatial index (`src/display_list.rs`)
-- `DisplayList::invalidate_region` for dirty rect tracking (`src/display_list.rs:917`)
-- Tile cache with generation-based invalidation (`src/platform/mac/tile_cache.rs`)
-
----
-
-## 4. Architecture Overview
-
-### 4.1 High-Level Design
+### 2.1 Two-Layer Design
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     RETAINED ARTIFACT MODEL                          │
-│                                                                      │
-│  Elements: Ephemeral (arena-allocated, rebuilt when dirty)          │
-│  Artifacts: Retained (layout nodes, paint entries, tiles, textures) │
-│                                                                      │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  Invalidation Flow                                            │   │
-│  │                                                               │   │
-│  │  Entity.notify() ──► mark_view_dirty() ──► NEEDS_RENDER      │   │
-│  │                                                               │   │
-│  │  View dirty ──► rebuild element subtree ──► NEEDS_LAYOUT     │   │
-│  │                                                               │   │
-│  │  Layout changed ──► NEEDS_PAINT ──► invalidate_region()      │   │
-│  │                                                               │   │
-│  │  Dirty region ──► tile invalidation ──► re-rasterize tiles   │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-│                                                                      │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  Frame Cycle                                                  │   │
-│  │                                                               │   │
-│  │  1. Check view dirty flags (O(dirty views))                  │   │
-│  │  2. Rebuild dirty view subtrees only                         │   │
-│  │  3. Layout with cached nodes (O(dirty + ancestors))          │   │
-│  │  4. Paint with artifact reuse (O(dirty elements))            │   │
-│  │  5. Rasterize dirty tiles only (O(dirty tiles))              │   │
-│  │  6. Composite (unchanged)                                     │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  DESCRIPTORS (created fresh each frame)                         │
+│                                                                 │
+│  render() → DivDescriptor { style, children: [TextDescriptor] } │
+│                                                                 │
+│  Properties:                                                    │
+│  - Just data (style config, text content, children)             │
+│  - No layout, no paint, no GPU resources                        │
+│  - Cheap to create: ~100-200 bytes per element                  │
+│  - O(n) creation is acceptable                                  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼ reconcile
+┌─────────────────────────────────────────────────────────────────┐
+│  FIBER TREE (persistent across frames)                          │
+│                                                                 │
+│  Fiber {                                                        │
+│      descriptor_hash,    // For change detection                │
+│      layout_id,          // Cached Taffy result                 │
+│      bounds,             // Cached bounds                       │
+│      paint_range,        // Cached paint commands               │
+│      children: [FiberId],                                       │
+│      dirty: DirtyFlags,                                         │
+│  }                                                              │
+│                                                                 │
+│  Properties:                                                    │
+│  - Persists across frames                                       │
+│  - Caches expensive computation results                         │
+│  - Skip flags enable O(1) subtree skipping                      │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼ if dirty
+┌─────────────────────────────────────────────────────────────────┐
+│  LAYOUT / PAINT (only for dirty fibers)                         │
+│                                                                 │
+│  - Check fiber.dirty flags                                      │
+│  - If clean && no SUBTREE_DIRTY: return cached results          │
+│  - If dirty: compute layout/paint, update fiber cache           │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 Key Principles
+### 2.2 Key Principles
 
 | Principle | Description |
 |-----------|-------------|
-| **Artifacts, not instances** | Retain layout nodes, paint entries, tiles — not element objects |
-| **Entity-driven invalidation** | `notify()` is the primary signal, not hashing state |
-| **Unified identity** | `ComputedElementId` is the key for all caches |
-| **Dirty rect propagation** | Changes generate regions that invalidate tiles |
-| **Subtree skip** | Clean subtrees skip render/layout/paint entirely |
+| **Descriptors are cheap** | Just data, no expensive work |
+| **Fibers are persistent** | Survive across frames, cache results |
+| **Reconciliation diffs** | Compare descriptors to fibers, mark dirty |
+| **Dirty drives work** | Only dirty fibers do layout/paint |
+| **Subtree skip** | Clean subtrees skip entirely via SUBTREE_DIRTY |
 
-### 4.3 What Changes vs. What's Retained
+### 2.3 No Special "View" Concept
 
-| Component | Lifetime | Cache Key |
-|-----------|----------|-----------|
-| `AnyElement` | One frame (arena) | N/A |
-| View render output | One frame | N/A |
-| Layout `NodeId` | Persistent | `ComputedElementId` |
-| `ElementEntry` (paint cache) | Persistent | `ComputedElementId` |
-| `DisplayList` items | Per-layer, swapped | Element ranges |
-| Tile textures | LRU cached | `(LayerId, TileCoord, generation)` |
-| RTT textures | LRU cached | `(ElementId, bounds, clip)` |
+In this architecture, there's no distinction between "views" and "elements". Everything is:
+- A descriptor (ephemeral data)
+- Backed by a fiber (persistent cache)
+
+`Entity<V>` becomes just another fiber node that happens to have state. The rendering model is uniform.
 
 ---
 
-## 5. Core Mechanisms
+## 3. Data Structures
 
-### 5.1 Dirty Flags
+### 3.1 Descriptors
+
+Descriptors are lightweight data objects. They describe UI structure without doing expensive work.
 
 ```rust
-bitflags! {
-    /// Flags indicating what work is needed for a view/element.
-    #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-    pub struct DirtyFlags: u8 {
-        /// View's entity was notified, need to call render()
-        const NEEDS_RENDER = 0b0000_0001;
+/// Lightweight descriptor - just configuration, no layout/paint
+pub enum AnyDescriptor {
+    Div(DivDescriptor),
+    Text(TextDescriptor),
+    Image(ImageDescriptor),
+    Svg(SvgDescriptor),
+    Canvas(CanvasDescriptor),
+    // ... other element types
+}
 
-        /// Layout inputs changed, need to recompute layout
-        const NEEDS_LAYOUT = 0b0000_0010;
+pub struct DivDescriptor {
+    /// Style configuration
+    pub style: StyleRefinement,
+
+    /// Pre-computed style hash for fast comparison
+    pub style_hash: u64,
+
+    /// Optional key for stable identity in lists
+    pub key: Option<ElementId>,
+
+    /// Child descriptors
+    pub children: SmallVec<[AnyDescriptor; 4]>,
+
+    /// Event handlers (stored separately, not hashed)
+    pub interactivity: Interactivity,
+}
+
+pub struct TextDescriptor {
+    /// The text content
+    pub text: SharedString,
+
+    /// Text styling
+    pub style: TextStyle,
+
+    /// Pre-computed content hash
+    pub content_hash: u64,
+}
+
+impl DivDescriptor {
+    /// Compute hash for change detection (excludes children - they're compared recursively)
+    pub fn hash(&self) -> u64 {
+        self.style_hash
+    }
+}
+
+impl TextDescriptor {
+    /// Compute hash for change detection
+    pub fn hash(&self) -> u64 {
+        self.content_hash
+    }
+}
+```
+
+### 3.2 Fibers
+
+Fibers are persistent nodes that cache expensive computation results.
+
+```rust
+/// Opaque fiber identifier
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct FiberId(u32);
+
+/// A fiber node - persistent across frames
+pub struct Fiber {
+    // === Identity ===
+
+    /// Unique identifier
+    pub id: FiberId,
+
+    /// Type of element this fiber represents
+    pub element_type: TypeId,
+
+    /// Optional key for list reconciliation
+    pub key: Option<ElementId>,
+
+    // === Change Detection ===
+
+    /// Hash of the descriptor that created/updated this fiber
+    pub descriptor_hash: u64,
+
+    // === Cached Layout ===
+
+    /// Taffy layout node (persists across frames)
+    pub layout_id: Option<LayoutId>,
+
+    /// Cached layout result
+    pub bounds: Option<Bounds<Pixels>>,
+
+    /// Cached size from layout
+    pub size: Option<Size<Pixels>>,
+
+    // === Cached Paint ===
+
+    /// Range of paint commands in the scene
+    pub paint_range: Option<Range<PaintIndex>>,
+
+    /// Cached prepaint state
+    pub prepaint_state: Option<Box<dyn Any + Send>>,
+
+    // === Tree Structure ===
+
+    /// Parent fiber (None for root)
+    pub parent: Option<FiberId>,
+
+    /// Child fibers
+    pub children: SmallVec<[FiberId; 4]>,
+
+    // === Dirty Tracking ===
+
+    /// What work needs to be done
+    pub dirty: DirtyFlags,
+}
+
+bitflags::bitflags! {
+    /// Flags indicating what work is needed for this fiber
+    #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+    pub struct DirtyFlags: u8 {
+        /// Layout inputs changed, need to recompute
+        const NEEDS_LAYOUT  = 0b0001;
 
         /// Visual appearance changed, need to repaint
-        const NEEDS_PAINT  = 0b0000_0100;
+        const NEEDS_PAINT   = 0b0010;
 
-        /// Some descendant has dirty flags set (enables subtree skip)
-        const SUBTREE_DIRTY = 0b0000_1000;
+        /// Some descendant has dirty flags (enables subtree skip)
+        const SUBTREE_DIRTY = 0b0100;
+
+        /// Fiber is newly created this frame
+        const NEW           = 0b1000;
+    }
+}
+
+impl Fiber {
+    /// Check if this fiber needs any work
+    pub fn needs_work(&self) -> bool {
+        self.dirty.intersects(DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT)
+    }
+
+    /// Check if this fiber or any descendant needs work
+    pub fn subtree_needs_work(&self) -> bool {
+        self.dirty.intersects(
+            DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT | DirtyFlags::SUBTREE_DIRTY
+        )
     }
 }
 ```
 
-### 5.2 Invalidation via Entity Notification
+### 3.3 Fiber Tree
 
-The existing `notify()` system is the primary invalidation mechanism:
-
-```rust
-// When an entity updates:
-entity.update(cx, |state, cx| {
-    state.value = new_value;
-    cx.notify();  // Marks all dependent views as NEEDS_RENDER
-});
-
-// Framework automatically:
-// 1. Finds views that read this entity (via detect_accessed_entities)
-// 2. Marks them NEEDS_RENDER
-// 3. Propagates SUBTREE_DIRTY to ancestors
-```
-
-**No render hash needed.** The entity notification system already provides O(1) invalidation. Hashing entire view structs would reintroduce O(n) work and require `Hash` bounds on all fields.
-
-### 5.3 Subtree Dirty Propagation
+The fiber tree is stored in `Window` and persists across frames.
 
 ```rust
-impl Window {
-    fn mark_view_dirty(&mut self, view_id: EntityId) {
-        // Mark this view
-        self.dirty_views.insert(view_id, DirtyFlags::NEEDS_RENDER);
+/// The persistent fiber tree
+pub struct FiberTree {
+    /// All fibers, indexed by FiberId
+    fibers: SlotMap<FiberId, Fiber>,
 
-        // Propagate SUBTREE_DIRTY up to root
-        // This enables O(1) skip of clean subtrees
-        let mut current = self.view_parent(view_id);
-        while let Some(parent_id) = current {
-            let flags = self.dirty_views.entry(parent_id).or_default();
-            if flags.contains(DirtyFlags::SUBTREE_DIRTY) {
-                break;  // Already propagated
+    /// Root fiber for each view
+    view_roots: HashMap<EntityId, FiberId>,
+
+    /// Free list for fiber reuse
+    free_list: Vec<FiberId>,
+
+    /// Statistics for debugging
+    stats: FiberTreeStats,
+}
+
+#[derive(Default, Debug)]
+pub struct FiberTreeStats {
+    pub fibers_created: usize,
+    pub fibers_reused: usize,
+    pub fibers_removed: usize,
+    pub reconcile_comparisons: usize,
+    pub subtrees_skipped: usize,
+}
+
+impl FiberTree {
+    /// Get a fiber by ID
+    pub fn get(&self, id: FiberId) -> Option<&Fiber> {
+        self.fibers.get(id)
+    }
+
+    /// Get a mutable fiber by ID
+    pub fn get_mut(&mut self, id: FiberId) -> Option<&mut Fiber> {
+        self.fibers.get_mut(id)
+    }
+
+    /// Create a new fiber
+    pub fn create(&mut self, element_type: TypeId, key: Option<ElementId>) -> FiberId {
+        self.stats.fibers_created += 1;
+
+        // Try to reuse from free list
+        if let Some(id) = self.free_list.pop() {
+            let fiber = self.fibers.get_mut(id).unwrap();
+            fiber.element_type = element_type;
+            fiber.key = key;
+            fiber.dirty = DirtyFlags::NEW | DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT;
+            fiber.children.clear();
+            self.stats.fibers_reused += 1;
+            return id;
+        }
+
+        // Allocate new
+        self.fibers.insert(Fiber {
+            id: FiberId(0), // Will be set by SlotMap
+            element_type,
+            key,
+            descriptor_hash: 0,
+            layout_id: None,
+            bounds: None,
+            size: None,
+            paint_range: None,
+            prepaint_state: None,
+            parent: None,
+            children: SmallVec::new(),
+            dirty: DirtyFlags::NEW | DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT,
+        })
+    }
+
+    /// Remove a fiber and its descendants
+    pub fn remove(&mut self, id: FiberId) {
+        if let Some(fiber) = self.fibers.get(id) {
+            // Recursively remove children
+            let children: SmallVec<[FiberId; 4]> = fiber.children.clone();
+            for child_id in children {
+                self.remove(child_id);
             }
-            *flags |= DirtyFlags::SUBTREE_DIRTY;
-            current = self.view_parent(parent_id);
+
+            // Add to free list for reuse
+            self.free_list.push(id);
+            self.stats.fibers_removed += 1;
         }
     }
-}
-```
 
-### 5.4 Frame Cycle with Dirty Checking
+    /// Mark a fiber dirty and propagate SUBTREE_DIRTY to ancestors
+    pub fn mark_dirty(&mut self, id: FiberId, flags: DirtyFlags) {
+        if let Some(fiber) = self.fibers.get_mut(id) {
+            fiber.dirty.insert(flags);
 
-```rust
-impl Window {
-    pub fn draw(&mut self, cx: &mut App) {
-        // Phase 1: Render dirty views only
-        // Clean views skip render() entirely
-        self.render_dirty_views(cx);
+            // Propagate SUBTREE_DIRTY up to root
+            let mut current = fiber.parent;
+            while let Some(parent_id) = current {
+                if let Some(parent) = self.fibers.get_mut(parent_id) {
+                    if parent.dirty.contains(DirtyFlags::SUBTREE_DIRTY) {
+                        break; // Already propagated
+                    }
+                    parent.dirty.insert(DirtyFlags::SUBTREE_DIRTY);
+                    current = parent.parent;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
 
-        // Phase 2: Layout with node reuse
-        // Clean subtrees reuse cached layout
-        self.layout_incrementally(cx);
-
-        // Phase 3: Paint with artifact reuse
-        // Clean elements copy cached display items
-        self.paint_incrementally(cx);
-
-        // Phase 4: Rasterize dirty tiles only
-        // Clean tiles are not re-rendered
-        self.rasterize_dirty_tiles(cx);
-
-        // Phase 5: Composite (unchanged)
-        self.composite(cx);
-
-        // Clear per-frame dirty flags
-        self.clear_dirty_flags();
+    /// Clear dirty flags after frame
+    pub fn clear_dirty_flags(&mut self) {
+        for (_, fiber) in &mut self.fibers {
+            fiber.dirty = DirtyFlags::empty();
+        }
     }
 }
 ```
 
 ---
 
-## 6. Incremental Layout
+## 4. Frame Lifecycle
 
-### 6.1 Extend Layout Node Reuse
+### 4.1 Overview
 
-Currently, layout nodes are reused only for elements with explicit `GlobalElementId`. Extend this to all elements using `ComputedElementId`:
-
-```rust
-// Current (src/taffy.rs:49):
-element_to_node: FxHashMap<GlobalElementId, NodeId>
-
-// Extended:
-element_to_node: FxHashMap<ComputedElementId, NodeId>
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  FRAME CYCLE                                                     │
+│                                                                 │
+│  1. render()      → Build descriptor tree (O(n) but cheap)      │
+│  2. reconcile()   → Diff descriptors vs fibers, mark dirty      │
+│  3. layout()      → Compute layout for dirty fibers only        │
+│  4. prepaint()    → Compute bounds for dirty fibers only        │
+│  5. paint()       → Generate commands for dirty fibers only     │
+│  6. composite()   → Send to GPU (unchanged)                     │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-This gives every element stable layout node identity, not just `.id()` elements.
+### 4.2 Frame 1: Initial Render
 
-### 6.2 Layout Cache Validity
+```
+1. render() builds descriptor tree:
+   DivDescriptor {
+       style: {bg: 0x1e1e2e},
+       children: [
+           TextDescriptor { text: "FPS: 60" },
+           DivDescriptor {
+               key: "grid",
+               children: [
+                   DivDescriptor { children: [TextDescriptor { text: "0" }] },
+                   DivDescriptor { children: [TextDescriptor { text: "1" }] },
+                   ... (375 total)
+               ]
+           }
+       ]
+   }
+
+2. reconcile() creates fiber tree (all new):
+   - Create Fiber for each descriptor
+   - All fibers marked NEEDS_LAYOUT | NEEDS_PAINT | NEW
+   - Build parent/child relationships
+
+3. layout() computes all (all dirty):
+   - Request Taffy layout for each fiber
+   - Cache layout_id and bounds in fiber
+
+4. paint() generates all (all dirty):
+   - Generate paint commands for each fiber
+   - Cache paint_range in fiber
+
+5. composite() sends to GPU
+```
+
+### 4.3 Frame 2: FPS Changes, Grid Unchanged
+
+```
+1. render() builds new descriptor tree:
+   DivDescriptor {
+       style: {bg: 0x1e1e2e},        // SAME
+       children: [
+           TextDescriptor { text: "FPS: 61" },  // CHANGED
+           DivDescriptor {
+               key: "grid",
+               children: [ ... same 375 ... ]   // SAME
+           }
+       ]
+   }
+
+2. reconcile() diffs against fiber tree:
+   - Root div: hash matches → no dirty flags
+   - FPS text: hash DIFFERENT → mark NEEDS_LAYOUT | NEEDS_PAINT
+   - Grid div: hash matches → no dirty flags
+   - Grid children: all hashes match → no dirty flags
+   - Propagate SUBTREE_DIRTY from FPS text to root
+
+   Result:
+   - FPS text fiber: NEEDS_LAYOUT | NEEDS_PAINT
+   - Root fiber: SUBTREE_DIRTY
+   - Grid fiber: (clean)
+   - 375 grid children: (clean)
+
+3. layout() with skip logic:
+   - Root: has SUBTREE_DIRTY → check children
+     - FPS text: NEEDS_LAYOUT → recompute
+     - Grid: clean, no SUBTREE_DIRTY → SKIP ENTIRE SUBTREE
+
+   Work done: 2 fibers. Skipped: 376 fibers.
+
+4. paint() with skip logic:
+   - Root: has SUBTREE_DIRTY → check children
+     - FPS text: NEEDS_PAINT → repaint
+     - Grid: clean → replay cached paint_range
+
+   Work done: 1 repaint. Replayed: 375 cached.
+
+5. composite() sends to GPU
+```
+
+### 4.4 Frame 3: Nothing Changed
+
+```
+1. render() builds same descriptor tree
+
+2. reconcile() finds all hashes match:
+   - All fibers: dirty = (empty)
+   - No SUBTREE_DIRTY anywhere
+
+3. layout():
+   - Root: no NEEDS_LAYOUT, no SUBTREE_DIRTY
+   - Return cached layout_id immediately
+
+   Work done: O(1)
+
+4. paint():
+   - Root: no NEEDS_PAINT, no SUBTREE_DIRTY
+   - Replay entire cached paint_range
+
+   Work done: O(1)
+
+5. composite() sends to GPU
+```
+
+---
+
+## 5. Reconciliation
+
+### 5.1 Overview
+
+Reconciliation compares descriptors against the existing fiber tree and:
+1. Updates fibers that changed
+2. Creates fibers for new descriptors
+3. Removes fibers for deleted descriptors
+4. Sets dirty flags appropriately
+
+### 5.2 Algorithm
 
 ```rust
-struct LayoutCache {
-    node_id: NodeId,
-    constraints: Size<AvailableSpace>,
-    result: Size<Pixels>,
-}
+impl FiberTree {
+    /// Reconcile a descriptor tree against the fiber tree
+    pub fn reconcile(
+        &mut self,
+        fiber_id: FiberId,
+        descriptor: &AnyDescriptor,
+    ) {
+        let fiber = self.fibers.get_mut(fiber_id).unwrap();
+        let new_hash = descriptor.hash();
 
-impl Window {
-    fn layout_element(&mut self, element_id: ComputedElementId, constraints: Size<AvailableSpace>) -> Size<Pixels> {
-        // Check if cached layout is still valid
-        if let Some(cache) = self.layout_cache.get(&element_id) {
-            if cache.constraints == constraints && !self.is_layout_dirty(element_id) {
-                return cache.result;  // O(1) cache hit
+        // Check if this fiber changed
+        if fiber.descriptor_hash != new_hash {
+            fiber.descriptor_hash = new_hash;
+            fiber.dirty.insert(DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT);
+        }
+
+        // Reconcile children
+        self.reconcile_children(fiber_id, descriptor.children());
+
+        self.stats.reconcile_comparisons += 1;
+    }
+
+    /// Reconcile child descriptors against fiber's children
+    fn reconcile_children(
+        &mut self,
+        parent_id: FiberId,
+        descriptors: &[AnyDescriptor],
+    ) {
+        let parent = self.fibers.get(parent_id).unwrap();
+        let old_children = parent.children.clone();
+
+        // Build map of keyed children for O(1) lookup
+        let mut old_by_key: HashMap<ElementId, FiberId> = old_children
+            .iter()
+            .filter_map(|&id| {
+                self.fibers.get(id)
+                    .and_then(|f| f.key.map(|k| (k, id)))
+            })
+            .collect();
+
+        // Track which old children are reused
+        let mut reused: HashSet<FiberId> = HashSet::new();
+        let mut new_children: SmallVec<[FiberId; 4]> = SmallVec::new();
+
+        for (i, desc) in descriptors.iter().enumerate() {
+            let child_id = if let Some(key) = desc.key() {
+                // Keyed: look up by key
+                if let Some(existing_id) = old_by_key.remove(&key) {
+                    reused.insert(existing_id);
+                    self.reconcile(existing_id, desc);
+                    existing_id
+                } else {
+                    // New keyed child
+                    self.create_from_descriptor(desc, Some(parent_id))
+                }
+            } else {
+                // Unkeyed: positional matching
+                if i < old_children.len() {
+                    let existing_id = old_children[i];
+                    let existing = self.fibers.get(existing_id).unwrap();
+
+                    // Same type? Update in place
+                    if existing.element_type == desc.type_id() && existing.key.is_none() {
+                        reused.insert(existing_id);
+                        self.reconcile(existing_id, desc);
+                        existing_id
+                    } else {
+                        // Type mismatch: create new
+                        self.create_from_descriptor(desc, Some(parent_id))
+                    }
+                } else {
+                    // New child
+                    self.create_from_descriptor(desc, Some(parent_id))
+                }
+            };
+
+            new_children.push(child_id);
+        }
+
+        // Remove orphaned children (not reused)
+        for old_id in old_children {
+            if !reused.contains(&old_id) {
+                self.remove(old_id);
             }
         }
 
-        // Actually compute layout
-        let result = self.compute_layout(element_id, constraints);
+        // Update parent's children
+        self.fibers.get_mut(parent_id).unwrap().children = new_children;
 
-        // Cache for next frame
-        self.layout_cache.insert(element_id, LayoutCache {
-            node_id: self.get_or_create_node(element_id),
-            constraints,
-            result,
+        // Propagate SUBTREE_DIRTY if any child is dirty
+        let any_child_dirty = new_children.iter().any(|&id| {
+            self.fibers.get(id).map_or(false, |f| f.subtree_needs_work())
         });
 
-        result
+        if any_child_dirty {
+            self.fibers.get_mut(parent_id).unwrap()
+                .dirty.insert(DirtyFlags::SUBTREE_DIRTY);
+        }
+    }
+
+    /// Create a new fiber from a descriptor
+    fn create_from_descriptor(
+        &mut self,
+        descriptor: &AnyDescriptor,
+        parent: Option<FiberId>,
+    ) -> FiberId {
+        let fiber_id = self.create(descriptor.type_id(), descriptor.key());
+
+        let fiber = self.fibers.get_mut(fiber_id).unwrap();
+        fiber.descriptor_hash = descriptor.hash();
+        fiber.parent = parent;
+
+        // Recursively create children
+        for child_desc in descriptor.children() {
+            let child_id = self.create_from_descriptor(child_desc, Some(fiber_id));
+            self.fibers.get_mut(fiber_id).unwrap().children.push(child_id);
+        }
+
+        fiber_id
     }
 }
 ```
 
-### 6.3 Let Taffy Handle Incremental Layout
+### 5.3 Keyed Reconciliation
 
-Don't hand-roll incremental layout walking. Taffy already supports this:
+Keys are essential for list stability. Without keys, inserting at the beginning causes all fibers to be recreated:
 
 ```rust
-// Taffy's compute_layout is already incremental if:
-// 1. Node identity is stable (same NodeId across frames)
-// 2. Style hasn't changed
-// 3. Children haven't changed
+// Without keys: insert at index 0 → all fibers shift, all recreated
+[A, B, C] + insert X at 0 → [X, A, B, C]
+// Positional matching: X!=A, A!=B, B!=C, C!=? → recreate all
 
-// Our job is just to ensure stable identity via ComputedElementId
+// With keys: insert at index 0 → only X is new
+[A:1, B:2, C:3] + insert X:0 at 0 → [X:0, A:1, B:2, C:3]
+// Key matching: A:1→A:1, B:2→B:2, C:3→C:3, X:0 is new → create only X
+```
+
+Usage:
+
+```rust
+div().children(
+    items.iter().map(|item| {
+        div()
+            .key(item.id)  // Stable identity
+            .child(text(&item.name))
+    })
+)
 ```
 
 ---
 
-## 7. Incremental Paint
+## 6. Dirty Flag Propagation
 
-### 7.1 Extend AnyView::cached to be Default
+### 6.1 Bottom-Up: SUBTREE_DIRTY
 
-Currently `AnyView::cached(style)` is opt-in. Make it the default by storing the view's last root style in `AnyViewState`:
-
-```rust
-// Current (src/view.rs):
-pub struct AnyViewState {
-    root_style: Option<Style>,  // Only set if cached() was called
-    // ...
-}
-
-// Extended:
-pub struct AnyViewState {
-    root_style: Style,           // Always stored
-    cached_prepaint: Option<PrepaintState>,
-    cached_paint_range: Option<Range<usize>>,
-    // ...
-}
-```
-
-This allows caching to be automatic without requiring `AnyView::cached(style)`.
-
-### 7.2 Offset-Tolerant Reuse
-
-Currently cached views require exact origin match. Allow reuse when size matches but origin differs:
+When a fiber is marked dirty, propagate `SUBTREE_DIRTY` to all ancestors:
 
 ```rust
-impl Window {
-    fn can_reuse_cached_paint(&self, view_id: EntityId, new_bounds: Bounds<Pixels>) -> bool {
-        let cache = self.view_paint_cache.get(&view_id)?;
+fn mark_dirty(&mut self, id: FiberId, flags: DirtyFlags) {
+    self.fibers.get_mut(id).unwrap().dirty.insert(flags);
 
-        // Size must match exactly
-        if cache.bounds.size != new_bounds.size {
-            return false;
+    // Propagate up
+    let mut current = self.fibers.get(id).unwrap().parent;
+    while let Some(parent_id) = current {
+        let parent = self.fibers.get_mut(parent_id).unwrap();
+        if parent.dirty.contains(DirtyFlags::SUBTREE_DIRTY) {
+            break; // Already propagated
         }
-
-        // Origin can differ - we'll apply offset when copying items
-        true
-    }
-
-    fn copy_cached_paint_with_offset(&mut self, view_id: EntityId, new_origin: Point<Pixels>) {
-        let cache = self.view_paint_cache.get(&view_id).unwrap();
-        let offset = new_origin - cache.bounds.origin;
-
-        // Copy items with offset applied
-        for item in &cache.items {
-            self.display_list.push_item_with_offset(item.clone(), offset);
-        }
+        parent.dirty.insert(DirtyFlags::SUBTREE_DIRTY);
+        current = parent.parent;
     }
 }
 ```
 
-### 7.3 Subtree Paint Skip
+### 6.2 Top-Down: Skip Logic
 
-Track full subtree item ranges. If a subtree is unchanged and no descendant is invalidated, skip calling child `paint()` entirely:
+During traversal, skip entire subtrees that are clean:
 
 ```rust
-impl Window {
-    fn paint_view(&mut self, view_id: EntityId, cx: &mut Context) {
-        let flags = self.dirty_flags(view_id);
+fn traverse_layout(&mut self, fiber_id: FiberId) -> LayoutId {
+    let fiber = self.fibers.get(fiber_id).unwrap();
 
-        // Fast path: entire subtree is clean
-        if !flags.intersects(DirtyFlags::NEEDS_PAINT | DirtyFlags::SUBTREE_DIRTY) {
-            // Copy cached paint artifacts, skip paint() call
-            self.copy_cached_subtree_paint(view_id);
-            return;
-        }
+    // SKIP: clean and no dirty descendants
+    if !fiber.needs_work() && !fiber.dirty.contains(DirtyFlags::SUBTREE_DIRTY) {
+        self.stats.subtrees_skipped += 1;
+        return fiber.layout_id.unwrap(); // Return cached
+    }
 
-        if flags.contains(DirtyFlags::NEEDS_PAINT) {
-            // Actually paint this view
-            self.paint_view_fresh(view_id, cx);
-        } else {
-            // This view is clean but has dirty descendants
-            // Paint our cached content, recurse for children
-            self.copy_cached_view_paint(view_id);
-            self.paint_dirty_children(view_id, cx);
-        }
+    // Process children (recursive, may skip clean subtrees)
+    let child_layouts: Vec<LayoutId> = fiber.children.iter()
+        .map(|&child_id| self.traverse_layout(child_id))
+        .collect();
+
+    // Compute layout if this fiber needs it
+    if fiber.dirty.contains(DirtyFlags::NEEDS_LAYOUT) {
+        let layout_id = self.taffy.compute_layout(fiber, &child_layouts);
+        self.fibers.get_mut(fiber_id).unwrap().layout_id = Some(layout_id);
+        layout_id
+    } else {
+        fiber.layout_id.unwrap()
     }
 }
 ```
 
-### 7.4 Dirty Region Generation
+### 6.3 Clearing Flags
 
-When paint changes, generate dirty regions from bounds deltas:
+After each frame, clear dirty flags:
 
 ```rust
-impl Window {
-    fn record_paint_change(&mut self, element_id: ComputedElementId, old_bounds: Bounds<Pixels>, new_bounds: Bounds<Pixels>) {
-        // Invalidate old location
-        if old_bounds != Bounds::default() {
-            self.display_list.invalidate_region(old_bounds);
-        }
-
-        // Invalidate new location
-        self.display_list.invalidate_region(new_bounds);
-    }
+fn end_frame(&mut self) {
+    self.fiber_tree.clear_dirty_flags();
 }
 ```
 
 ---
 
-## 8. Tile & Raster Cache Unification
+## 7. Layout Integration
 
-### 8.1 Unified Raster Cache Abstraction
+### 7.1 Taffy Node Persistence
 
-RTT (render-to-texture) and tiling are both "cached rasterization keyed by element identity + context":
-
-| Cache Type | Key | Value |
-|------------|-----|-------|
-| RTT | `(ElementId, bounds, clip)` | Single texture |
-| Tile | `(LayerId, TileCoord, generation)` | Texture grid |
-
-Unify under a single abstraction:
+Each fiber gets a persistent Taffy `NodeId`:
 
 ```rust
-pub struct RasterCache {
-    /// Single-texture cache for small elements (RTT)
-    element_textures: FxHashMap<RasterKey, CachedTexture>,
-
-    /// Tiled texture cache for large scroll containers
-    tile_textures: FxHashMap<TileKey, CachedTexture>,
-}
-
-#[derive(Hash, Eq, PartialEq)]
-pub struct RasterKey {
-    element_id: ComputedElementId,
-    bounds: Bounds<DevicePixels>,
-    clip_hash: u64,
-    generation: u64,
-}
-```
-
-### 8.2 Dirty Region → Tile Invalidation
-
-Wire dirty regions from DisplayList into tile cache:
-
-```rust
-impl MetalRenderer {
-    fn rasterize_display_list_tiles(&mut self, scene: &Scene, scale_factor: f32) {
-        for (container_id, display_list) in &scene.display_lists {
-            // Get dirty regions from display list
-            let dirty_regions = display_list.dirty_regions();
-
-            // Invalidate affected tiles
-            self.tile_cache.invalidate_tiles_for_regions(
-                container_id,
-                &dirty_regions,
-                scale_factor,
-            );
-
-            // Clear dirty regions after processing
-            display_list.clear_dirty_regions();
-
-            // Only rasterize invalidated tiles
-            // ... existing tile rasterization loop
+impl Fiber {
+    fn ensure_layout_node(&mut self, taffy: &mut TaffyLayoutEngine) {
+        if self.layout_id.is_none() {
+            self.layout_id = Some(taffy.create_node());
         }
     }
 }
 ```
 
-### 8.3 Avoid Scene-Index-Based Caches
+### 7.2 Layout Computation
 
-SubtreeCache currently stores Scene indices (`primitive_start`, `primitive_end`). These are brittle once root rendering is DisplayList-driven.
+```rust
+fn layout_fiber(
+    tree: &mut FiberTree,
+    taffy: &mut TaffyLayoutEngine,
+    fiber_id: FiberId,
+) -> LayoutId {
+    let fiber = tree.get(fiber_id).unwrap();
 
-**Migration**: Key caches by `ComputedElementId` + context, not Scene indices. The Phase 20 `ElementEntry` system already does this correctly.
+    // Skip if clean
+    if !fiber.dirty.contains(DirtyFlags::NEEDS_LAYOUT)
+        && !fiber.dirty.contains(DirtyFlags::SUBTREE_DIRTY)
+    {
+        return fiber.layout_id.unwrap();
+    }
+
+    // Layout children first
+    let children = fiber.children.clone();
+    let child_layouts: Vec<LayoutId> = children.iter()
+        .map(|&id| layout_fiber(tree, taffy, id))
+        .collect();
+
+    let fiber = tree.get_mut(fiber_id).unwrap();
+
+    if fiber.dirty.contains(DirtyFlags::NEEDS_LAYOUT) {
+        // Update Taffy node with current style and children
+        let layout_id = fiber.layout_id.unwrap();
+        taffy.set_style(layout_id, &fiber.style);
+        taffy.set_children(layout_id, &child_layouts);
+        taffy.compute_layout(layout_id);
+
+        // Cache results
+        fiber.bounds = Some(taffy.get_bounds(layout_id));
+        fiber.dirty.remove(DirtyFlags::NEEDS_LAYOUT);
+    }
+
+    fiber.dirty.remove(DirtyFlags::SUBTREE_DIRTY);
+    fiber.layout_id.unwrap()
+}
+```
+
+---
+
+## 8. Paint Integration
+
+### 8.1 Paint with Caching
+
+```rust
+fn paint_fiber(
+    tree: &mut FiberTree,
+    scene: &mut Scene,
+    fiber_id: FiberId,
+) {
+    let fiber = tree.get(fiber_id).unwrap();
+
+    // Skip if clean - replay cached commands
+    if !fiber.dirty.contains(DirtyFlags::NEEDS_PAINT)
+        && !fiber.dirty.contains(DirtyFlags::SUBTREE_DIRTY)
+    {
+        if let Some(range) = &fiber.paint_range {
+            scene.replay_range(range.clone());
+        }
+        return;
+    }
+
+    let start = scene.len();
+
+    // Paint this fiber
+    paint_fiber_content(fiber, scene);
+
+    // Paint children
+    let children = fiber.children.clone();
+    for child_id in children {
+        paint_fiber(tree, scene, child_id);
+    }
+
+    let end = scene.len();
+
+    // Cache paint range
+    let fiber = tree.get_mut(fiber_id).unwrap();
+    fiber.paint_range = Some(start..end);
+    fiber.dirty.remove(DirtyFlags::NEEDS_PAINT | DirtyFlags::SUBTREE_DIRTY);
+}
+```
+
+### 8.2 Scene Replay
+
+For clean subtrees, replay cached paint commands:
+
+```rust
+impl Scene {
+    /// Replay previously recorded commands
+    fn replay_range(&mut self, range: Range<PaintIndex>) {
+        // Copy commands from cache to current scene
+        // Commands already have correct bounds from when they were recorded
+        for i in range {
+            self.commands.push(self.cached_commands[i].clone());
+        }
+    }
+}
+```
 
 ---
 
 ## 9. Implementation Plan
 
-### Phase 1: Make View Caching Default (High Impact, Low Risk)
+### Phase 1: Descriptor Types
 
-**Goal**: `AnyView::cached` behavior without explicit opt-in.
+**Files**: `src/descriptor.rs` (new)
 
-**Tasks**:
-- [ ] Store view's last root style in `AnyViewState` automatically
-- [ ] Check cache validity on every view paint
-- [ ] Reuse cached prepaint/paint ranges when valid
-- [ ] Add offset-tolerant reuse (same size, different origin)
+1. Define `AnyDescriptor` enum
+2. Define `DivDescriptor`, `TextDescriptor`, etc.
+3. Implement `hash()` for change detection
+4. Implement `IntoDescriptor` trait
 
-**Files**: `src/view.rs`, `src/window.rs`
+### Phase 2: Fiber Tree
 
-**Validation**: `cache_bench` shows reduced paint calls for static grid
+**Files**: `src/fiber.rs` (new), `src/window.rs`
 
-### Phase 2: Extend Layout Identity (Medium Impact, Low Risk)
+1. Define `Fiber` struct
+2. Define `FiberTree` with SlotMap storage
+3. Implement dirty flag propagation
+4. Add `FiberTree` to `Window`
 
-**Goal**: All elements get stable layout node identity, not just `.id()` elements.
+### Phase 3: Reconciliation
 
-**Tasks**:
-- [ ] Change `TaffyLayoutEngine.element_to_node` key from `GlobalElementId` to `ComputedElementId`
-- [ ] Ensure `ComputedElementId` is computed before layout
-- [ ] Verify layout cache hits for elements without explicit IDs
+**Files**: `src/fiber.rs`
+
+1. Implement `reconcile()` algorithm
+2. Implement keyed child matching
+3. Implement fiber creation/removal
+4. Wire reconciliation into frame cycle
+
+### Phase 4: Builder API
+
+**Files**: `src/elements/div.rs`, `src/styled.rs`
+
+1. Change `div()` to return descriptor builder
+2. Implement `IntoDescriptor` for builder
+3. Update `Styled` trait for descriptors
+4. Ensure backward compatibility
+
+### Phase 5: Layout Integration
 
 **Files**: `src/taffy.rs`, `src/window.rs`
 
-**Validation**: Layout node count stays stable across frames for static UI
+1. Wire fiber tree into layout phase
+2. Implement layout skip logic
+3. Cache layout results in fibers
+4. Verify Taffy node reuse
 
-### Phase 3: Subtree Paint Skip (High Impact, Medium Risk)
+### Phase 6: Paint Integration
 
-**Goal**: Clean subtrees skip `paint()` call entirely, copy cached artifacts.
+**Files**: `src/window.rs`, `src/scene.rs`
 
-**Tasks**:
-- [ ] Track subtree paint ranges in `ElementEntry`
-- [ ] Implement `SUBTREE_DIRTY` flag propagation
-- [ ] Copy cached subtree items when clean
-- [ ] Handle offset application for moved subtrees
+1. Wire fiber tree into paint phase
+2. Implement paint skip logic
+3. Implement scene replay for cached commands
+4. Cache paint ranges in fibers
 
-**Files**: `src/window.rs`, `src/display_list.rs`
+### Phase 7: Testing & Validation
 
-**Validation**: `cache_bench` shows near-zero paint work for static grid
-
-### Phase 4: Dirty Region → Tile Invalidation (Medium Impact, Medium Risk)
-
-**Goal**: Only re-rasterize tiles that intersect dirty regions.
-
-**Tasks**:
-- [ ] Wire `DisplayList::dirty_regions()` into tile rasterization
-- [ ] Implement `TileCache::invalidate_tiles_for_regions()`
-- [ ] Clear dirty regions after tile invalidation
-- [ ] Track per-tile invalidation in stats
-
-**Files**: `src/display_list.rs`, `src/platform/mac/metal_renderer.rs`, `src/platform/mac/tile_cache.rs`
-
-**Validation**: Changing one cell in grid re-rasterizes only affected tiles
-
-### Phase 5: Unify Raster Caches (Low Impact, High Value Long-Term)
-
-**Goal**: Single abstraction for RTT and tile caching.
-
-**Tasks**:
-- [ ] Define `RasterCache` abstraction
-- [ ] Migrate SubtreeCache to use `ComputedElementId` keys
-- [ ] Migrate tile cache to unified interface
-- [ ] Remove Scene-index-based cache keys
-
-**Files**: `src/window.rs`, `src/scene.rs`, `src/platform/mac/tile_cache.rs`
-
-**Validation**: RTT and tiling share code paths, stats unified
-
-### Phase 6: Instrumentation & Validation
-
-**Goal**: Prove the system is truly O(changed).
-
-**Tasks**:
-- [ ] Add counters: views rendered/skipped, layout nodes reused, elements cache-hit
-- [ ] Add counters: tiles re-rasterized, bytes uploaded to GPU
-- [ ] Create benchmark suite: static UI, single-element change, bulk change
-- [ ] Document expected performance characteristics
-
-**Files**: `src/window.rs`, `examples/cache_bench.rs`
-
-**Validation**: Counters show O(changed) behavior in all benchmarks
+1. Update `cache_bench` example
+2. Add fiber tree statistics display
+3. Verify O(changed) behavior
+4. Performance benchmarks
 
 ---
 
-## 10. Performance Expectations
+## 10. API Changes
 
-### 10.1 Theoretical Complexity
+### 10.1 Render Trait
 
-| Scenario | Current | Retained Artifacts |
-|----------|---------|-------------------|
-| Nothing changed | O(n) | O(1) |
-| One element changed | O(n) | O(1) |
-| k elements changed | O(n) | O(k) |
-| All elements changed | O(n) | O(n) |
-| Scroll (with compositor) | O(visible) | O(new tiles) |
+```rust
+// Before
+pub trait Render {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement;
+}
 
-### 10.2 cache_bench Predictions
-
-**Current** (375 grid cells + 30 stats elements):
-- Every frame: O(405) work
-- Debug mode: ~30fps
-
-**Phase 1** (view caching default):
-- Frame where nothing changes: O(30) stats elements + O(1) grid check
-- Speedup: ~10x
-- Debug mode prediction: ~100fps
-
-**Phase 3** (subtree paint skip):
-- Frame where nothing changes: O(1) dirty check
-- Debug mode prediction: 120fps
-
-### 10.3 Memory Overhead
-
-Per cached view:
-- `PrepaintState`: ~100 bytes
-- Paint range: ~16 bytes
-- Layout cache: ~64 bytes
-- **Total**: ~180 bytes per view
-
-For 100 views: ~18 KB additional memory (negligible)
-
----
-
-## 11. Open Questions
-
-### 11.1 Animation Integration
-
-**Question**: How do animations work with retained artifacts?
-
-**Approach**: Animated elements mark themselves dirty each frame via `cx.notify()`. The animation system already does this. No special handling needed — animations are just frequent invalidations.
-
-### 11.2 Context/Theme Changes
-
-**Question**: How do theme changes invalidate dependent subtrees?
-
-**Approach**: Theme is an entity. Views that read theme during render are automatically tracked as dependents. Theme change → `notify()` → all theme-dependent views marked dirty.
-
-### 11.3 Event Handler Identity
-
-**Question**: Event handler closures change identity every render. Does this cause issues?
-
-**Approach**: Event handlers aren't compared for equality. They're simply replaced when the element is rebuilt. Since elements are ephemeral anyway, this isn't a problem.
-
-### 11.4 Layout Dependencies
-
-**Question**: How to handle layout dependencies where sibling size affects my size?
-
-**Approach**: Taffy handles this internally. When any child changes, parent layout is recomputed, which may affect siblings. The `NEEDS_LAYOUT` flag propagates appropriately.
-
-### 11.5 Memory Management
-
-**Question**: When are cached artifacts garbage collected?
-
-**Approach**:
-- Layout nodes: Removed when element no longer appears in tree
-- Paint cache: LRU eviction based on element activity
-- Tiles: Existing LRU eviction in tile cache
-
----
-
-## Appendix A: Relationship to Compositor Thread
-
-The retained artifact model and compositor thread are complementary:
-
-```
-┌─────────────────────────────┐    ┌─────────────────────────────┐
-│      MAIN THREAD            │    │    COMPOSITOR THREAD        │
-│                             │    │                             │
-│  Retained artifacts reduce  │───►│  Receives tile updates      │
-│  work to O(changed)         │    │  Composites at 120fps       │
-│  DisplayList → Tiles        │    │  Handles scroll offset      │
-│                             │    │                             │
-└─────────────────────────────┘    └─────────────────────────────┘
+// After
+pub trait Render {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoDescriptor;
+}
 ```
 
-- **Compositor thread**: Scroll at 120fps regardless of main thread work
-- **Retained artifacts**: Main thread does O(changed) work
+### 10.2 Element Builders
 
-Together: 120fps everything.
+```rust
+// Before: div() returns Div (element)
+pub fn div() -> Div { ... }
+
+// After: div() returns DivBuilder (descriptor builder)
+pub fn div() -> DivBuilder { ... }
+
+impl IntoDescriptor for DivBuilder {
+    fn into_descriptor(self) -> AnyDescriptor {
+        AnyDescriptor::Div(DivDescriptor {
+            style: self.style,
+            style_hash: hash(&self.style),
+            key: self.key,
+            children: self.children,
+            interactivity: self.interactivity,
+        })
+    }
+}
+```
+
+### 10.3 User Code (Minimal Changes)
+
+```rust
+// Before
+fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    div()
+        .bg(rgb(0x1e1e2e))
+        .child(text("Hello"))
+}
+
+// After (identical syntax, different return type)
+fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoDescriptor {
+    div()
+        .bg(rgb(0x1e1e2e))
+        .child(text("Hello"))
+}
+```
+
+The user-facing API is nearly identical. The change is in what the framework does with the result.
 
 ---
 
-## Appendix B: What We're NOT Doing
+## 11. Performance Analysis
 
-| Approach | Why Not |
-|----------|---------|
-| Retain `AnyElement` instances | Arena allocation clears every frame; would require massive rewrite |
-| Render hash from struct fields | O(n) hashing, requires `Hash` bounds, unclear benefit over `notify()` |
-| Generic element reconciliation | No framework-level diffing; elements are ephemeral |
-| Separate retained tree | Duplicates existing infrastructure; artifacts are the right abstraction |
+### 11.1 Complexity Comparison
+
+| Scenario | Current GPUI | Fiber Architecture |
+|----------|--------------|-------------------|
+| Nothing changed | O(n) | O(n) descriptors + O(1) layout/paint |
+| One element changed | O(n) | O(n) descriptors + O(path) layout/paint |
+| k elements changed | O(n) | O(n) descriptors + O(k) layout/paint |
+| Full re-render | O(n) | O(n) |
+
+### 11.2 Why O(n) Descriptors is OK
+
+Descriptor creation is just struct allocation:
+- ~100-200 bytes per descriptor
+- 750 descriptors ≈ 150KB per frame
+- At 120fps ≈ 18MB/s allocation
+
+This is fast because:
+1. No layout computation
+2. No paint generation
+3. No GPU interaction
+4. Just memory writes
+
+The expensive work (layout, paint) is O(changed), which is the goal.
+
+### 11.3 Memory Overhead
+
+Per fiber:
+- Identity: ~32 bytes
+- Cached layout: ~48 bytes
+- Cached paint: ~24 bytes
+- Tree structure: ~32 bytes
+- Dirty flags: ~8 bytes
+- **Total**: ~144 bytes per fiber
+
+For 1000 elements: ~144KB persistent memory (acceptable)
+
+### 11.4 Expected Results
+
+**cache_bench with 375 grid cells:**
+
+| Metric | Current | Fiber Architecture |
+|--------|---------|-------------------|
+| Debug FPS (static) | ~30 | ~120 |
+| Layout calls/frame (static) | 375 | 0 |
+| Paint calls/frame (static) | 375 | 0 (replay) |
+| Layout calls/frame (FPS change) | 375 | ~3 |
+| Paint calls/frame (FPS change) | 375 | ~3 |
+
+---
+
+## Appendix A: Comparison with React Fiber
+
+| Concept | React | GPUI Fiber |
+|---------|-------|------------|
+| Render output | JSX elements | Descriptors |
+| Persistent tree | Fiber tree | Fiber tree |
+| Change detection | Props comparison | Hash comparison |
+| Reconciliation | `reconcileChildren` | `reconcile_children` |
+| Work scheduling | Lanes, priorities | Dirty flags |
+| Commit phase | DOM updates | Layout + Paint |
+
+GPUI's fiber architecture is simpler than React's because:
+1. No concurrent rendering (single-threaded)
+2. No suspense/transitions
+3. No server components
+4. Simpler dirty flag model
+
+---
+
+## Appendix B: Glossary
+
+| Term | Definition |
+|------|------------|
+| **Descriptor** | Lightweight data object describing UI structure |
+| **Fiber** | Persistent node caching layout/paint results |
+| **Reconciliation** | Diffing descriptors against fibers |
+| **SUBTREE_DIRTY** | Flag indicating a descendant needs work |
+| **Skip logic** | Returning cached results for clean subtrees |
 
 ---
 
 ## Appendix C: References
 
-1. Chromium Compositor: https://chromium.googlesource.com/chromium/src/+/master/docs/how_cc_works.md
-2. React Fiber Architecture: https://github.com/acdlite/react-fiber-architecture
-3. Flutter Rendering: https://docs.flutter.dev/resources/architectural-overview#rendering
-4. GPUI Phase 20 (per-element caching): `src/display_list.rs`, `src/window.rs`
+1. React Fiber Architecture: https://github.com/acdlite/react-fiber-architecture
+2. React Reconciliation: https://react.dev/learn/preserving-and-resetting-state
+3. Chromium Compositor: https://chromium.googlesource.com/chromium/src/+/master/docs/how_cc_works.md
+4. Flutter Rendering: https://docs.flutter.dev/resources/architectural-overview#rendering
