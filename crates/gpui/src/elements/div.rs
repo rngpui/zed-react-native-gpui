@@ -18,7 +18,7 @@
 use crate::{
     AbsoluteLength, Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent,
     ContentHash, ContentHasher, ContentMask, DispatchPhase, Display, Element, ElementId, Entity,
-    FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, InspectorElementId,
+    FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
     IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent,
     LayoutId, ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent,
     MousePressureEvent, MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render,
@@ -1637,13 +1637,13 @@ impl Div {
             // Check if viewport size changed (e.g., window resize).
             // This requires repaint because children may reflow (e.g., flex-wrap).
             if layer.viewport_size != bounds.size {
-                layer.needs_repaint = true;
+                layer.mark_needs_repaint();
             }
 
             // Check if content size changed (e.g., children added/removed).
             // This requires repaint because content layout changed.
             if layer.content_size != content_size {
-                layer.needs_repaint = true;
+                layer.mark_needs_repaint();
             }
 
             layer.scroll_offset = scroll_offset;
@@ -1666,7 +1666,7 @@ impl Div {
         window.seed_layer_inherited_clip();
 
         // Check if the layer needs repaint (content changed)
-        let needs_repaint = window.layer_tree().get(layer_id).unwrap().needs_repaint;
+        let needs_repaint = window.layer_tree().get(layer_id).unwrap().dirty_state.needs_repaint();
 
         // Register with tile cache so tiles can be acquired.
         // The returned generation is monotonic per container - we'll use it to
@@ -1744,10 +1744,9 @@ impl Div {
             // Capture hitboxes and listeners for future reuse
             window.capture_layer_hitboxes(layer_id);
 
-            // Mark layer as no longer needing repaint, but needs rasterization
+            // Mark layer as needing rasterization (repaint done, now rasterize tiles)
             let layer = window.layer_tree_mut().get_mut(layer_id).unwrap();
-            layer.needs_repaint = false;
-            layer.needs_rasterize = true;
+            layer.dirty_state = crate::LayerDirtyState::NeedsRasterize;
         } else if has_retained {
             // Layer content is valid AND we have retained hitboxes - skip paint entirely!
             // This is the key optimization: O(1) instead of O(N) child elements.
@@ -3399,9 +3398,18 @@ impl Interactivity {
             // P0.3: Determine if this is a layer-based scroll container.
             // Layer containers use tiled rendering and don't need view invalidation on scroll.
             // This replicates the logic from should_create_layer().
+            // Compute scroll_max for clamping in the scroll handler.
+            // This replicates the clamping logic from clamp_scroll_position() so that
+            // compositor-only scroll updates also have bounded scroll offsets.
+            let bounds = hitbox.bounds;
+            let content_size = self.content_size;
+            let rem_size = window.rem_size();
+            let padding = style.padding.to_pixels(bounds.size.into(), rem_size);
+            let padding_size = size(padding.left + padding.right, padding.top + padding.bottom);
+            let padded_content_size = content_size + padding_size;
+            let scroll_max = (padded_content_size - bounds.size).max(&Default::default());
+
             let layer_global_id = if self.element_id.is_some() {
-                let bounds = hitbox.bounds;
-                let content_size = self.content_size;
                 let is_scroll = overflow.x == Overflow::Scroll || overflow.y == Overflow::Scroll;
                 let min_excess = Pixels(256.0);
                 let large_content = content_size.width > bounds.size.width + min_excess
@@ -3446,6 +3454,10 @@ impl Interactivity {
                     }
                     scroll_offset.y += delta_y;
                     scroll_offset.x += delta_x;
+                    // Clamp scroll offset to valid range [-scroll_max, 0].
+                    // This is critical for compositor-only path which skips clamp_scroll_position().
+                    scroll_offset.x = scroll_offset.x.clamp(-scroll_max.width, px(0.));
+                    scroll_offset.y = scroll_offset.y.clamp(-scroll_max.height, px(0.));
                     if *scroll_offset != old_scroll_offset {
                         // P2: For layer-based scroll containers, update layer properties directly
                         // and use compositor-only update instead of full draw.
@@ -3454,8 +3466,13 @@ impl Interactivity {
                             let layer_id = window.layer_tree().find_by_element_id(gid);
                             eprintln!("[SCROLL] layer lookup gid={:?} -> layer_id={:?}", gid, layer_id);
                             if let Some(layer_id) = layer_id {
+                                let new_scroll_offset = *scroll_offset;
+
+                                // P3.4: Update CompositorState - this is compositor-owned,
+                                // no main-thread invalidation needed
+                                window.set_compositor_scroll_offset(layer_id, new_scroll_offset);
+
                                 if let Some(layer) = window.layer_tree_mut().get_mut(layer_id) {
-                                    let new_scroll_offset = *scroll_offset;
                                     layer.scroll_offset = new_scroll_offset;
                                     // content_origin = viewport_origin + scroll_offset
                                     layer.content_origin = Point {

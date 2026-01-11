@@ -2236,7 +2236,15 @@ impl MetalRenderer {
     /// This enables O(dirty_tiles) work instead of O(all_tiles) when content changes.
     fn rasterize_tiles_from_display_lists(&mut self, scene: &Scene) {
         let tile_sprites = &scene.tile_sprites;
+
+        eprintln!(
+            "[RASTER] tile_sprites={} display_lists={}",
+            tile_sprites.len(),
+            scene.display_lists.len()
+        );
+
         if tile_sprites.is_empty() {
+            eprintln!("[RASTER] No tile sprites, returning early");
             return;
         }
 
@@ -2250,6 +2258,11 @@ impl MetalRenderer {
         for (container_id, display_list) in &scene.display_lists {
             let dirty_regions = display_list.dirty_regions();
             if !dirty_regions.is_empty() {
+                eprintln!(
+                    "[RASTER] Container {:?} has {} dirty regions",
+                    container_id,
+                    dirty_regions.len()
+                );
                 self.tile_cache.invalidate_tiles_for_dirty_regions(
                     container_id,
                     dirty_regions,
@@ -2261,6 +2274,7 @@ impl MetalRenderer {
 
         // Collect tiles that need rendering as TileRasterJobs
         let mut jobs: Vec<TileRasterJob> = Vec::new();
+        let mut display_list_missing_count = 0;
 
         for sprite in tile_sprites {
             let container_id = &sprite.tile_key.container_id;
@@ -2268,6 +2282,11 @@ impl MetalRenderer {
 
             // Look up the display list for this container
             let Some(display_list) = scene.get_display_list(container_id) else {
+                display_list_missing_count += 1;
+                eprintln!(
+                    "[RASTER] MISSING display list for container {:?} tile ({},{})",
+                    container_id, coord.x, coord.y
+                );
                 continue;
             };
 
@@ -2288,6 +2307,11 @@ impl MetalRenderer {
                 content_generation,
             );
 
+            eprintln!(
+                "[RASTER] Tile ({},{}) container={:?} gen={} needs_render={} invalidated={}",
+                coord.x, coord.y, container_id, content_generation, needs_render, invalidated
+            );
+
             if needs_render || invalidated {
                 jobs.push(TileRasterJob {
                     container_id: container_id.clone(),
@@ -2298,10 +2322,19 @@ impl MetalRenderer {
             }
         }
 
+        if display_list_missing_count > 0 {
+            eprintln!(
+                "[RASTER] WARNING: {} tiles had missing display lists!",
+                display_list_missing_count
+            );
+        }
+
         // Phase 4: Clear invalidated tiles after collecting jobs
         for container_id in containers_to_clear {
             self.tile_cache.clear_invalidated_tiles(&container_id);
         }
+
+        eprintln!("[RASTER] Queued {} rasterization jobs", jobs.len());
 
         if jobs.is_empty() {
             return;
@@ -2975,7 +3008,23 @@ impl MetalRenderer {
         command_encoder: &metal::RenderCommandEncoderRef,
         write_instances: bool,
     ) -> bool {
-        for sprite in sprites {
+        eprintln!("[DRAW_TILES] Drawing {} tile sprites", sprites.len());
+        let mut found_count = 0;
+        let mut missing_count = 0;
+
+        for (i, sprite) in sprites.iter().enumerate() {
+            // Log the positioning details for each tile
+            let final_y = sprite.stable_bounds.origin.y.0 + sprite.scroll_offset.y.0;
+            eprintln!(
+                "[DRAW_TILES] sprite[{}] tile={:?} stable_y={:.1} scroll_y={:.1} final_y={:.1} mask_y=[{:.1},{:.1}]",
+                i,
+                sprite.tile_key.coord,
+                sprite.stable_bounds.origin.y.0,
+                sprite.scroll_offset.y.0,
+                final_y,
+                sprite.content_mask.bounds.origin.y.0,
+                sprite.content_mask.bounds.origin.y.0 + sprite.content_mask.bounds.size.height.0,
+            );
             // Look up the tile texture from the tile cache and clone the reference
             // (metal::Texture implements Clone as an Arc-like reference)
             let texture = self
@@ -2984,6 +3033,7 @@ impl MetalRenderer {
                 .cloned();
 
             if let Some(texture) = texture {
+                found_count += 1;
                 // Tiles use full UV bounds (0,0 to 1,1) since they are exact size
                 let uv_bounds = Bounds {
                     origin: point(0.0, 0.0),
@@ -3006,12 +3056,18 @@ impl MetalRenderer {
                     return false;
                 }
             } else {
-                log::warn!(
-                    "draw_tile_sprites: tile {:?} not found (evicted?), skipping sprite",
+                missing_count += 1;
+                eprintln!(
+                    "[DRAW_TILES] MISSING tile {:?} in cache!",
                     sprite.tile_key
                 );
             }
         }
+
+        eprintln!(
+            "[DRAW_TILES] Done: found={} missing={}",
+            found_count, missing_count
+        );
         true
     }
 }

@@ -164,6 +164,7 @@ impl TileCache {
         content_size: Size<Pixels>,
         content_changed: bool,
     ) -> u64 {
+        let is_new = !self.containers.contains_key(id);
         let container = self
             .containers
             .entry(id.clone())
@@ -174,6 +175,11 @@ impl TileCache {
             container.content_generation += 1;
             container.content_size = content_size;
         }
+
+        eprintln!(
+            "[TILE_CACHE] register_scroll_container id={:?} is_new={} gen={} content_changed={}",
+            id, is_new, container.content_generation, content_changed
+        );
 
         container.content_generation
     }
@@ -234,6 +240,16 @@ impl TileCache {
     ) -> bool {
         let current_frame = self.frame;
 
+        // Check if container is registered
+        if !self.containers.contains_key(container_id) {
+            eprintln!(
+                "[TILE_CACHE] ERROR: Container {:?} not registered! Available containers: {:?}",
+                container_id,
+                self.containers.keys().collect::<Vec<_>>()
+            );
+            panic!("Container must be registered before acquiring tiles");
+        }
+
         // First pass: check if tile exists and update it
         let existing_result = {
             let container = self
@@ -263,13 +279,30 @@ impl TileCache {
         if let Some(needs_render) = existing_result {
             if needs_render {
                 self.stats.renders += 1;
+                eprintln!(
+                    "[TILE_CACHE] acquire_tile ({},{}) existing tile, needs_render (gen mismatch)",
+                    coord.x, coord.y
+                );
             } else {
                 self.stats.hits += 1;
+                // Log cache hit with generation info
+                if let Some(container) = self.containers.get(container_id) {
+                    if let Some(tile) = container.tiles.get(&coord) {
+                        eprintln!(
+                            "[TILE_CACHE] acquire_tile ({},{}) CACHE HIT: tile.rendered_gen={} content_gen={}",
+                            coord.x, coord.y, tile.rendered_generation, content_generation
+                        );
+                    }
+                }
             }
             return needs_render;
         }
 
         // Need to allocate - do this outside the container borrow
+        eprintln!(
+            "[TILE_CACHE] acquire_tile ({},{}) allocating NEW tile texture",
+            coord.x, coord.y
+        );
         let texture = self.allocate_tile_texture();
         self.stats.renders += 1;
 

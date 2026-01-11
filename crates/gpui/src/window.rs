@@ -206,15 +206,12 @@ impl WindowInvalidator {
 
     pub fn invalidate_view(&self, entity: EntityId, cx: &mut App) -> bool {
         let mut inner = self.inner.borrow_mut();
-        // If content is being invalidated, compositor-only updates are no longer sufficient.
-        let was_composite_only = inner.composite_only;
-        inner.composite_only = false;
+        // Keep composite_only and dirty as independent flags.
+        // When both are set, composite_only takes priority for smooth scroll,
+        // and dirty is handled on a subsequent frame.
         inner.dirty_views.insert(entity);
         if inner.draw_phase == DrawPhase::None {
             inner.dirty = true;
-            if was_composite_only {
-                eprintln!("[INVALIDATE_VIEW] was composite_only, now dirty! entity={:?}", entity);
-            }
             cx.push_effect(Effect::Notify { emitter: entity });
             true
         } else {
@@ -236,11 +233,12 @@ impl WindowInvalidator {
     }
 
     /// P2: Request a compositor-only update (skips full draw, only updates tile sprites).
-    /// This clears the dirty flag because we KNOW only scroll offset changed, not content.
+    ///
+    /// This does *not* clear the dirty flag. If content is already dirty, we keep it pending and
+    /// allow the next frame to run a full draw after the compositor-only update.
     pub fn request_composite_only(&self) {
         let mut inner = self.inner.borrow_mut();
-        // Clear dirty and set composite_only - we know only scroll changed
-        inner.dirty = false;
+        // Set composite_only without discarding any pending dirty work.
         inner.composite_only = true;
     }
 
@@ -1064,6 +1062,10 @@ pub struct Window {
     inside_tiled_scroll_container: bool,
     /// The layer tree for compositing. Manages scroll containers, transforms, and opacity layers.
     layer_tree: crate::layer::LayerTree,
+    /// P5.2: Mapping from rendered entity (view) to the layer(s) it owns.
+    /// When a layer is created during paint, we record which entity was being rendered.
+    /// This enables scoped invalidation - notify() only invalidates the view's layer.
+    entity_to_layers: collections::FxHashMap<EntityId, Vec<LayerId>>,
     /// Stack of path hashes for Phase 20 per-element caching.
     /// Each entry is the path hash for children at that level.
     element_path_stack: Vec<u64>,
@@ -1119,6 +1121,17 @@ pub struct Window {
     pub(crate) client_inset: Option<Pixels>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector: Option<Entity<Inspector>>,
+
+    /// Compositor state with mutable properties (scroll offsets, transforms, opacity).
+    /// Changes here trigger compositor-only updates, not full draws.
+    compositor_state: crate::compositor_state::CompositorState,
+
+    /// Current frame snapshot for compositor decoupling.
+    /// Produced by main thread after draw(), consumed by compositor during present.
+    current_snapshot: Option<crate::frame_snapshot::FrameSnapshot>,
+
+    /// Generation counter for frame snapshots.
+    snapshot_generation: u64,
 }
 
 type RenderLayerBuilder = Arc<dyn Fn(&mut Window, &mut App) -> AnyElement + 'static>;
@@ -1385,7 +1398,23 @@ impl Window {
                     || composite_only
                     || (active.get() && input_rate_tracker.borrow_mut().is_high_rate());
 
-                if is_dirty || request_frame_options.force_render {
+                // Prioritize composite_only for smooth scroll, even when dirty is also set.
+                // When both flags are set, composite_only runs this frame and dirty
+                // is handled on a subsequent frame (kept pending).
+                if composite_only {
+                    eprintln!("[FRAME] Taking COMPOSITE_ONLY path");
+                    handle
+                        .update(&mut cx, |_, window, _| {
+                            // Use compositor_present if we have a snapshot, otherwise fall back to composite_only
+                            if window.current_snapshot.is_some() {
+                                window.compositor_present();
+                            } else {
+                                window.composite_only();
+                                window.present();
+                            }
+                        })
+                        .log_err();
+                } else if is_dirty || request_frame_options.force_render {
                     eprintln!("[FRAME] Taking FULL DRAW path");
                     measure("frame duration", || {
                         handle
@@ -1396,14 +1425,6 @@ impl Window {
                             })
                             .log_err();
                     })
-                } else if composite_only {
-                    eprintln!("[FRAME] Taking COMPOSITE_ONLY path");
-                    handle
-                        .update(&mut cx, |_, window, _| {
-                            window.composite_only();
-                            window.present();
-                        })
-                        .log_err();
                 } else if needs_present {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
@@ -1584,6 +1605,7 @@ impl Window {
             measure_cache: crate::measure_cache::MeasureCache::new(DEFAULT_MEASURE_CACHE_ENTRIES),
             inside_tiled_scroll_container: false,
             layer_tree: crate::layer::LayerTree::new(),
+            entity_to_layers: collections::FxHashMap::default(),
             element_path_stack: Vec::new(),
             element_child_counters: Vec::new(),
             prepaint_computed_element_id_stack: Vec::new(),
@@ -1626,6 +1648,9 @@ impl Window {
             image_cache_stack: Vec::new(),
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector: None,
+            compositor_state: crate::compositor_state::CompositorState::new(),
+            current_snapshot: None,
+            snapshot_generation: 0,
         })
     }
 
@@ -2549,6 +2574,8 @@ impl Window {
         self.layout_engine.as_mut().unwrap().begin_frame();
         // Phase 20: Swap display lists in layers for per-element caching
         self.layer_tree.begin_frame();
+        // P5.2: Clear entity-to-layer mapping for new frame
+        self.entity_to_layers.clear();
         // Reset element path tracking for per-element caching
         self.element_path_stack.clear();
         self.element_child_counters.clear();
@@ -2628,6 +2655,10 @@ impl Window {
         self.invalidator.set_phase(DrawPhase::None);
         self.needs_present.set(true);
 
+        // Commit a frame snapshot for compositor-driven updates.
+        // This captures the immutable state that can be composited at different scroll offsets.
+        self.commit_frame_snapshot();
+
         ArenaClearNeeded
     }
 
@@ -2650,6 +2681,9 @@ impl Window {
         let mut views = self.invalidator.take_views();
         for entity in views.drain() {
             self.mark_view_dirty(entity);
+            // P5.2: Also invalidate layers owned by this entity for scoped invalidation.
+            // This enables FPS counter updates without affecting scroll container layers.
+            self.invalidate_layers_for_entity(entity);
         }
         self.invalidator.replace_views(views);
     }
@@ -2722,7 +2756,20 @@ impl Window {
         // Ensure the scene's TileSprites remain sorted by order for batch iteration.
         all_tile_sprites.sort_by_key(|sprite| sprite.order);
 
-        eprintln!("[COMPOSITE_ONLY] total sprites={}", all_tile_sprites.len());
+        eprintln!(
+            "[COMPOSITE_ONLY] total sprites={} display_lists_in_scene={}",
+            all_tile_sprites.len(),
+            self.rendered_frame.scene.display_lists.len()
+        );
+        // Log the container IDs in display_lists
+        for (container_id, display_list) in &self.rendered_frame.scene.display_lists {
+            eprintln!(
+                "[COMPOSITE_ONLY] display_list container={:?} gen={} items={}",
+                container_id,
+                display_list.generation,
+                display_list.items.len()
+            );
+        }
         // Replace tile sprites in the rendered scene
         self.rendered_frame.scene.replace_tile_sprites(all_tile_sprites);
 
@@ -2746,11 +2793,127 @@ impl Window {
         // Update mouse hit test with current hitboxes
         self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position);
 
-        // Clear both flags - composite_only is done, and dirty is handled
-        // (we don't need a full draw since only scroll offset changed)
+        // Only clear composite_only - keep dirty pending for the next frame.
+        // This ensures content updates eventually happen when scroll settles.
         self.invalidator.clear_composite_only();
-        self.invalidator.set_dirty(false);
+        // Note: dirty is intentionally NOT cleared here. If dirty was set
+        // concurrently (e.g., by request_animation_frame), it will trigger
+        // a full draw on the next frame when composite_only is no longer set.
         self.needs_present.set(true);
+    }
+
+    /// Get a reference to the compositor state.
+    ///
+    /// The compositor state contains mutable properties (scroll offsets, transforms, opacity)
+    /// that can be updated without main-thread work.
+    pub fn compositor_state(&self) -> &crate::compositor_state::CompositorState {
+        &self.compositor_state
+    }
+
+    /// Get a mutable reference to the compositor state.
+    ///
+    /// Use this to update scroll offsets, transforms, or opacity without triggering
+    /// a full redraw.
+    pub fn compositor_state_mut(&mut self) -> &mut crate::compositor_state::CompositorState {
+        &mut self.compositor_state
+    }
+
+    /// Update scroll offset for a layer through the compositor state.
+    ///
+    /// This is the preferred way to handle scroll updates for smooth scrolling.
+    /// Unlike direct layer manipulation, this doesn't trigger main-thread invalidation.
+    pub fn set_compositor_scroll_offset(&mut self, layer_id: crate::LayerId, offset: Point<Pixels>) {
+        self.compositor_state.set_scroll_offset(layer_id, offset);
+        // Sync the offset to the layer tree for hit testing
+        self.layer_tree.set_scroll_offset(layer_id, offset);
+    }
+
+    /// Create a frame snapshot from the current rendered frame.
+    ///
+    /// This captures the immutable state needed for compositor-driven presentation.
+    /// The snapshot can be composited at different scroll offsets without main-thread work.
+    pub fn create_frame_snapshot(&mut self) -> crate::frame_snapshot::FrameSnapshot {
+        use crate::frame_snapshot::{FrameSnapshot, LayerTreeSnapshot, LayerSnapshot, HitboxSnapshot};
+
+        self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
+
+        let mut layer_tree_snapshot = LayerTreeSnapshot::new();
+
+        // Capture each layer's state
+        for layer in self.layer_tree.layers() {
+            let layer_snapshot = LayerSnapshot::from_layer(
+                layer.id,
+                layer.element_id.clone(),
+                layer.reason,
+                layer.display_list.clone(),
+                Bounds {
+                    origin: layer.viewport_origin,
+                    size: layer.viewport_size,
+                },
+                layer.content_size,
+                layer.viewport_size,
+                layer.viewport_origin,
+                layer.outer_clip.clone(),
+                layer.scale_factor,
+                layer.retained_hitboxes.clone(),
+                layer.hitbox_range.clone(),
+                layer.children.clone(),
+            );
+            layer_tree_snapshot.layers.insert(layer.id, layer_snapshot);
+        }
+
+        // Capture hitbox data
+        let hitbox_snapshot = HitboxSnapshot::new();
+        // TODO: Populate hitbox snapshot from rendered_frame.hitboxes
+
+        FrameSnapshot {
+            layers: std::sync::Arc::new(layer_tree_snapshot),
+            hitboxes: std::sync::Arc::new(hitbox_snapshot),
+            generation: self.snapshot_generation,
+        }
+    }
+
+    /// Store the current frame snapshot for compositor use.
+    pub fn commit_frame_snapshot(&mut self) {
+        let snapshot = self.create_frame_snapshot();
+        self.current_snapshot = Some(snapshot);
+    }
+
+    /// Get the current frame snapshot.
+    pub fn current_snapshot(&self) -> Option<&crate::frame_snapshot::FrameSnapshot> {
+        self.current_snapshot.as_ref()
+    }
+
+    /// Perform a compositor-driven present using the current snapshot and compositor state.
+    ///
+    /// This is used during compositor-only updates where we skip the element tree traversal
+    /// and just update tile sprite positions based on compositor state.
+    #[profiling::function]
+    fn compositor_present(&mut self) {
+        eprintln!("[COMPOSITOR_PRESENT] called, has_snapshot={}", self.current_snapshot.is_some());
+
+        let Some(_snapshot) = &self.current_snapshot else {
+            // No snapshot available, fall back to regular present
+            eprintln!("[COMPOSITOR_PRESENT] No snapshot, falling back to present()");
+            self.present();
+            return;
+        };
+
+        // For now, delegate to the existing compositor-only path, which:
+        // - preserves tile ordering
+        // - replays retained hitboxes and updates mouse hit testing
+        // - clears the composite_only invalidation flag
+        self.composite_only();
+        self.present();
+
+        // Clear compositor pending changes (scroll/transform/opacity deltas have been applied).
+        self.compositor_state.clear_pending_changes();
+
+        // If content invalidation arrived while we were prioritizing composite-only (e.g. an
+        // animation frame), schedule another frame so the FULL DRAW path can run.
+        if self.invalidator.is_dirty() {
+            self.platform_window.request_frame();
+        }
     }
 
     fn prepaint_render_layers(
@@ -3841,12 +4004,25 @@ impl Window {
     ///
     /// Note: After calling this, you should set the layer's content_origin and then
     /// call `seed_layer_inherited_clip()` to properly inherit the parent's clipping.
+    ///
+    /// P5.2: Also records which entity (view) owns this layer for scoped invalidation.
     pub(crate) fn push_layer(
         &mut self,
         element_id: GlobalElementId,
         reason: crate::layer::LayerReason,
     ) -> crate::layer::LayerId {
-        self.layer_tree.push_layer(element_id, reason)
+        let layer_id = self.layer_tree.push_layer(element_id, reason);
+
+        // P5.2: Record which entity owns this layer for scoped invalidation.
+        // When notify() is called for an entity, we can invalidate just its layers.
+        if let Some(&entity_id) = self.rendered_entity_stack.last() {
+            self.entity_to_layers
+                .entry(entity_id)
+                .or_default()
+                .push(layer_id);
+        }
+
+        layer_id
     }
 
     /// Seed the current layer's property_trees with the inherited content mask.
@@ -3898,6 +4074,28 @@ impl Window {
     /// Get a mutable reference to the layer tree.
     pub(crate) fn layer_tree_mut(&mut self) -> &mut crate::layer::LayerTree {
         &mut self.layer_tree
+    }
+
+    /// P5.2: Get the layers owned by a specific entity (view).
+    ///
+    /// Returns an empty slice if the entity doesn't own any layers.
+    pub(crate) fn layers_for_entity(&self, entity_id: EntityId) -> &[LayerId] {
+        self.entity_to_layers
+            .get(&entity_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// P5.2: Invalidate all layers owned by a specific entity.
+    ///
+    /// This marks the entity's layers as needing repaint, enabling
+    /// scoped invalidation where only the affected view's layers are updated.
+    pub(crate) fn invalidate_layers_for_entity(&mut self, entity_id: EntityId) {
+        if let Some(layer_ids) = self.entity_to_layers.get(&entity_id) {
+            for &layer_id in layer_ids {
+                self.layer_tree.invalidate_layer(layer_id);
+            }
+        }
     }
 
     /// Compute an element's identity for per-element caching (Phase 20).

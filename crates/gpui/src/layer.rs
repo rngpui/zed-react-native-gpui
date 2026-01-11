@@ -34,7 +34,7 @@ use std::sync::Arc;
 const TILE_SIZE: u32 = 512;
 
 /// Unique identifier for a layer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct LayerId(pub(crate) u32);
 
 impl LayerId {
@@ -55,6 +55,71 @@ pub enum LayerReason {
     Opacity,
     /// Explicit will-change hint.
     WillChange,
+}
+
+/// Per-layer dirty state for scoped invalidation.
+///
+/// This enum represents the minimal work needed to update a layer.
+/// Higher severity states imply lower ones (Repaint implies Rasterize implies Composite).
+///
+/// ## Key Insight
+///
+/// With per-layer dirty tracking, an FPS counter update only marks its own layer dirty,
+/// leaving scroll container layers untouched. This is the foundation of compositor-driven
+/// scrolling - scroll layers remain valid while other content changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LayerDirtyState {
+    /// Layer is clean, no updates needed.
+    Clean,
+    /// Only compositor properties changed (scroll offset, transform, opacity).
+    /// Just re-composite the existing tiles at new positions.
+    NeedsComposite,
+    /// Display list content changed, need to re-rasterize affected tiles.
+    /// Implies NeedsComposite.
+    NeedsRasterize,
+    /// Layer content changed, need full repaint of display list.
+    /// Implies NeedsRasterize and NeedsComposite.
+    NeedsRepaint,
+}
+
+impl LayerDirtyState {
+    /// Check if this layer needs any work.
+    pub fn is_dirty(self) -> bool {
+        self != LayerDirtyState::Clean
+    }
+
+    /// Check if repaint is needed.
+    pub fn needs_repaint(self) -> bool {
+        self == LayerDirtyState::NeedsRepaint
+    }
+
+    /// Check if rasterization is needed.
+    pub fn needs_rasterize(self) -> bool {
+        matches!(self, LayerDirtyState::NeedsRasterize | LayerDirtyState::NeedsRepaint)
+    }
+
+    /// Check if compositing is needed.
+    pub fn needs_composite(self) -> bool {
+        self.is_dirty()
+    }
+
+    /// Escalate dirty state (only goes up in severity).
+    pub fn escalate(&mut self, new_state: LayerDirtyState) {
+        if new_state > *self {
+            *self = new_state;
+        }
+    }
+
+    /// Clear the dirty state back to clean.
+    pub fn clear(&mut self) {
+        *self = LayerDirtyState::Clean;
+    }
+}
+
+impl Default for LayerDirtyState {
+    fn default() -> Self {
+        LayerDirtyState::Clean
+    }
 }
 
 /// A hitbox stored in layer-local coordinates for retention across frames.
@@ -203,14 +268,12 @@ pub struct Layer {
     /// Used for compositor-only tile sprite emission.
     pub scale_factor: f32,
 
-    /// Content changed, rebuild DisplayList.
-    pub needs_repaint: bool,
-
-    /// DisplayList changed, re-rasterize tiles.
-    pub needs_rasterize: bool,
-
-    /// Transform/opacity/scroll changed, re-composite.
-    pub needs_composite: bool,
+    /// Unified dirty state for this layer.
+    ///
+    /// This enum represents the minimal work needed to update this layer.
+    /// Use this for scoped invalidation - marking one layer dirty doesn't
+    /// affect other layers.
+    pub dirty_state: LayerDirtyState,
 
     /// Retained hitboxes from previous paint (in layer-local coordinates).
     /// These are captured during initial paint and replayed during reuse
@@ -257,9 +320,7 @@ impl Layer {
             viewport_origin: Point::default(),
             outer_clip: ContentMask::default(),
             scale_factor: 1.0,
-            needs_repaint: true,
-            needs_rasterize: false,
-            needs_composite: false,
+            dirty_state: LayerDirtyState::NeedsRepaint,
             retained_hitboxes: Vec::new(),
             retained_mouse_listeners: Vec::new(),
             hitbox_range: None,
@@ -294,6 +355,39 @@ impl Layer {
     pub fn begin_frame(&mut self) {
         // Clear previous_display_list - it's only needed during repaint for cache lookup
         self.previous_display_list = None;
+    }
+
+    /// Mark this layer as needing repaint (content changed).
+    ///
+    /// This is the most severe dirty state - the display list must be rebuilt.
+    pub fn mark_needs_repaint(&mut self) {
+        self.dirty_state = LayerDirtyState::NeedsRepaint;
+    }
+
+    /// Mark this layer as needing rasterization (display list changed).
+    ///
+    /// Used when display list content changes but the full element tree
+    /// doesn't need to be re-traversed.
+    pub fn mark_needs_rasterize(&mut self) {
+        self.dirty_state.escalate(LayerDirtyState::NeedsRasterize);
+    }
+
+    /// Mark this layer as needing composite (compositor properties changed).
+    ///
+    /// This is the lightest dirty state - only scroll/transform/opacity changed.
+    /// The existing tiles just need to be composited at new positions.
+    pub fn mark_needs_composite(&mut self) {
+        self.dirty_state.escalate(LayerDirtyState::NeedsComposite);
+    }
+
+    /// Clear this layer's dirty state after processing.
+    pub fn clear_dirty_state(&mut self) {
+        self.dirty_state.clear();
+    }
+
+    /// Check if this layer needs any updates.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty_state.is_dirty()
     }
 
     /// Prepare layer for repainting (Phase 20e: Retained DisplayList).
@@ -332,17 +426,22 @@ impl Layer {
     /// Returns a Vec of TileSprite that should be inserted into the Scene.
     pub(crate) fn emit_tile_sprites(&self) -> Vec<TileSprite> {
         let Some(ref element_id) = self.element_id else {
+            eprintln!("[EMIT_TILES] layer {:?} has no element_id, returning empty", self.id);
             return Vec::new();
         };
 
         // Skip if this is the root layer or not a scroll container
         if self.reason != LayerReason::ScrollContainer {
+            eprintln!("[EMIT_TILES] layer {:?} reason={:?} (not ScrollContainer), returning empty", self.id, self.reason);
             return Vec::new();
         }
 
         let scale_factor = self.scale_factor;
         let tile_size_px = TILE_SIZE as f32 / scale_factor;
         let scroll_offset = self.scroll_offset;
+        // scroll_offset uses CSS convention: NEGATIVE when scrolled down (e.g., -1085 = viewing content at y=1085).
+        // The shader computes: final_position = stable_bounds + scroll_offset_scaled
+        // Tiles should shift UP (negative direction) when scrolled down, so pass scroll_offset as-is.
         let scroll_offset_scaled = point(
             ScaledPixels(scroll_offset.x.0 * scale_factor),
             ScaledPixels(scroll_offset.y.0 * scale_factor),
@@ -353,9 +452,11 @@ impl Layer {
         };
         let outer_clip = &self.outer_clip;
 
-        // scroll_offset is negative (scroll down = negative y)
-        let content_top_left_x = -scroll_offset.x.0;
-        let content_top_left_y = -scroll_offset.y.0;
+        // scroll_offset is NEGATIVE when scrolled down (CSS convention).
+        // If scroll_offset.y = -1085, we're viewing content starting at y = 1085.
+        // Negate scroll_offset to get positive content position.
+        let content_top_left_x = (-scroll_offset.x.0).max(0.0);
+        let content_top_left_y = (-scroll_offset.y.0).max(0.0);
 
         let min_tile = TileCoord {
             x: (content_top_left_x / tile_size_px).floor() as i32,
@@ -366,6 +467,11 @@ impl Layer {
             x: ((content_top_left_x + viewport.size.width.0) / tile_size_px).ceil() as i32 - 1,
             y: ((content_top_left_y + viewport.size.height.0) / tile_size_px).ceil() as i32 - 1,
         };
+
+        eprintln!(
+            "[EMIT_TILES] layer {:?} scroll_offset={:?} viewport_origin={:?} viewport_size={:?} content_top_left=({:.1},{:.1}) tile_range=({},{})..({},{})",
+            self.id, scroll_offset, viewport.origin, viewport.size, content_top_left_x, content_top_left_y, min_tile.x, min_tile.y, max_tile.x, max_tile.y
+        );
 
         let mut sprites = Vec::new();
         for tile_y in min_tile.y..=max_tile.y {
@@ -590,10 +696,10 @@ impl LayerTree {
         // Update parent relationship
         if let Some(layer) = self.layers.get_mut(&id) {
             layer.parent = Some(parent_id);
-            // Only mark needs_repaint for NEW layers
-            // Existing layers keep their display list and needs_repaint = false
+            // Only mark dirty for NEW layers
+            // Existing layers keep their display list and stay clean
             if is_new {
-                layer.needs_repaint = true;
+                layer.mark_needs_repaint();
             }
         }
 
@@ -644,7 +750,12 @@ impl LayerTree {
     pub fn set_scroll_offset(&mut self, layer_id: LayerId, offset: Point<Pixels>) {
         if let Some(layer) = self.layers.get_mut(&layer_id) {
             layer.scroll_offset = offset;
-            layer.needs_composite = true;
+            // Keep content_origin in sync so retained hitbox replay and hit-testing can use it.
+            layer.content_origin = Point {
+                x: layer.viewport_origin.x + offset.x,
+                y: layer.viewport_origin.y + offset.y,
+            };
+            layer.mark_needs_composite();
         }
     }
 
@@ -654,7 +765,7 @@ impl LayerTree {
     pub fn set_transform(&mut self, layer_id: LayerId, transform: TransformationMatrix) {
         if let Some(layer) = self.layers.get_mut(&layer_id) {
             layer.local_transform = transform;
-            layer.needs_composite = true;
+            layer.mark_needs_composite();
         }
     }
 
@@ -664,7 +775,71 @@ impl LayerTree {
     pub fn set_opacity(&mut self, layer_id: LayerId, opacity: f32) {
         if let Some(layer) = self.layers.get_mut(&layer_id) {
             layer.opacity = opacity;
-            layer.needs_composite = true;
+            layer.mark_needs_composite();
+        }
+    }
+
+    /// Invalidate a specific layer for repaint.
+    ///
+    /// P5.1: Scoped invalidation - only this layer is marked dirty, not others.
+    /// This is the foundation for compositor-driven scrolling where scroll
+    /// containers remain valid while other content (like FPS counter) changes.
+    pub fn invalidate_layer(&mut self, layer_id: LayerId) {
+        if let Some(layer) = self.layers.get_mut(&layer_id) {
+            layer.mark_needs_repaint();
+        }
+    }
+
+    /// Invalidate a layer by element ID.
+    ///
+    /// Returns true if the layer was found and invalidated.
+    pub fn invalidate_layer_by_element_id(&mut self, element_id: &GlobalElementId) -> bool {
+        if let Some(&layer_id) = self.element_to_layer.get(element_id) {
+            self.invalidate_layer(layer_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if any layer needs repaint.
+    pub fn any_needs_repaint(&self) -> bool {
+        self.layers.values().any(|l| l.dirty_state.needs_repaint())
+    }
+
+    /// Check if any layer needs rasterization.
+    pub fn any_needs_rasterize(&self) -> bool {
+        self.layers.values().any(|l| l.dirty_state.needs_rasterize())
+    }
+
+    /// Check if any layer needs composite.
+    pub fn any_needs_composite(&self) -> bool {
+        self.layers.values().any(|l| l.dirty_state.needs_composite())
+    }
+
+    /// Get all layers that need repaint.
+    pub fn layers_needing_repaint(&self) -> impl Iterator<Item = &Layer> {
+        self.layers.values().filter(|l| l.dirty_state.needs_repaint())
+    }
+
+    /// Get all layers that need rasterization (but not repaint).
+    pub fn layers_needing_rasterize(&self) -> impl Iterator<Item = &Layer> {
+        self.layers.values().filter(|l| {
+            l.dirty_state.needs_rasterize() && !l.dirty_state.needs_repaint()
+        })
+    }
+
+    /// Get all layers that only need composite.
+    pub fn layers_needing_composite_only(&self) -> impl Iterator<Item = &Layer> {
+        self.layers.values().filter(|l| {
+            l.dirty_state == LayerDirtyState::NeedsComposite
+        })
+    }
+
+    /// Clear dirty state for all layers after frame processing.
+    pub fn clear_all_dirty_states(&mut self) {
+        for layer in self.layers.values_mut() {
+            layer.clear_dirty_state();
         }
     }
 
