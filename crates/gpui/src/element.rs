@@ -717,10 +717,10 @@ impl AnyElement {
             return deferred.build_descriptor(window, cx);
         }
         if let Some(view) = self.downcast_mut::<AnyView>() {
-            return window.with_rendered_view(view.entity_id(), |window| {
-                let mut element = view.render_element(window, cx);
-                element.build_descriptor(window, cx)
-            });
+            // Don't call render() here - just return a ViewDescriptor.
+            // render() will be called in Entity<V>::request_layout.
+            // This avoids calling render() twice per frame.
+            return AnyDescriptor::View(crate::ViewDescriptor::new(view.entity_id()));
         }
         if let Some(text) = self.downcast_mut::<SharedString>() {
             let style = window
