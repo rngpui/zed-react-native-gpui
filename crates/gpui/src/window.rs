@@ -129,11 +129,14 @@ impl WindowInvalidator {
     pub fn invalidate_view(&self, entity: EntityId, cx: &mut App) -> bool {
         let mut inner = self.inner.borrow_mut();
         inner.dirty_views.insert(entity);
+        inner.dirty = true;
+        eprintln!("[INVALIDATE] entity {:?}, phase {:?}, dirty set to true", entity, inner.draw_phase);
         if inner.draw_phase == DrawPhase::None {
-            inner.dirty = true;
             cx.push_effect(Effect::Notify { emitter: entity });
             true
         } else {
+            // We're in a draw phase, so we can't push effects now.
+            // But dirty=true ensures a new frame will be scheduled after this one.
             false
         }
     }
@@ -708,13 +711,13 @@ pub(crate) struct PrepaintStateIndex {
     deferred_draws_index: usize,
     dispatch_tree_index: usize,
     accessed_element_states_index: usize,
+    mouse_listeners_index: usize,
     line_layout_index: LineLayoutIndex,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct PaintIndex {
     scene_index: usize,
-    mouse_listeners_index: usize,
     input_handlers_index: usize,
     cursor_styles_index: usize,
     accessed_element_states_index: usize,
@@ -743,6 +746,7 @@ pub(crate) struct PrepaintState {
     accessed_element_states: SmallVec<[(GlobalElementId, TypeId); 4]>,
     dispatch_tree: DispatchTreeSnapshot,
     deferred_draws: SmallVec<[DeferredDrawSnapshot; 2]>,
+    mouse_listeners: SmallVec<[Option<AnyMouseListener>; 8]>,
     line_layout_range: Range<LineLayoutIndex>,
 }
 
@@ -751,7 +755,6 @@ pub(crate) struct PrepaintState {
 pub(crate) struct PaintList {
     scene_ops: SmallVec<[PaintOperation; 8]>,
     cursor_styles: SmallVec<[CursorStyleRequest; 4]>,
-    mouse_listeners: SmallVec<[Option<AnyMouseListener>; 4]>,
     input_handlers: SmallVec<[Option<PlatformInputHandler>; 1]>,
     accessed_element_states: SmallVec<[(GlobalElementId, TypeId); 4]>,
     tab_stops: SmallVec<[TabStopOperation; 4]>,
@@ -1270,7 +1273,9 @@ impl Window {
                     || needs_present.get()
                     || (active.get() && input_rate_tracker.borrow_mut().is_high_rate());
 
-                if invalidator.is_dirty() || request_frame_options.force_render {
+                let is_dirty = invalidator.is_dirty();
+                if is_dirty || request_frame_options.force_render {
+                    eprintln!("[FRAME] Drawing frame: dirty={}, force_render={}", is_dirty, request_frame_options.force_render);
                     measure("frame duration", || {
                         handle
                             .update(&mut cx, |_, window, cx| {
@@ -2498,7 +2503,7 @@ impl Window {
             if let Some(layout_id) = layout_id {
                 let new_bounds = self.layout_bounds_for_finalize(layout_id);
                 let bounds_changed = cached_bounds
-                    .map(|cached| cached.size != new_bounds.size)
+                    .map(|cached| cached != new_bounds)
                     .unwrap_or(true);
 
                 if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
@@ -2538,8 +2543,11 @@ impl Window {
         };
 
         let mut root_element = self.root.as_ref().unwrap().clone().into_any();
+        let t0 = std::time::Instant::now();
         let descriptor = root_element.build_descriptor(self, cx);
+        let t1 = std::time::Instant::now();
         let root_fiber = self.reconcile_descriptor_tree(&descriptor);
+        let t2 = std::time::Instant::now();
         if self
             .last_layout_viewport_size
             .is_none_or(|size| size != root_size)
@@ -2550,10 +2558,21 @@ impl Window {
         }
 
         root_element.layout_as_root(root_size.into(), self, cx);
+        let t3 = std::time::Instant::now();
         self.finalize_dirty_flags();
+        let t4 = std::time::Instant::now();
         self.with_absolute_element_offset(Point::default(), |window| {
             root_element.prepaint(window, cx)
         });
+        let t5 = std::time::Instant::now();
+        eprintln!(
+            "Timing: desc={:.2}ms reconcile={:.2}ms layout={:.2}ms finalize={:.2}ms prepaint={:.2}ms",
+            (t1 - t0).as_secs_f64() * 1000.0,
+            (t2 - t1).as_secs_f64() * 1000.0,
+            (t3 - t2).as_secs_f64() * 1000.0,
+            (t4 - t3).as_secs_f64() * 1000.0,
+            (t5 - t4).as_secs_f64() * 1000.0
+        );
 
         let mut render_layer_elements = self.prepaint_render_layers(root_size, cx);
 
@@ -2764,6 +2783,7 @@ impl Window {
             deferred_draws_index: self.next_frame.deferred_draws.len(),
             dispatch_tree_index: self.next_frame.dispatch_tree.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
+            mouse_listeners_index: self.next_frame.mouse_listeners.len(),
             line_layout_index: self.text_system.layout_index(),
         }
     }
@@ -2798,6 +2818,13 @@ impl Window {
         if reused_subtree.contains_focus() {
             self.next_frame.focus = self.focus;
         }
+
+        self.next_frame.mouse_listeners.extend(
+            self.rendered_frame.mouse_listeners
+                [range.start.mouse_listeners_index..range.end.mouse_listeners_index]
+                .iter()
+                .cloned(),
+        );
 
         self.next_frame.deferred_draws.extend(
             self.rendered_frame.deferred_draws
@@ -2862,12 +2889,19 @@ impl Window {
             });
         }
 
+        let mouse_listeners = self.next_frame.mouse_listeners
+            [range.start.mouse_listeners_index..range.end.mouse_listeners_index]
+            .iter()
+            .cloned()
+            .collect();
+
         PrepaintState {
             hitboxes,
             tooltip_requests,
             accessed_element_states,
             dispatch_tree,
             deferred_draws,
+            mouse_listeners,
             line_layout_range: range.start.line_layout_index..range.end.line_layout_index,
         }
     }
@@ -2959,13 +2993,16 @@ impl Window {
             });
         }
 
+        self.next_frame
+            .mouse_listeners
+            .extend(state.mouse_listeners.iter().cloned());
+
         true
     }
 
     pub(crate) fn paint_index(&self) -> PaintIndex {
         PaintIndex {
             scene_index: self.next_frame.scene.len(),
-            mouse_listeners_index: self.next_frame.mouse_listeners.len(),
             input_handlers_index: self.next_frame.input_handlers.len(),
             cursor_styles_index: self.next_frame.cursor_styles.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
@@ -2986,12 +3023,6 @@ impl Window {
                 [range.start.input_handlers_index..range.end.input_handlers_index]
                 .iter_mut()
                 .map(|handler| handler.take()),
-        );
-        self.next_frame.mouse_listeners.extend(
-            self.rendered_frame.mouse_listeners
-                [range.start.mouse_listeners_index..range.end.mouse_listeners_index]
-                .iter_mut()
-                .map(|listener| listener.take()),
         );
         self.next_frame.accessed_element_states.extend(
             self.rendered_frame.accessed_element_states[range.start.accessed_element_states_index
@@ -3023,11 +3054,6 @@ impl Window {
             .iter()
             .cloned()
             .collect();
-        let mouse_listeners = self.next_frame.mouse_listeners
-            [range.start.mouse_listeners_index..range.end.mouse_listeners_index]
-            .iter()
-            .cloned()
-            .collect();
         let input_handlers = self.next_frame.input_handlers
             [range.start.input_handlers_index..range.end.input_handlers_index]
             .iter()
@@ -3047,7 +3073,6 @@ impl Window {
         PaintList {
             scene_ops,
             cursor_styles,
-            mouse_listeners,
             input_handlers,
             accessed_element_states,
             tab_stops,
@@ -3080,9 +3105,6 @@ impl Window {
         self.next_frame
             .cursor_styles
             .extend(list.cursor_styles.iter().cloned());
-        self.next_frame
-            .mouse_listeners
-            .extend(list.mouse_listeners.iter().cloned());
         self.next_frame
             .input_handlers
             .extend(list.input_handlers.iter().cloned());
@@ -4534,7 +4556,7 @@ impl Window {
         &mut self,
         mut listener: impl FnMut(&Event, DispatchPhase, &mut Window, &mut App) + 'static,
     ) {
-        self.invalidator.debug_assert_paint();
+        self.invalidator.debug_assert_paint_or_prepaint();
 
         self.next_frame.mouse_listeners.push(Some(Rc::new(RefCell::new(
             move |event: &dyn Any, phase: DispatchPhase, window: &mut Window, cx: &mut App| {

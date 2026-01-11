@@ -28,6 +28,24 @@ use crate::{
 use collections::HashMap;
 use refineable::Refineable;
 use smallvec::SmallVec;
+use std::sync::atomic::AtomicUsize;
+
+/// Debug counter: number of divs that skipped prepaint this frame
+pub static PREPAINT_SKIP_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Debug counter: number of divs that did full prepaint this frame
+pub static PREPAINT_FULL_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Debug counter: number of divs that skipped paint this frame
+pub static PAINT_SKIP_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Debug counter: number of divs that did full paint this frame
+pub static PAINT_FULL_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Debug counter: prepaint skip failed due to no fiber
+pub static PREPAINT_NO_FIBER: AtomicUsize = AtomicUsize::new(0);
+/// Debug counter: prepaint skip failed due to dirty flags
+pub static PREPAINT_DIRTY: AtomicUsize = AtomicUsize::new(0);
+/// Debug counter: prepaint skip failed due to no cached state
+pub static PREPAINT_NO_CACHE: AtomicUsize = AtomicUsize::new(0);
+/// Debug counter: prepaint skip failed due to replay failure
+pub static PREPAINT_REPLAY_FAIL: AtomicUsize = AtomicUsize::new(0);
 use stacksafe::{StackSafe, stacksafe};
 use std::{
     any::{Any, TypeId},
@@ -1482,29 +1500,54 @@ impl Element for Div {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Hitbox> {
-        let mut cached_prepaint = None;
-        if let Some(fiber_id) = request_layout.fiber_id
-            && self.interactivity.element_id.is_none()
-            && !window.refreshing
-            && let Some(fiber) = window.fiber_tree.get(fiber_id)
-            && !fiber.dirty.intersects(
+        let cached_prepaint = 'skip: {
+            let Some(fiber_id) = request_layout.fiber_id else {
+                PREPAINT_NO_FIBER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                break 'skip None;
+            };
+            if window.refreshing {
+                break 'skip None;
+            }
+            // Check if the current view is dirty - if so, we can't skip prepaint
+            // because external state (like scroll_offset) may have changed
+            let current_view = window.current_view();
+            if window.dirty_views.contains(&current_view) {
+                PREPAINT_DIRTY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                break 'skip None;
+            }
+            let Some(fiber) = window.fiber_tree.get(fiber_id) else {
+                PREPAINT_NO_FIBER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                break 'skip None;
+            };
+            if fiber.dirty.intersects(
                 DirtyFlags::NEEDS_LAYOUT
                     | DirtyFlags::NEEDS_PAINT
                     | DirtyFlags::BOUNDS_CHANGED
                     | DirtyFlags::SUBTREE_DIRTY,
-            )
-            && let Some(prepaint_state) = fiber.prepaint_state
-            && fiber.paint_list.is_some()
-        {
-            cached_prepaint = Some((prepaint_state, fiber.cached_hitbox.clone()));
-        }
+            ) {
+                PREPAINT_DIRTY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                break 'skip None;
+            }
+            let Some(prepaint_state) = fiber.prepaint_state else {
+                PREPAINT_NO_CACHE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                break 'skip None;
+            };
+            if fiber.paint_list.is_none() {
+                PREPAINT_NO_CACHE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                break 'skip None;
+            }
+            Some((prepaint_state, fiber.cached_hitbox.clone()))
+        };
 
         if let Some((prepaint_state, cached_hitbox)) = cached_prepaint {
             if window.replay_prepaint_state(prepaint_state) {
+                PREPAINT_SKIP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return cached_hitbox;
             }
+            PREPAINT_REPLAY_FAIL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
+        PREPAINT_FULL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let prepaint_start = window.prepaint_index();
         let image_cache = self
             .image_cache
@@ -1610,9 +1653,12 @@ impl Element for Div {
         cx: &mut App,
     ) {
         let mut cached_paint = None;
+        // Check if the current view is dirty - if so, we can't skip paint
+        let current_view = window.current_view();
+        let view_is_dirty = window.dirty_views.contains(&current_view);
         if let Some(fiber_id) = request_layout.fiber_id
-            && self.interactivity.element_id.is_none()
             && !window.refreshing
+            && !view_is_dirty
             && let Some(fiber) = window.fiber_tree.get(fiber_id)
             && !fiber.dirty.any()
             && let Some(paint_list) = fiber.paint_list
@@ -1621,10 +1667,12 @@ impl Element for Div {
         }
 
         if let Some(paint_list) = cached_paint {
+            PAINT_SKIP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             window.replay_paint_list(paint_list);
             return;
         }
 
+        PAINT_FULL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let paint_start = window.paint_index();
         let image_cache = self
             .image_cache
@@ -1904,6 +1952,17 @@ impl Interactivity {
                                 None
                             };
 
+                            // Register mouse listeners during prepaint (after hitbox creation)
+                            if let Some(ref hitbox) = hitbox {
+                                self.paint_mouse_listeners(
+                                    hitbox,
+                                    element_state.as_mut(),
+                                    window,
+                                    cx,
+                                );
+                                self.paint_scroll_listener(hitbox, &style, window, cx);
+                            }
+
                             let scroll_offset =
                                 self.clamp_scroll_position(bounds, &style, window, cx);
                             let result = f(&style, scroll_offset, hitbox, window, cx);
@@ -2077,14 +2136,6 @@ impl Interactivity {
                                                     hitbox.clone(),
                                                 );
                                             }
-
-                                            self.paint_mouse_listeners(
-                                                hitbox,
-                                                element_state.as_mut(),
-                                                window,
-                                                cx,
-                                            );
-                                            self.paint_scroll_listener(hitbox, &style, window, cx);
                                         }
 
                                         self.paint_keyboard_listeners(window, cx);
@@ -2715,6 +2766,7 @@ impl Interactivity {
                     scroll_offset.y += delta_y;
                     scroll_offset.x += delta_x;
                     if *scroll_offset != old_scroll_offset {
+                        eprintln!("[SCROLL] scroll_offset changed: {:?} -> {:?}, notifying view {:?}", old_scroll_offset, *scroll_offset, current_view);
                         cx.notify(current_view);
                     }
                 }

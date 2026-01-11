@@ -2170,11 +2170,13 @@ impl App {
         );
 
         if window_invalidators.is_empty() {
+            eprintln!("[NOTIFY] entity {:?} has NO window_invalidators, pushing Effect::Notify", entity_id);
             if self.pending_notifications.insert(entity_id) {
                 self.pending_effects
                     .push_back(Effect::Notify { emitter: entity_id });
             }
         } else {
+            eprintln!("[NOTIFY] entity {:?} has {} window_invalidators", entity_id, window_invalidators.len());
             for invalidator in window_invalidators.values() {
                 invalidator.invalidate_view(entity_id, self);
             }

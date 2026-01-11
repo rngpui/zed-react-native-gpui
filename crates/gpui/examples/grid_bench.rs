@@ -3,9 +3,12 @@ use std::env;
 use std::time::Instant;
 
 use gpui::{
-    App, Application, Bounds, Context, ElementId, Entity, Window, WindowBounds, WindowOptions,
-    deferred, div, prelude::*, px, rgb, size,
+    App, Application, Bounds, Context, ElementId, Entity, PAINT_FULL_COUNT, PAINT_SKIP_COUNT,
+    PREPAINT_DIRTY, PREPAINT_FULL_COUNT, PREPAINT_NO_CACHE, PREPAINT_NO_FIBER, PREPAINT_REPLAY_FAIL,
+    PREPAINT_SKIP_COUNT, Window, WindowBounds, WindowOptions, deferred, div, prelude::*, px, rgb,
+    size,
 };
+use std::sync::atomic::Ordering;
 
 fn env_bool(name: &str, default: bool) -> bool {
     env::var(name)
@@ -20,7 +23,19 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-const GRID_SIZE: usize = 50;
+fn env_f32(name: &str, default: f32) -> f32 {
+    env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+const DEFAULT_ROWS: usize = 50;
+const DEFAULT_CELL_SIZE: f32 = 32.0;
+const DEFAULT_WIDTH: f32 = 800.0;
+const DEFAULT_HEIGHT: f32 = 600.0;
+const CELL_GAP: f32 = 4.0;
+const GRID_PADDING: f32 = 16.0;
 const FRAME_HISTORY: usize = 60;
 
 struct FpsCounter {
@@ -57,7 +72,7 @@ struct GridBench {
     render_fps: FpsCounter,
     frame_fps: FpsCounter,
     row_count: usize,
-    col_count: usize,
+    cell_size: f32,
     enable_hover: bool,
     enable_click: bool,
     step_size: usize,
@@ -68,8 +83,8 @@ impl GridBench {
         Self {
             render_fps: FpsCounter::new(),
             frame_fps: FpsCounter::new(),
-            row_count: env_usize("GRID_BENCH_ROWS", GRID_SIZE),
-            col_count: env_usize("GRID_BENCH_COLS", GRID_SIZE),
+            row_count: env_usize("GRID_BENCH_ROWS", DEFAULT_ROWS),
+            cell_size: env_f32("GRID_BENCH_CELL_SIZE", DEFAULT_CELL_SIZE),
             enable_hover: env_bool("GRID_BENCH_HOVER", true),
             enable_click: env_bool("GRID_BENCH_CLICK", true),
             step_size: env_usize("GRID_BENCH_STEP", 1),
@@ -84,12 +99,18 @@ impl GridBench {
         self.row_count = self.row_count.saturating_sub(self.step_size).max(1);
     }
 
-    fn add_col(&mut self) {
-        self.col_count += self.step_size;
+    fn increase_cell_size(&mut self) {
+        self.cell_size = (self.cell_size + 4.0).min(128.0);
     }
 
-    fn remove_col(&mut self) {
-        self.col_count = self.col_count.saturating_sub(self.step_size).max(1);
+    fn decrease_cell_size(&mut self) {
+        self.cell_size = (self.cell_size - 4.0).max(8.0);
+    }
+
+    fn calculate_col_count(&self, window_width: f32) -> usize {
+        let available_width = window_width - (GRID_PADDING * 2.0);
+        let cell_with_gap = self.cell_size + CELL_GAP;
+        ((available_width + CELL_GAP) / cell_with_gap).floor().max(1.0) as usize
     }
 
     fn schedule_frame_callback(this: Entity<Self>, window: &mut Window) {
@@ -110,11 +131,30 @@ impl Render for GridBench {
         window.request_animation_frame();
         self.render_fps.record();
 
+        let window_width: f32 = window.viewport_size().width.into();
+        let col_count = self.calculate_col_count(window_width);
         let row_count = self.row_count;
-        let col_count = self.col_count;
         let total_cells = row_count * col_count;
+        let cell_size = self.cell_size;
         let enable_hover = self.enable_hover;
         let enable_click = self.enable_click;
+
+        let prepaint_skip = PREPAINT_SKIP_COUNT.swap(0, Ordering::Relaxed);
+        let prepaint_full = PREPAINT_FULL_COUNT.swap(0, Ordering::Relaxed);
+        let paint_skip = PAINT_SKIP_COUNT.swap(0, Ordering::Relaxed);
+        let paint_full = PAINT_FULL_COUNT.swap(0, Ordering::Relaxed);
+        let no_fiber = PREPAINT_NO_FIBER.swap(0, Ordering::Relaxed);
+        let dirty = PREPAINT_DIRTY.swap(0, Ordering::Relaxed);
+        let no_cache = PREPAINT_NO_CACHE.swap(0, Ordering::Relaxed);
+        let replay_fail = PREPAINT_REPLAY_FAIL.swap(0, Ordering::Relaxed);
+
+        if prepaint_skip > 0 || prepaint_full > 0 {
+            println!(
+                "Prepaint: skip={} full={} (fib={} dirty={} cache={} replay={}) | Paint: skip={} full={}",
+                prepaint_skip, prepaint_full, no_fiber, dirty, no_cache, replay_fail,
+                paint_skip, paint_full
+            );
+        }
 
         div()
             .size_full()
@@ -150,7 +190,29 @@ impl Render for GridBench {
                             .child(
                                 div()
                                     .text_color(rgb(0xaaaaaa))
-                                    .child(format!("Grid: {}x{} ({} cells)", row_count, col_count, total_cells)),
+                                    .child(format!(
+                                        "Grid: {}x{} ({} cells) @ {}px",
+                                        row_count, col_count, total_cells, cell_size as u32
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(0x88aaff))
+                                    .child(format!("Prepaint: {} skip / {} full", prepaint_skip, prepaint_full)),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(0xff88aa))
+                                    .child(format!("Paint: {} skip / {} full", paint_skip, paint_full)),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(0x888888))
+                                    .text_xs()
+                                    .child(format!(
+                                        "Why full: fib={} dirty={} cache={} replay={}",
+                                        no_fiber, dirty, no_cache, replay_fail
+                                    )),
                             ),
                     )
                     .child(
@@ -167,8 +229,20 @@ impl Render for GridBench {
                                         div()
                                             .flex()
                                             .gap_1()
-                                            .child(self.control_button("-", cx.listener(|this, _, _, _| this.remove_row())))
-                                            .child(self.control_button("+", cx.listener(|this, _, _, _| this.add_row()))),
+                                            .child(
+                                                self.control_button(
+                                                    "row-",
+                                                    "-",
+                                                    cx.listener(|this, _, _, _| this.remove_row()),
+                                                ),
+                                            )
+                                            .child(
+                                                self.control_button(
+                                                    "row+",
+                                                    "+",
+                                                    cx.listener(|this, _, _, _| this.add_row()),
+                                                ),
+                                            ),
                                     ),
                             )
                             .child(
@@ -176,13 +250,25 @@ impl Render for GridBench {
                                     .flex()
                                     .flex_col()
                                     .gap_1()
-                                    .child(div().text_color(rgb(0x888888)).child("Cols"))
+                                    .child(div().text_color(rgb(0x888888)).child("Cell Size"))
                                     .child(
                                         div()
                                             .flex()
                                             .gap_1()
-                                            .child(self.control_button("-", cx.listener(|this, _, _, _| this.remove_col())))
-                                            .child(self.control_button("+", cx.listener(|this, _, _, _| this.add_col()))),
+                                            .child(
+                                                self.control_button(
+                                                    "size-",
+                                                    "-",
+                                                    cx.listener(|this, _, _, _| this.decrease_cell_size()),
+                                                ),
+                                            )
+                                            .child(
+                                                self.control_button(
+                                                    "size+",
+                                                    "+",
+                                                    cx.listener(|this, _, _, _| this.increase_cell_size()),
+                                                ),
+                                            ),
                                     ),
                             ),
                     ),
@@ -196,27 +282,27 @@ impl Render for GridBench {
                         div()
                             .flex()
                             .flex_col()
-                            .p_4()
-                            .gap_1()
-                            .children((0..row_count).map(|row| {
+                            .p(px(GRID_PADDING))
+                            .gap(px(CELL_GAP))
+                            .children((0..row_count).map(move |row| {
                                 div()
                                     .flex()
-                                    .gap_1()
-                                    .children((0..col_count).map(|col| {
+                                    .gap(px(CELL_GAP))
+                                    .children((0..col_count).map(move |col| {
                                         let cell_num = row * col_count + col;
-                                        let hue = (cell_num as f32
-                                            / (row_count * col_count).max(1) as f32
-                                            * 360.0)
-                                            as u32;
+                                        let hue =
+                                            (cell_num as f32 / total_cells.max(1) as f32 * 360.0) as u32;
                                         let color = hsv_to_rgb(hue, 70, 60);
                                         let hover_color = hsv_to_rgb(hue, 80, 80);
                                         div()
                                             .id(ElementId::NamedInteger("cell".into(), cell_num as u64))
-                                            .size(px(32.0))
+                                            .size(px(cell_size))
                                             .rounded_sm()
                                             .bg(color)
                                             .when(enable_hover, |this| {
-                                                this.hover(|style| style.bg(hover_color).border_1().border_color(gpui::white()))
+                                                this.hover(|style| {
+                                                    style.bg(hover_color).border_1().border_color(gpui::white())
+                                                })
                                             })
                                             .flex()
                                             .items_center()
@@ -239,11 +325,12 @@ impl Render for GridBench {
 impl GridBench {
     fn control_button(
         &self,
+        id: &'static str,
         label: &'static str,
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
         div()
-            .id(label)
+            .id(id)
             .px_2()
             .py_1()
             .bg(rgb(0x444444))
@@ -262,8 +349,11 @@ fn hsv_to_rgb(h: u32, s: u32, v: u32) -> gpui::Hsla {
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(800.), px(600.)), cx);
+    let window_width = env_f32("GRID_BENCH_WIDTH", DEFAULT_WIDTH);
+    let window_height = env_f32("GRID_BENCH_HEIGHT", DEFAULT_HEIGHT);
+
+    Application::new().run(move |cx: &mut App| {
+        let bounds = Bounds::centered(None, size(px(window_width), px(window_height)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
