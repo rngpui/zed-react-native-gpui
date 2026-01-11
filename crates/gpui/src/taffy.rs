@@ -264,23 +264,16 @@ impl TaffyLayoutEngine {
             // Reuse existing node - update style and measure function
             self.taffy.set_style(node_id, taffy_style).expect(EXPECT_MESSAGE);
 
-            // Update context with new measure function
-            self.taffy
-                .set_node_context(
-                    node_id,
-                    Some(NodeContext {
-                        measure: Some(measure_fn),
-                        last_access: self.generation,
-                        element: None,
-                        dirty_flags: DirtyFlags::empty(),
-                        cached_prepaint: None,
-                        cached_paint: None,
-                    }),
-                )
-                .expect(EXPECT_MESSAGE);
+            // Update context, preserving dirty flags from previous mark_dirty_with_flags calls
+            if let Some(context) = self.taffy.get_node_context_mut(node_id) {
+                context.measure = Some(measure_fn);
+                context.last_access = self.generation;
+            }
 
-            // Mark dirty since measure function changed
-            self.taffy.mark_dirty(node_id).expect(EXPECT_MESSAGE);
+            // NOTE: We intentionally do NOT call taffy.mark_dirty() here.
+            // The measure function is recreated each frame, but if its results
+            // would be the same, Taffy can use its cached layout. This is critical
+            // for achieving O(unchanged) layout performance.
 
             self.stats.hits += 1;
             node_id.into()

@@ -2058,13 +2058,15 @@ impl Element for Div {
                 let signature = self.compute_subtree_signature();
                 let content_mask = window.content_mask();
                 let element_offset = window.element_offset();
+                // Check tiled scroll container status BEFORE the lookup to avoid borrow conflicts.
+                let inside_tiled = window.is_inside_tiled_scroll_container();
 
                 match window.lookup_subtree_cache_with_offset(id, signature, bounds, &content_mask, element_offset) {
                     Some(SubtreeCacheHit::Full(cached)) => {
                         // Inside tiled scroll containers, we can't use the Full cache hit path
                         // because reuse_prepaint/reuse_paint would use invalid Scene indices
                         // (primitives go to DisplayList instead). Fall through to normal prepaint.
-                        if window.is_inside_tiled_scroll_container() {
+                        if inside_tiled {
                             // Continue to normal prepaint (fall through to end of match)
                         } else {
                             // Full cache hit - extract values before mutable operations

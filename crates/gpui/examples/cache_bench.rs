@@ -253,6 +253,23 @@ impl Render for CacheBench {
                             .child(stat_box("Misses", format!("{}", frame_stats.paint.element_misses), rgb(0xf38ba8)))
                             .child(stat_box("Subtree Skips", format!("{}", frame_stats.paint.subtree_skips), rgb(0xcba6f7)))
                             .child(stat_box("Hit Rate", format!("{:.1}%", paint_hit_rate), rgb(0xf9e2af))),
+                    )
+                    // SubtreeCache stats (Div element caching)
+                    .child(
+                        div()
+                            .text_color(rgb(0x9399b2))
+                            .text_sm()
+                            .mt_2()
+                            .child("Div SubtreeCache"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_4()
+                            .child(stat_box("Lookups", format!("{}", frame_stats.subtree_cache.lookups), rgb(0x89dceb)))
+                            .child(stat_box("Full Hits", format!("{}", frame_stats.subtree_cache.full_hits), rgb(0xa6e3a1)))
+                            .child(stat_box("Offset Hits", format!("{}", frame_stats.subtree_cache.offset_hits), rgb(0xf9e2af)))
+                            .child(stat_box("Misses", format!("{}", frame_stats.subtree_cache.misses), rgb(0xf38ba8))),
                     ),
             )
             .child(

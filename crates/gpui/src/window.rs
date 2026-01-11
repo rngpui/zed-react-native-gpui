@@ -88,6 +88,26 @@ impl ViewStats {
     }
 }
 
+/// Statistics for Div SubtreeCache (Phase 5: Instrumentation).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct SubtreeCacheStats {
+    /// Number of cache lookups attempted.
+    pub lookups: u64,
+    /// Number of full cache hits (everything matches).
+    pub full_hits: u64,
+    /// Number of offset-only hits (size matches but position differs).
+    pub offset_hits: u64,
+    /// Number of cache misses.
+    pub misses: u64,
+}
+
+impl SubtreeCacheStats {
+    /// Reset all counters to zero.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// Combined frame statistics for all caching layers (Phase 5: Instrumentation).
 ///
 /// Use `Window::frame_stats()` to get the current frame's statistics.
@@ -100,6 +120,8 @@ pub struct FrameStats {
     pub layout: crate::taffy::LayoutCacheStats,
     /// Paint cache statistics aggregated across all display lists.
     pub paint: crate::display_list::PaintCacheStats,
+    /// Div SubtreeCache statistics.
+    pub subtree_cache: SubtreeCacheStats,
 }
 
 impl std::fmt::Display for FrameStats {
@@ -1160,6 +1182,8 @@ pub struct Window {
     view_to_layout: FxHashMap<EntityId, LayoutId>,
     /// View rendering statistics (Phase 5: Instrumentation).
     view_stats: ViewStats,
+    /// Div SubtreeCache statistics (Phase 5: Instrumentation).
+    subtree_cache_stats: SubtreeCacheStats,
     /// Previous frame's statistics for reporting (Phase 5: Instrumentation).
     previous_frame_stats: FrameStats,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
@@ -1695,6 +1719,7 @@ impl Window {
             view_cache_sizes: FxHashMap::default(),
             view_to_layout: FxHashMap::default(),
             view_stats: ViewStats::default(),
+            subtree_cache_stats: SubtreeCacheStats::default(),
             previous_frame_stats: FrameStats::default(),
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
@@ -2448,6 +2473,7 @@ impl Window {
             views: self.view_stats,
             layout: layout_stats,
             paint: paint_stats,
+            subtree_cache: self.subtree_cache_stats,
         }
     }
 
@@ -2658,6 +2684,7 @@ impl Window {
         self.prepaint_hitbox_local_index_stack.clear();
         // Phase 5: Reset frame stats
         self.view_stats.reset();
+        self.subtree_cache_stats.reset();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
         self.invalidator.set_dirty(false);
@@ -3535,19 +3562,27 @@ impl Window {
     ///
     /// Offset-only hits can be used for render-to-texture caching where the cached
     /// texture can be composited at a new position.
-    #[allow(dead_code)]
     pub(crate) fn lookup_subtree_cache_with_offset(
-        &self,
+        &mut self,
         id: &GlobalElementId,
         subtree_signature: u64,
         bounds: Bounds<Pixels>,
         content_mask: &ContentMask<Pixels>,
         element_offset: Point<Pixels>,
     ) -> Option<SubtreeCacheHit<'_>> {
-        let entry = self.rendered_frame.subtree_cache.get(id)?;
+        self.subtree_cache_stats.lookups += 1;
+
+        let entry = match self.rendered_frame.subtree_cache.get(id) {
+            Some(entry) => entry,
+            None => {
+                self.subtree_cache_stats.misses += 1;
+                return None;
+            }
+        };
 
         // Signature must always match
         if entry.subtree_signature != subtree_signature {
+            self.subtree_cache_stats.misses += 1;
             return None;
         }
 
@@ -3556,6 +3591,7 @@ impl Window {
             && entry.content_mask == *content_mask
             && entry.element_offset == element_offset
         {
+            self.subtree_cache_stats.full_hits += 1;
             return Some(SubtreeCacheHit::Full(entry));
         }
 
@@ -3570,9 +3606,11 @@ impl Window {
                 x: bounds.origin.x - entry.bounds.origin.x,
                 y: bounds.origin.y - entry.bounds.origin.y,
             };
+            self.subtree_cache_stats.offset_hits += 1;
             return Some(SubtreeCacheHit::OffsetOnly { entry, offset_delta });
         }
 
+        self.subtree_cache_stats.misses += 1;
         None
     }
 
