@@ -342,6 +342,18 @@ enum ElementDrawPhase<RequestLayoutState, PrepaintState> {
     Painted,
 }
 
+impl<RequestLayoutState, PrepaintState> ElementDrawPhase<RequestLayoutState, PrepaintState> {
+    fn name(&self) -> &'static str {
+        match self {
+            ElementDrawPhase::Start => "Start",
+            ElementDrawPhase::RequestLayout { .. } => "RequestLayout",
+            ElementDrawPhase::LayoutComputed { .. } => "LayoutComputed",
+            ElementDrawPhase::Prepaint { .. } => "Prepaint",
+            ElementDrawPhase::Painted => "Painted",
+        }
+    }
+}
+
 /// A wrapper around an implementer of [`Element`] that allows it to be drawn in a window.
 impl<E: Element> Drawable<E> {
     pub(crate) fn new(element: E) -> Self {
@@ -443,7 +455,23 @@ impl<E: Element> Drawable<E> {
                     prepaint,
                 };
             }
-            _ => panic!("must call request_layout before prepaint"),
+            other => {
+                eprintln!(
+                    "Drawable::prepaint without request_layout: element_type={}, element_id={:?}, phase={}, source_location={:?}",
+                    std::any::type_name::<E>(),
+                    self.element.id(),
+                    other.name(),
+                    self.element.source_location(),
+                );
+                log::error!(
+                    "Drawable::prepaint without request_layout: element_type={}, element_id={:?}, phase={}, source_location={:?}",
+                    std::any::type_name::<E>(),
+                    self.element.id(),
+                    other.name(),
+                    self.element.source_location(),
+                );
+                panic!("must call request_layout before prepaint");
+            }
         }
     }
 
@@ -485,7 +513,23 @@ impl<E: Element> Drawable<E> {
                 self.phase = ElementDrawPhase::Painted;
                 (request_layout, prepaint)
             }
-            _ => panic!("must call prepaint before paint"),
+            other => {
+                eprintln!(
+                    "Drawable::paint without prepaint: element_type={}, element_id={:?}, phase={}, source_location={:?}",
+                    std::any::type_name::<E>(),
+                    self.element.id(),
+                    other.name(),
+                    self.element.source_location(),
+                );
+                log::error!(
+                    "Drawable::paint without prepaint: element_type={}, element_id={:?}, phase={}, source_location={:?}",
+                    std::any::type_name::<E>(),
+                    self.element.id(),
+                    other.name(),
+                    self.element.source_location(),
+                );
+                panic!("must call prepaint before paint");
+            }
         }
     }
 

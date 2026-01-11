@@ -359,7 +359,11 @@ impl WindowTextSystem {
         self.line_layout_cache.layout_index()
     }
 
-    pub(crate) fn reuse_layouts(&self, index: Range<LineLayoutIndex>) {
+    pub(crate) fn can_reuse_layouts(&self, index: &Range<LineLayoutIndex>) -> bool {
+        self.line_layout_cache.can_reuse_layouts(index)
+    }
+
+    pub(crate) fn reuse_layouts(&self, index: Range<LineLayoutIndex>) -> bool {
         self.line_layout_cache.reuse_layouts(index)
     }
 

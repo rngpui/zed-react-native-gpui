@@ -1427,30 +1427,6 @@ impl Element for Div {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut child_layout_ids = SmallVec::new();
         let fiber_id = window.fiber_for_current_path();
-        if let Some(fiber_id) = fiber_id
-            && self.interactivity.element_id.is_none()
-            && !window.refreshing
-            && let Some(fiber) = window.fiber_tree.get(fiber_id)
-            && !fiber
-                .dirty
-                .intersects(DirtyFlags::NEEDS_LAYOUT | DirtyFlags::SUBTREE_DIRTY)
-            && let Some((cached_layout_id, cached_children)) = window
-                .cached_layout_node_for_current_path()
-                .map(|cached| (cached.layout_id, cached.children.clone()))
-        {
-            child_layout_ids = cached_children.iter().copied().collect();
-            window.mark_layout_path_used();
-            if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
-                fiber.layout_id = Some(cached_layout_id);
-            }
-            return (
-                cached_layout_id,
-                DivFrameState {
-                    child_layout_ids,
-                    fiber_id: Some(fiber_id),
-                },
-            );
-        }
         let image_cache = self
             .image_cache
             .as_mut()
@@ -1506,21 +1482,26 @@ impl Element for Div {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Hitbox> {
+        let mut cached_prepaint = None;
         if let Some(fiber_id) = request_layout.fiber_id
             && self.interactivity.element_id.is_none()
             && !window.refreshing
             && let Some(fiber) = window.fiber_tree.get(fiber_id)
-            && !fiber
-                .dirty
-                .intersects(DirtyFlags::NEEDS_LAYOUT | DirtyFlags::BOUNDS_CHANGED | DirtyFlags::SUBTREE_DIRTY)
-            && let Some(prepaint_range) = fiber.prepaint_range.clone()
+            && !fiber.dirty.intersects(
+                DirtyFlags::NEEDS_LAYOUT
+                    | DirtyFlags::NEEDS_PAINT
+                    | DirtyFlags::BOUNDS_CHANGED
+                    | DirtyFlags::SUBTREE_DIRTY,
+            )
+            && let Some(prepaint_state) = fiber.prepaint_state
+            && fiber.paint_list.is_some()
         {
-            let prepaint_start = window.prepaint_index();
-            window.reuse_prepaint(prepaint_range);
-            let prepaint_end = window.prepaint_index();
-            if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
-                fiber.prepaint_range = Some(prepaint_start..prepaint_end);
-                return fiber.cached_hitbox.clone();
+            cached_prepaint = Some((prepaint_state, fiber.cached_hitbox.clone()));
+        }
+
+        if let Some((prepaint_state, cached_hitbox)) = cached_prepaint {
+            if window.replay_prepaint_state(prepaint_state) {
+                return cached_hitbox;
             }
         }
 
@@ -1602,8 +1583,14 @@ impl Element for Div {
 
         let prepaint_end = window.prepaint_index();
         if let Some(fiber_id) = request_layout.fiber_id {
+            let existing_prepaint_state =
+                window.fiber_tree.get(fiber_id).and_then(|fiber| fiber.prepaint_state);
+            let prepaint_state = window.store_prepaint_state(
+                prepaint_start..prepaint_end,
+                existing_prepaint_state,
+            );
             if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
-                fiber.prepaint_range = Some(prepaint_start..prepaint_end);
+                fiber.prepaint_state = Some(prepaint_state);
                 fiber.cached_hitbox = hitbox.clone();
             }
         }
@@ -1622,21 +1609,19 @@ impl Element for Div {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let mut cached_paint = None;
         if let Some(fiber_id) = request_layout.fiber_id
             && self.interactivity.element_id.is_none()
             && !window.refreshing
             && let Some(fiber) = window.fiber_tree.get(fiber_id)
-            && !fiber
-                .dirty
-                .intersects(DirtyFlags::NEEDS_PAINT | DirtyFlags::BOUNDS_CHANGED | DirtyFlags::SUBTREE_DIRTY)
-            && let Some(paint_range) = fiber.paint_range.clone()
+            && !fiber.dirty.any()
+            && let Some(paint_list) = fiber.paint_list
         {
-            let paint_start = window.paint_index();
-            window.reuse_paint(paint_range);
-            let paint_end = window.paint_index();
-            if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
-                fiber.paint_range = Some(paint_start..paint_end);
-            }
+            cached_paint = Some(paint_list);
+        }
+
+        if let Some(paint_list) = cached_paint {
+            window.replay_paint_list(paint_list);
             return;
         }
 
@@ -1669,8 +1654,12 @@ impl Element for Div {
 
         let paint_end = window.paint_index();
         if let Some(fiber_id) = request_layout.fiber_id {
+            let existing_paint_list =
+                window.fiber_tree.get(fiber_id).and_then(|fiber| fiber.paint_list);
+            let paint_list =
+                window.store_paint_list(paint_start..paint_end, existing_paint_list);
             if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
-                fiber.paint_range = Some(paint_start..paint_end);
+                fiber.paint_list = Some(paint_list);
             }
         }
     }

@@ -8,14 +8,15 @@ use crate::{
     Edges, Effect, Entity, EntityId, EventEmitter, FiberId, FiberTree, FileDropEvent, FontId,
     Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext,
     KeyDownEvent, KeyEvent, Keystroke,
-    KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite,
-    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
-    Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage,
-    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
-    StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
-    SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
+    KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
+    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
+    PaintListId, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, PrepaintStateId, Priority,
+    PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams,
+    RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X,
+    SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle,
+    Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController,
+    TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
     TextStyleRefinement, TransformationMatrix, Underline, UnderlineStyle, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
     WindowParams, WindowTextSystem, point, prelude::*, px, rems, size, transparent_black,
@@ -54,6 +55,9 @@ use std::{
 use util::post_inc;
 use util::{ResultExt, measure};
 use uuid::Uuid;
+use crate::scene::PaintOperation;
+use crate::key_dispatch::DispatchTreeSnapshot;
+use crate::tab_stop::TabStopOperation;
 
 mod prompts;
 
@@ -469,7 +473,7 @@ pub struct DismissEvent;
 type FrameCallback = Box<dyn FnOnce(&mut Window, &mut App)>;
 
 pub(crate) type AnyMouseListener =
-    Box<dyn FnMut(&dyn Any, DispatchPhase, &mut Window, &mut App) + 'static>;
+    Rc<RefCell<dyn FnMut(&dyn Any, DispatchPhase, &mut Window, &mut App) + 'static>>;
 
 #[derive(Clone)]
 pub(crate) struct CursorStyleRequest {
@@ -671,6 +675,7 @@ pub(crate) struct DeferredDraw {
     absolute_offset: Point<Pixels>,
     prepaint_range: Range<PrepaintStateIndex>,
     paint_range: Range<PaintIndex>,
+    cached_prepaint_states: SmallVec<[(PrepaintStateId, usize); 2]>,
 }
 
 pub(crate) struct Frame {
@@ -715,6 +720,91 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+}
+
+/// Cached deferred draw metadata for prepaint replay.
+#[derive(Clone)]
+pub(crate) struct DeferredDrawSnapshot {
+    current_view: EntityId,
+    priority: usize,
+    parent_node: DispatchNodeId,
+    element_id_stack: SmallVec<[ElementId; 32]>,
+    text_style_stack: Vec<TextStyleRefinement>,
+    absolute_offset: Point<Pixels>,
+    prepaint_range: Range<PrepaintStateIndex>,
+    paint_range: Range<PaintIndex>,
+}
+
+/// Cached prepaint state for a subtree.
+#[derive(Clone)]
+pub(crate) struct PrepaintState {
+    hitboxes: SmallVec<[Hitbox; 4]>,
+    tooltip_requests: SmallVec<[Option<TooltipRequest>; 2]>,
+    accessed_element_states: SmallVec<[(GlobalElementId, TypeId); 4]>,
+    dispatch_tree: DispatchTreeSnapshot,
+    deferred_draws: SmallVec<[DeferredDrawSnapshot; 2]>,
+    line_layout_range: Range<LineLayoutIndex>,
+}
+
+/// Cached paint commands for a subtree.
+#[derive(Clone)]
+pub(crate) struct PaintList {
+    scene_ops: SmallVec<[PaintOperation; 8]>,
+    cursor_styles: SmallVec<[CursorStyleRequest; 4]>,
+    mouse_listeners: SmallVec<[Option<AnyMouseListener>; 4]>,
+    input_handlers: SmallVec<[Option<PlatformInputHandler>; 1]>,
+    accessed_element_states: SmallVec<[(GlobalElementId, TypeId); 4]>,
+    tab_stops: SmallVec<[TabStopOperation; 4]>,
+    line_layout_range: Range<LineLayoutIndex>,
+}
+
+/// Arena for cached paint lists.
+#[derive(Default)]
+pub(crate) struct PaintListArena {
+    lists: SlotMap<PaintListId, PaintList>,
+}
+
+impl PaintListArena {
+    pub(crate) fn store(&mut self, list: PaintList) -> PaintListId {
+        self.lists.insert(list)
+    }
+
+    pub(crate) fn get_mut(&mut self, id: PaintListId) -> Option<&mut PaintList> {
+        self.lists.get_mut(id)
+    }
+
+    pub(crate) fn replace(&mut self, id: PaintListId, list: PaintList) {
+        if let Some(existing) = self.lists.get_mut(id) {
+            *existing = list;
+        }
+    }
+
+}
+
+/// Arena for cached prepaint states.
+#[derive(Default)]
+pub(crate) struct PrepaintStateArena {
+    states: SlotMap<PrepaintStateId, PrepaintState>,
+}
+
+impl PrepaintStateArena {
+    pub(crate) fn store(&mut self, state: PrepaintState) -> PrepaintStateId {
+        self.states.insert(state)
+    }
+
+    pub(crate) fn get(&self, id: PrepaintStateId) -> Option<&PrepaintState> {
+        self.states.get(id)
+    }
+
+    pub(crate) fn get_mut(&mut self, id: PrepaintStateId) -> Option<&mut PrepaintState> {
+        self.states.get_mut(id)
+    }
+
+    pub(crate) fn replace(&mut self, id: PrepaintStateId, state: PrepaintState) {
+        if let Some(existing) = self.states.get_mut(id) {
+            *existing = state;
+        }
+    }
 }
 
 impl Frame {
@@ -882,6 +972,8 @@ pub struct Window {
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
+    paint_lists: PaintListArena,
+    prepaint_states: PrepaintStateArena,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -1369,6 +1461,8 @@ impl Window {
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            paint_lists: PaintListArena::default(),
+            prepaint_states: PrepaintStateArena::default(),
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
@@ -2381,6 +2475,46 @@ impl Window {
         }
     }
 
+    fn layout_bounds_for_finalize(&mut self, layout_id: LayoutId) -> Bounds<Pixels> {
+        let scale_factor = self.scale_factor();
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .layout_bounds(layout_id, scale_factor)
+    }
+
+    fn finalize_dirty_flags(&mut self) {
+        let fiber_ids: Vec<FiberId> = self.fiber_tree.fibers.keys().collect();
+
+        for fiber_id in fiber_ids {
+            let (layout_id, cached_bounds) = {
+                let fiber = match self.fiber_tree.get(fiber_id) {
+                    Some(f) => f,
+                    None => continue,
+                };
+                (fiber.layout_id, fiber.bounds)
+            };
+
+            if let Some(layout_id) = layout_id {
+                let new_bounds = self.layout_bounds_for_finalize(layout_id);
+                let bounds_changed = cached_bounds
+                    .map(|cached| cached.size != new_bounds.size)
+                    .unwrap_or(true);
+
+                if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
+                    fiber.bounds = Some(new_bounds);
+                    if bounds_changed {
+                        fiber.dirty.insert(DirtyFlags::BOUNDS_CHANGED);
+                    }
+                }
+
+                if bounds_changed {
+                    self.fiber_tree.propagate_bounds_changed(fiber_id);
+                }
+            }
+        }
+    }
+
     fn draw_roots(&mut self, cx: &mut App) {
         self.invalidator.set_phase(DrawPhase::Prepaint);
         self.tooltip_bounds.take();
@@ -2403,7 +2537,6 @@ impl Window {
             }
         };
 
-        // Layout all root elements.
         let mut root_element = self.root.as_ref().unwrap().clone().into_any();
         let descriptor = root_element.build_descriptor(self, cx);
         let root_fiber = self.reconcile_descriptor_tree(&descriptor);
@@ -2415,7 +2548,12 @@ impl Window {
                 .mark_dirty(root_fiber, DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT);
             self.last_layout_viewport_size = Some(root_size);
         }
-        root_element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
+
+        root_element.layout_as_root(root_size.into(), self, cx);
+        self.finalize_dirty_flags();
+        self.with_absolute_element_offset(Point::default(), |window| {
+            root_element.prepaint(window, cx)
+        });
 
         let mut render_layer_elements = self.prepaint_render_layers(root_size, cx);
 
@@ -2567,6 +2705,13 @@ impl Window {
             }
             let prepaint_end = self.prepaint_index();
             deferred_draw.prepaint_range = prepaint_start..prepaint_end;
+            for (state_id, index) in deferred_draw.cached_prepaint_states.iter().copied() {
+                if let Some(state) = self.prepaint_states.get_mut(state_id) {
+                    if let Some(snapshot) = state.deferred_draws.get_mut(index) {
+                        snapshot.prepaint_range = deferred_draw.prepaint_range.clone();
+                    }
+                }
+            }
         }
         assert_eq!(
             self.next_frame.deferred_draws.len(),
@@ -2600,6 +2745,13 @@ impl Window {
             }
             let paint_end = self.paint_index();
             deferred_draw.paint_range = paint_start..paint_end;
+            for (state_id, index) in deferred_draw.cached_prepaint_states.iter().copied() {
+                if let Some(state) = self.prepaint_states.get_mut(state_id) {
+                    if let Some(snapshot) = state.deferred_draws.get_mut(index) {
+                        snapshot.paint_range = deferred_draw.paint_range.clone();
+                    }
+                }
+            }
         }
         self.next_frame.deferred_draws = deferred_draws;
         self.element_id_stack.clear();
@@ -2661,8 +2813,153 @@ impl Window {
                     absolute_offset: deferred_draw.absolute_offset,
                     prepaint_range: deferred_draw.prepaint_range.clone(),
                     paint_range: deferred_draw.paint_range.clone(),
+                    cached_prepaint_states: SmallVec::new(),
                 }),
         );
+    }
+
+    fn capture_prepaint_state(&mut self, range: Range<PrepaintStateIndex>) -> PrepaintState {
+        let hitboxes = self.next_frame.hitboxes
+            [range.start.hitboxes_index..range.end.hitboxes_index]
+            .iter()
+            .cloned()
+            .collect();
+        let tooltip_requests = self.next_frame.tooltip_requests
+            [range.start.tooltips_index..range.end.tooltips_index]
+            .iter()
+            .cloned()
+            .collect();
+        let accessed_element_states = self.next_frame.accessed_element_states
+            [range.start.accessed_element_states_index..range.end.accessed_element_states_index]
+            .iter()
+            .cloned()
+            .collect();
+
+        let dispatch_range = range.start.dispatch_tree_index..range.end.dispatch_tree_index;
+        let dispatch_tree = self.next_frame.dispatch_tree.snapshot_range(dispatch_range.clone());
+
+        let mut deferred_draws = SmallVec::new();
+        for deferred_draw in self.next_frame.deferred_draws
+            [range.start.deferred_draws_index..range.end.deferred_draws_index]
+            .iter()
+        {
+            let parent_index = deferred_draw.parent_node.index();
+            debug_assert!(
+                dispatch_range.contains(&parent_index),
+                "Deferred draw parent node outside prepaint snapshot range"
+            );
+            let parent_node =
+                DispatchNodeId::from_index(parent_index.saturating_sub(dispatch_range.start));
+            deferred_draws.push(DeferredDrawSnapshot {
+                current_view: deferred_draw.current_view,
+                priority: deferred_draw.priority,
+                parent_node,
+                element_id_stack: deferred_draw.element_id_stack.clone(),
+                text_style_stack: deferred_draw.text_style_stack.clone(),
+                absolute_offset: deferred_draw.absolute_offset,
+                prepaint_range: deferred_draw.prepaint_range.clone(),
+                paint_range: deferred_draw.paint_range.clone(),
+            });
+        }
+
+        PrepaintState {
+            hitboxes,
+            tooltip_requests,
+            accessed_element_states,
+            dispatch_tree,
+            deferred_draws,
+            line_layout_range: range.start.line_layout_index..range.end.line_layout_index,
+        }
+    }
+
+    /// Store prepaint output in the cache, optionally overwriting an existing entry.
+    pub(crate) fn store_prepaint_state(
+        &mut self,
+        range: Range<PrepaintStateIndex>,
+        existing: Option<PrepaintStateId>,
+    ) -> PrepaintStateId {
+        let state = self.capture_prepaint_state(range.clone());
+        let state_id = match existing {
+            Some(id) => {
+                self.prepaint_states.replace(id, state);
+                id
+            }
+            None => self.prepaint_states.store(state),
+        };
+
+        for (index, deferred_draw) in self.next_frame.deferred_draws
+            [range.start.deferred_draws_index..range.end.deferred_draws_index]
+            .iter_mut()
+            .enumerate()
+        {
+            if !deferred_draw
+                .cached_prepaint_states
+                .iter()
+                .any(|(id, cached_index)| *id == state_id && *cached_index == index)
+            {
+                deferred_draw
+                    .cached_prepaint_states
+                    .push((state_id, index));
+            }
+        }
+
+        state_id
+    }
+
+    /// Replay a cached prepaint state into the current frame.
+    pub(crate) fn replay_prepaint_state(&mut self, state_id: PrepaintStateId) -> bool {
+        let Some(state) = self.prepaint_states.get(state_id) else {
+            return false;
+        };
+
+        if !self.text_system.can_reuse_layouts(&state.line_layout_range) {
+            return false;
+        }
+
+        let state = self.prepaint_states.get_mut(state_id).unwrap();
+
+        let reused_subtree = self
+            .next_frame
+            .dispatch_tree
+            .reuse_snapshot(&state.dispatch_tree, self.focus);
+        if reused_subtree.contains_focus() {
+            self.next_frame.focus = self.focus;
+        }
+
+        self.next_frame
+            .hitboxes
+            .extend(state.hitboxes.iter().cloned());
+        self.next_frame
+            .tooltip_requests
+            .extend(state.tooltip_requests.iter().cloned());
+        self.next_frame
+            .accessed_element_states
+            .extend(state.accessed_element_states.iter().cloned());
+
+        let line_layout_start = self.text_system.layout_index();
+        self.text_system
+            .reuse_layouts(state.line_layout_range.clone());
+        let line_layout_end = self.text_system.layout_index();
+        state.line_layout_range = line_layout_start..line_layout_end;
+
+        for (index, snapshot) in state.deferred_draws.iter().enumerate() {
+            let mut cached_prepaint_states = SmallVec::new();
+            cached_prepaint_states.push((state_id, index));
+            self.next_frame.deferred_draws.push(DeferredDraw {
+                current_view: snapshot.current_view,
+                priority: snapshot.priority,
+                parent_node: reused_subtree.refresh_node_id(snapshot.parent_node),
+                element_id_stack: snapshot.element_id_stack.clone(),
+                text_style_stack: snapshot.text_style_stack.clone(),
+                element: None,
+                absolute_offset: snapshot.absolute_offset,
+                prepaint_range: snapshot.prepaint_range.clone(),
+                paint_range: snapshot.paint_range.clone(),
+                cached_prepaint_states,
+            });
+        }
+
+        true
     }
 
     pub(crate) fn paint_index(&self) -> PaintIndex {
@@ -2713,6 +3010,93 @@ impl Window {
             range.start.scene_index..range.end.scene_index,
             &self.rendered_frame.scene,
         );
+    }
+
+    fn capture_paint_list(&mut self, range: Range<PaintIndex>) -> PaintList {
+        let scene_ops = self.next_frame.scene.paint_operations
+            [range.start.scene_index..range.end.scene_index]
+            .iter()
+            .cloned()
+            .collect();
+        let cursor_styles = self.next_frame.cursor_styles
+            [range.start.cursor_styles_index..range.end.cursor_styles_index]
+            .iter()
+            .cloned()
+            .collect();
+        let mouse_listeners = self.next_frame.mouse_listeners
+            [range.start.mouse_listeners_index..range.end.mouse_listeners_index]
+            .iter()
+            .cloned()
+            .collect();
+        let input_handlers = self.next_frame.input_handlers
+            [range.start.input_handlers_index..range.end.input_handlers_index]
+            .iter()
+            .cloned()
+            .collect();
+        let accessed_element_states = self.next_frame.accessed_element_states
+            [range.start.accessed_element_states_index..range.end.accessed_element_states_index]
+            .iter()
+            .cloned()
+            .collect();
+        let tab_stops = self.next_frame.tab_stops.insertion_history
+            [range.start.tab_handle_index..range.end.tab_handle_index]
+            .iter()
+            .cloned()
+            .collect();
+
+        PaintList {
+            scene_ops,
+            cursor_styles,
+            mouse_listeners,
+            input_handlers,
+            accessed_element_states,
+            tab_stops,
+            line_layout_range: range.start.line_layout_index..range.end.line_layout_index,
+        }
+    }
+
+    /// Store paint output in the cache, optionally overwriting an existing entry.
+    pub(crate) fn store_paint_list(
+        &mut self,
+        range: Range<PaintIndex>,
+        existing: Option<PaintListId>,
+    ) -> PaintListId {
+        let list = self.capture_paint_list(range);
+        match existing {
+            Some(id) => {
+                self.paint_lists.replace(id, list);
+                id
+            }
+            None => self.paint_lists.store(list),
+        }
+    }
+
+    /// Replay a cached paint list into the current frame.
+    pub(crate) fn replay_paint_list(&mut self, list_id: PaintListId) {
+        let Some(list) = self.paint_lists.get_mut(list_id) else {
+            return;
+        };
+
+        self.next_frame
+            .cursor_styles
+            .extend(list.cursor_styles.iter().cloned());
+        self.next_frame
+            .mouse_listeners
+            .extend(list.mouse_listeners.iter().cloned());
+        self.next_frame
+            .input_handlers
+            .extend(list.input_handlers.iter().cloned());
+        self.next_frame
+            .accessed_element_states
+            .extend(list.accessed_element_states.iter().cloned());
+        self.next_frame.tab_stops.replay(&list.tab_stops);
+
+        let line_layout_start = self.text_system.layout_index();
+        self.text_system.reuse_layouts(list.line_layout_range.clone());
+        let line_layout_end = self.text_system.layout_index();
+        list.line_layout_range = line_layout_start..line_layout_end;
+
+        self.next_frame.scene.replay_ops(&list.scene_ops);
     }
 
     /// Push a text style onto the stack, and call a function with that style active.
@@ -3176,6 +3560,7 @@ impl Window {
             absolute_offset,
             prepaint_range: PrepaintStateIndex::default()..PrepaintStateIndex::default(),
             paint_range: PaintIndex::default()..PaintIndex::default(),
+            cached_prepaint_states: SmallVec::new(),
         });
     }
 
@@ -4151,13 +4536,13 @@ impl Window {
     ) {
         self.invalidator.debug_assert_paint();
 
-        self.next_frame.mouse_listeners.push(Some(Box::new(
+        self.next_frame.mouse_listeners.push(Some(Rc::new(RefCell::new(
             move |event: &dyn Any, phase: DispatchPhase, window: &mut Window, cx: &mut App| {
                 if let Some(event) = event.downcast_ref() {
                     listener(event, phase, window, cx)
                 }
             },
-        )));
+        ))));
     }
 
     /// Register a key event listener on this node for the next frame. The type of event
@@ -4436,8 +4821,8 @@ impl Window {
         // Capture phase, events bubble from back to front. Handlers for this phase are used for
         // special purposes, such as detecting events outside of a given Bounds.
         for listener in &mut mouse_listeners {
-            let listener = listener.as_mut().unwrap();
-            listener(event, DispatchPhase::Capture, self, cx);
+            let listener = listener.as_ref().unwrap();
+            (listener.borrow_mut())(event, DispatchPhase::Capture, self, cx);
             if !cx.propagate_event {
                 break;
             }
@@ -4446,8 +4831,8 @@ impl Window {
         // Bubble phase, where most normal handlers do their work.
         if cx.propagate_event {
             for listener in mouse_listeners.iter_mut().rev() {
-                let listener = listener.as_mut().unwrap();
-                listener(event, DispatchPhase::Bubble, self, cx);
+                let listener = listener.as_ref().unwrap();
+                (listener.borrow_mut())(event, DispatchPhase::Bubble, self, cx);
                 if !cx.propagate_event {
                     break;
                 }

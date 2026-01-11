@@ -1,14 +1,19 @@
 use crate::{
-    AnyDescriptor, Bounds, EntityId, Hitbox, LayoutId, PaintIndex, Pixels, PrepaintStateIndex,
-    SharedString, StyleRefinement, TaffyLayoutEngine,
+    AnyDescriptor, Bounds, EntityId, Hitbox, LayoutId, Pixels, SharedString, StyleRefinement,
+    TaffyLayoutEngine,
 };
 use collections::FxHashMap;
 use slotmap::{new_key_type, SlotMap};
-use std::ops::Range;
 
 new_key_type! {
     /// A unique identifier for a fiber in the fiber tree
     pub struct FiberId;
+
+    /// A unique identifier for a cached paint list
+    pub struct PaintListId;
+
+    /// A unique identifier for cached prepaint state
+    pub struct PrepaintStateId;
 }
 
 /// Dirty flags for tracking what needs to be recomputed
@@ -98,11 +103,11 @@ pub struct Fiber {
     /// Cached layout bounds from the last frame
     pub bounds: Option<Bounds<Pixels>>,
 
-    /// Range of prepaint operations from the last frame
-    pub(crate) prepaint_range: Option<Range<PrepaintStateIndex>>,
+    /// Cached prepaint state for this fiber, if any.
+    pub(crate) prepaint_state: Option<PrepaintStateId>,
 
-    /// Range of paint operations from the last frame
-    pub(crate) paint_range: Option<Range<PaintIndex>>,
+    /// Cached paint list for this fiber, if any.
+    pub(crate) paint_list: Option<PaintListId>,
 
     /// Parent fiber, if any
     pub parent: Option<FiberId>,
@@ -128,8 +133,8 @@ impl Fiber {
             cached_hitbox: None,
             layout_id: None,
             bounds: None,
-            prepaint_range: None,
-            paint_range: None,
+            prepaint_state: None,
+            paint_list: None,
             parent: None,
             first_child: None,
             next_sibling: None,
@@ -257,6 +262,21 @@ impl FiberTree {
                 current = parent.parent;
             } else {
                 break;
+            }
+        }
+    }
+
+    /// Propagate BOUNDS_CHANGED flag down to descendants.
+    pub fn propagate_bounds_changed(&mut self, fiber_id: FiberId) {
+        let mut stack: Vec<FiberId> = self.children(fiber_id).collect();
+        while let Some(current_id) = stack.pop() {
+            if let Some(fiber) = self.fibers.get_mut(current_id) {
+                fiber.dirty.insert(DirtyFlags::BOUNDS_CHANGED);
+                let mut child = fiber.first_child;
+                while let Some(child_id) = child {
+                    stack.push(child_id);
+                    child = self.fibers.get(child_id).and_then(|f| f.next_sibling);
+                }
             }
         }
     }

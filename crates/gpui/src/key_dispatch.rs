@@ -68,6 +68,18 @@ use std::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct DispatchNodeId(usize);
 
+impl DispatchNodeId {
+    /// Construct a dispatch node id from a raw index.
+    pub(crate) fn from_index(index: usize) -> Self {
+        DispatchNodeId(index)
+    }
+
+    /// Return the raw index backing this node id.
+    pub(crate) fn index(self) -> usize {
+        self.0
+    }
+}
+
 pub(crate) struct DispatchTree {
     node_stack: Vec<DispatchNodeId>,
     pub(crate) context_stack: Vec<KeyContext>,
@@ -79,7 +91,7 @@ pub(crate) struct DispatchTree {
     action_registry: Rc<ActionRegistry>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct DispatchNode {
     pub key_listeners: Vec<KeyListener>,
     pub action_listeners: Vec<DispatchActionListener>,
@@ -88,6 +100,12 @@ pub(crate) struct DispatchNode {
     pub focus_id: Option<FocusId>,
     view_id: Option<EntityId>,
     parent: Option<DispatchNodeId>,
+}
+
+/// Snapshot of a dispatch subtree for cached replay.
+#[derive(Clone, Default)]
+pub(crate) struct DispatchTreeSnapshot {
+    nodes: Vec<DispatchNode>,
 }
 
 pub(crate) struct ReusedSubtree {
@@ -161,6 +179,38 @@ impl DispatchTree {
 
     pub fn len(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// Capture a snapshot of dispatch nodes in the given range.
+    pub(crate) fn snapshot_range(&self, range: Range<usize>) -> DispatchTreeSnapshot {
+        let mut nodes = Vec::with_capacity(range.end.saturating_sub(range.start));
+        for node in self.nodes[range.clone()].iter() {
+            nodes.push(node.clone());
+        }
+
+        for node in &mut nodes {
+            if let Some(parent) = node.parent {
+                let parent_index = parent.0;
+                if range.contains(&parent_index) {
+                    node.parent = Some(DispatchNodeId(parent_index - range.start));
+                } else {
+                    node.parent = None;
+                }
+            }
+        }
+
+        DispatchTreeSnapshot { nodes }
+    }
+
+    /// Replay a cached snapshot into this dispatch tree.
+    pub(crate) fn reuse_snapshot(
+        &mut self,
+        snapshot: &DispatchTreeSnapshot,
+        focus: Option<FocusId>,
+    ) -> ReusedSubtree {
+        let mut source = DispatchTree::new(self.keymap.clone(), self.action_registry.clone());
+        source.nodes = snapshot.nodes.clone();
+        self.reuse_subtree(0..source.nodes.len(), &mut source, focus)
     }
 
     pub fn push_node(&mut self) -> DispatchNodeId {

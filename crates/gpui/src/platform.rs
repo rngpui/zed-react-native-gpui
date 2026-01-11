@@ -63,6 +63,7 @@ use std::ops;
 use std::time::{Duration, Instant};
 use std::{
     fmt::{self, Debug},
+    cell::RefCell,
     ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
@@ -967,9 +968,10 @@ impl From<TileId> for etagere::AllocId {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct PlatformInputHandler {
     cx: AsyncWindowContext,
-    handler: Box<dyn InputHandler>,
+    handler: Rc<RefCell<Box<dyn InputHandler>>>,
 }
 
 #[cfg_attr(
@@ -981,13 +983,17 @@ pub(crate) struct PlatformInputHandler {
 )]
 impl PlatformInputHandler {
     pub fn new(cx: AsyncWindowContext, handler: Box<dyn InputHandler>) -> Self {
-        Self { cx, handler }
+        Self {
+            cx,
+            handler: Rc::new(RefCell::new(handler)),
+        }
     }
 
     fn selected_text_range(&mut self, ignore_disabled_input: bool) -> Option<UTF16Selection> {
         self.cx
             .update(|window, cx| {
                 self.handler
+                    .borrow_mut()
                     .selected_text_range(ignore_disabled_input, window, cx)
             })
             .ok()
@@ -997,7 +1003,7 @@ impl PlatformInputHandler {
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn marked_text_range(&mut self) -> Option<Range<usize>> {
         self.cx
-            .update(|window, cx| self.handler.marked_text_range(window, cx))
+            .update(|window, cx| self.handler.borrow_mut().marked_text_range(window, cx))
             .ok()
             .flatten()
     }
@@ -1014,6 +1020,7 @@ impl PlatformInputHandler {
         self.cx
             .update(|window, cx| {
                 self.handler
+                    .borrow_mut()
                     .text_for_range(range_utf16, adjusted, window, cx)
             })
             .ok()
@@ -1024,6 +1031,7 @@ impl PlatformInputHandler {
         self.cx
             .update(|window, cx| {
                 self.handler
+                    .borrow_mut()
                     .replace_text_in_range(replacement_range, text, window, cx);
             })
             .ok();
@@ -1037,7 +1045,7 @@ impl PlatformInputHandler {
     ) {
         self.cx
             .update(|window, cx| {
-                self.handler.replace_and_mark_text_in_range(
+                self.handler.borrow_mut().replace_and_mark_text_in_range(
                     range_utf16,
                     new_text,
                     new_selected_range,
@@ -1051,29 +1059,38 @@ impl PlatformInputHandler {
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn unmark_text(&mut self) {
         self.cx
-            .update(|window, cx| self.handler.unmark_text(window, cx))
+            .update(|window, cx| self.handler.borrow_mut().unmark_text(window, cx))
             .ok();
     }
 
     fn bounds_for_range(&mut self, range_utf16: Range<usize>) -> Option<Bounds<Pixels>> {
         self.cx
-            .update(|window, cx| self.handler.bounds_for_range(range_utf16, window, cx))
+            .update(|window, cx| {
+                self.handler
+                    .borrow_mut()
+                    .bounds_for_range(range_utf16, window, cx)
+            })
             .ok()
             .flatten()
     }
 
     #[allow(dead_code)]
     fn apple_press_and_hold_enabled(&mut self) -> bool {
-        self.handler.apple_press_and_hold_enabled()
+        self.handler.borrow_mut().apple_press_and_hold_enabled()
     }
 
     pub(crate) fn dispatch_input(&mut self, input: &str, window: &mut Window, cx: &mut App) {
-        self.handler.replace_text_in_range(None, input, window, cx);
+        self.handler
+            .borrow_mut()
+            .replace_text_in_range(None, input, window, cx);
     }
 
     pub fn selected_bounds(&mut self, window: &mut Window, cx: &mut App) -> Option<Bounds<Pixels>> {
-        let selection = self.handler.selected_text_range(true, window, cx)?;
-        self.handler.bounds_for_range(
+        let selection = self
+            .handler
+            .borrow_mut()
+            .selected_text_range(true, window, cx)?;
+        self.handler.borrow_mut().bounds_for_range(
             if selection.reversed {
                 selection.range.start..selection.range.start
             } else {
@@ -1087,14 +1104,18 @@ impl PlatformInputHandler {
     #[allow(unused)]
     pub fn character_index_for_point(&mut self, point: Point<Pixels>) -> Option<usize> {
         self.cx
-            .update(|window, cx| self.handler.character_index_for_point(point, window, cx))
+            .update(|window, cx| {
+                self.handler
+                    .borrow_mut()
+                    .character_index_for_point(point, window, cx)
+            })
             .ok()
             .flatten()
     }
 
     #[allow(dead_code)]
     pub(crate) fn accepts_text_input(&mut self, window: &mut Window, cx: &mut App) -> bool {
-        self.handler.accepts_text_input(window, cx)
+        self.handler.borrow_mut().accepts_text_input(window, cx)
     }
 }
 

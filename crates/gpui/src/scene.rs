@@ -213,6 +213,16 @@ impl Scene {
         }
     }
 
+    pub fn replay_ops(&mut self, operations: &[PaintOperation]) {
+        for operation in operations {
+            match operation {
+                PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
+                PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
+                PaintOperation::EndLayer => self.pop_layer(),
+            }
+        }
+    }
+
     fn sort_with_aux_by_key<T, U, K: Ord>(
         items: &mut Vec<T>,
         aux: &mut Vec<U>,
@@ -339,6 +349,7 @@ pub(crate) enum PrimitiveKind {
     Surface,
 }
 
+#[derive(Clone)]
 pub(crate) enum PaintOperation {
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
