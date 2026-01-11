@@ -2766,7 +2766,6 @@ impl Interactivity {
                     scroll_offset.y += delta_y;
                     scroll_offset.x += delta_x;
                     if *scroll_offset != old_scroll_offset {
-                        eprintln!("[SCROLL] scroll_offset changed: {:?} -> {:?}, notifying view {:?}", old_scroll_offset, *scroll_offset, current_view);
                         cx.notify(current_view);
                     }
                 }

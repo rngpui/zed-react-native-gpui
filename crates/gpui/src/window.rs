@@ -130,7 +130,6 @@ impl WindowInvalidator {
         let mut inner = self.inner.borrow_mut();
         inner.dirty_views.insert(entity);
         inner.dirty = true;
-        eprintln!("[INVALIDATE] entity {:?}, phase {:?}, dirty set to true", entity, inner.draw_phase);
         if inner.draw_phase == DrawPhase::None {
             cx.push_effect(Effect::Notify { emitter: entity });
             true
@@ -1273,9 +1272,7 @@ impl Window {
                     || needs_present.get()
                     || (active.get() && input_rate_tracker.borrow_mut().is_high_rate());
 
-                let is_dirty = invalidator.is_dirty();
-                if is_dirty || request_frame_options.force_render {
-                    eprintln!("[FRAME] Drawing frame: dirty={}, force_render={}", is_dirty, request_frame_options.force_render);
+                if invalidator.is_dirty() || request_frame_options.force_render {
                     measure("frame duration", || {
                         handle
                             .update(&mut cx, |_, window, cx| {
