@@ -426,13 +426,11 @@ impl Layer {
     /// Returns a Vec of TileSprite that should be inserted into the Scene.
     pub(crate) fn emit_tile_sprites(&self) -> Vec<TileSprite> {
         let Some(ref element_id) = self.element_id else {
-            eprintln!("[EMIT_TILES] layer {:?} has no element_id, returning empty", self.id);
             return Vec::new();
         };
 
         // Skip if this is the root layer or not a scroll container
         if self.reason != LayerReason::ScrollContainer {
-            eprintln!("[EMIT_TILES] layer {:?} reason={:?} (not ScrollContainer), returning empty", self.id, self.reason);
             return Vec::new();
         }
 
@@ -467,11 +465,6 @@ impl Layer {
             x: ((content_top_left_x + viewport.size.width.0) / tile_size_px).ceil() as i32 - 1,
             y: ((content_top_left_y + viewport.size.height.0) / tile_size_px).ceil() as i32 - 1,
         };
-
-        eprintln!(
-            "[EMIT_TILES] layer {:?} scroll_offset={:?} viewport_origin={:?} viewport_size={:?} content_top_left=({:.1},{:.1}) tile_range=({},{})..({},{})",
-            self.id, scroll_offset, viewport.origin, viewport.size, content_top_left_x, content_top_left_y, min_tile.x, min_tile.y, max_tile.x, max_tile.y
-        );
 
         let mut sprites = Vec::new();
         for tile_y in min_tile.y..=max_tile.y {
@@ -870,12 +863,7 @@ impl LayerTree {
 
     /// Find a layer by its element ID.
     pub fn find_by_element_id(&self, element_id: &GlobalElementId) -> Option<LayerId> {
-        for (id, layer) in &self.layers {
-            if layer.element_id.as_ref() == Some(element_id) {
-                return Some(*id);
-            }
-        }
-        None
+        self.element_to_layer.get(element_id).copied()
     }
 }
 

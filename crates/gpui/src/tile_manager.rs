@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Resolution level for tiles (Chromium-style multi-resolution).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum TileResolution {
+pub(crate) enum TileResolution {
     /// Full resolution (1:1 with content).
     High,
     /// Quarter resolution (1/4 scale) for fast fallback.
@@ -48,7 +48,7 @@ impl Default for TileResolution {
 
 /// State of a managed tile.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TileState {
+pub(crate) enum TileState {
     /// No texture exists for this tile.
     Missing,
     /// Tile content is stale and needs re-rasterization.
@@ -71,7 +71,7 @@ impl Default for TileState {
 /// Represents the best available content for rendering a tile.
 /// Follows Chromium's three-tier fallback: high-res → low-res → stale → checkerboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TileFallback {
+pub(crate) enum TileFallback {
     /// High-resolution texture is available (preferred).
     HighRes(TextureId),
     /// Low-resolution texture is available (scaled up).
@@ -109,7 +109,7 @@ impl TileFallback {
 /// Priority determines rasterization order and eviction order.
 /// Lower values = higher priority (will be rasterized first, evicted last).
 #[derive(Clone, Copy, Debug, Default)]
-pub struct TilePriority {
+pub(crate) struct TilePriority {
     /// Distance from tile to viewport edge in pixels.
     /// 0.0 = visible, positive = offscreen.
     pub distance_to_visible: f32,
@@ -187,7 +187,7 @@ impl Ord for TilePriority {
 /// - Its current state (missing, dirty, pending, ready)
 /// - Priority for rasterization scheduling
 /// - Multiple texture versions for fallback
-pub struct ManagedTile {
+pub(crate) struct ManagedTile {
     /// Unique key identifying this tile.
     pub key: TileKey,
 
@@ -297,7 +297,7 @@ impl ManagedTile {
 /// by the platform-specific renderer. This allows TileManager to be
 /// platform-agnostic while still tracking texture ownership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TextureId(pub u64);
+pub(crate) struct TextureId(pub u64);
 
 impl TextureId {
     /// Generate a new unique texture ID.
@@ -317,7 +317,7 @@ impl Default for TextureId {
 ///
 /// Tracks memory usage and provides eviction decisions.
 #[derive(Debug)]
-pub struct MemoryBudget {
+pub(crate) struct MemoryBudget {
     /// Total memory limit in bytes.
     pub total_bytes: usize,
 
@@ -390,7 +390,7 @@ impl Default for MemoryBudget {
 
 /// Scroll velocity for time-to-visible priority calculation.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct ScrollVelocity {
+pub(crate) struct ScrollVelocity {
     /// Pixels per second in X direction.
     pub x: f32,
     /// Pixels per second in Y direction.
@@ -416,7 +416,7 @@ impl ScrollVelocity {
 /// - Calculates priorities based on viewport and scroll velocity
 /// - Manages memory budget with priority-based eviction
 /// - Coordinates with TaskGraph for dependency management
-pub struct TileManager {
+pub(crate) struct TileManager {
     /// All tiles indexed by key.
     tiles: FxHashMap<TileKey, ManagedTile>,
 
@@ -793,7 +793,7 @@ impl Default for TileManager {
 
 /// Statistics about TileManager state.
 #[derive(Clone, Debug, Default)]
-pub struct TileManagerStats {
+pub(crate) struct TileManagerStats {
     /// Total number of managed tiles.
     pub total_tiles: usize,
     /// Number of tiles ready to render.

@@ -26,15 +26,15 @@ use std::sync::Arc;
 
 /// Unique identifier for a task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TaskId(pub u64);
+pub(crate) struct TaskId(pub u64);
 
 /// Unique identifier for an image to be decoded.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct RasterImageId(pub u64);
+pub(crate) struct RasterImageId(pub u64);
 
 /// A task in the dependency graph.
 #[derive(Clone)]
-pub enum RasterTask {
+pub(crate) enum RasterTask {
     /// Decode an image from encoded bytes.
     ImageDecode {
         /// The ID of the image to decode.
@@ -53,6 +53,8 @@ pub enum RasterTask {
         tile_bounds: Bounds<ScaledPixels>,
         /// The display scale factor.
         scale_factor: f32,
+        /// The content generation this rasterization is for.
+        content_generation: u64,
     },
 }
 
@@ -117,7 +119,7 @@ impl Ord for PrioritizedTask {
 ///
 /// Manages task dependencies and provides tasks in dependency-respecting order.
 /// Tasks are only made available when all their dependencies are complete.
-pub struct TaskGraph {
+pub(crate) struct TaskGraph {
     /// All tasks indexed by ID.
     tasks: FxHashMap<TaskId, TaskNode>,
 
@@ -224,6 +226,7 @@ impl TaskGraph {
         display_list: Arc<DisplayList>,
         tile_bounds: Bounds<ScaledPixels>,
         scale_factor: f32,
+        content_generation: u64,
         image_dependencies: &[RasterImageId],
     ) -> TaskId {
         // Get task IDs for image dependencies
@@ -238,6 +241,7 @@ impl TaskGraph {
                 display_list,
                 tile_bounds,
                 scale_factor,
+                content_generation,
             },
             &dep_ids,
         )
@@ -335,7 +339,7 @@ impl Default for TaskGraph {
 
 /// Statistics about TaskGraph state.
 #[derive(Clone, Debug, Default)]
-pub struct TaskGraphStats {
+pub(crate) struct TaskGraphStats {
     /// Total number of tasks in the graph.
     pub total_tasks: usize,
     /// Number of completed tasks.
@@ -391,6 +395,7 @@ mod tests {
                 display_list: Arc::new(DisplayList::new(GlobalElementId::root())),
                 tile_bounds: Bounds::default(),
                 scale_factor: 1.0,
+                content_generation: 0,
             },
             &[decode_id],
         );
@@ -431,6 +436,7 @@ mod tests {
             display_list: Arc::new(DisplayList::new(GlobalElementId::root())),
             tile_bounds: Bounds::default(),
             scale_factor: 1.0,
+            content_generation: 0,
         });
 
         // Decode should come first (higher priority)

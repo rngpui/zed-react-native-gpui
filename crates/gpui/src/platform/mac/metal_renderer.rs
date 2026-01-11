@@ -315,6 +315,8 @@ pub(crate) struct MetalRenderer {
     raster_worker_pool: RasterWorkerPool,
     /// Next task ID for rasterization jobs.
     next_task_id: u64,
+    /// Fallback texture for missing tiles (gray checkerboard pattern).
+    fallback_tile_texture: metal::Texture,
 }
 
 #[repr(C)]
@@ -486,6 +488,41 @@ impl MetalRenderer {
         let core_video_texture_cache =
             CVMetalTextureCache::new(None, device.clone(), None).unwrap();
 
+        // Create fallback checkerboard texture for missing tiles (8x8 gray pattern)
+        let fallback_tile_texture = {
+            let texture_descriptor = metal::TextureDescriptor::new();
+            texture_descriptor.set_width(8);
+            texture_descriptor.set_height(8);
+            texture_descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+            texture_descriptor.set_usage(metal::MTLTextureUsage::ShaderRead);
+            let texture = device.new_texture(&texture_descriptor);
+
+            // Create checkerboard pattern: alternating light gray (0xCC) and dark gray (0x88)
+            let mut pixels = [0u8; 8 * 8 * 4];
+            for y in 0..8 {
+                for x in 0..8 {
+                    let idx = (y * 8 + x) * 4;
+                    let is_light = (x + y) % 2 == 0;
+                    let gray = if is_light { 0xCC } else { 0x88 };
+                    pixels[idx] = gray;     // B
+                    pixels[idx + 1] = gray; // G
+                    pixels[idx + 2] = gray; // R
+                    pixels[idx + 3] = 0xFF; // A
+                }
+            }
+
+            texture.replace_region(
+                metal::MTLRegion {
+                    origin: metal::MTLOrigin { x: 0, y: 0, z: 0 },
+                    size: metal::MTLSize { width: 8, height: 8, depth: 1 },
+                },
+                0, // mipmap level
+                pixels.as_ptr() as *const _,
+                8 * 4, // bytes per row
+            );
+            texture
+        };
+
         Self {
             pending_dirty_ranges: Vec::new(),
             incremental_draw: false,
@@ -519,6 +556,7 @@ impl MetalRenderer {
             tile_cache: TileCache::new(device),
             raster_worker_pool: RasterWorkerPool::new(),
             next_task_id: 1,
+            fallback_tile_texture,
         }
     }
 
@@ -2246,14 +2284,7 @@ impl MetalRenderer {
     fn rasterize_tiles_from_display_lists(&mut self, scene: &Scene) {
         let tile_sprites = &scene.tile_sprites;
 
-        eprintln!(
-            "[RASTER] tile_sprites={} display_lists={}",
-            tile_sprites.len(),
-            scene.display_lists.len()
-        );
-
         if tile_sprites.is_empty() {
-            eprintln!("[RASTER] No tile sprites, returning early");
             return;
         }
 
@@ -2263,27 +2294,23 @@ impl MetalRenderer {
 
         // Phase 4: Invalidate tiles based on dirty regions from display lists.
         // This marks tiles for re-rasterization even if their generation hasn't changed.
-        let mut containers_to_clear: Vec<crate::GlobalElementId> = Vec::new();
+        // The generation parameter ensures we don't re-process the same dirty regions
+        // on composite_only frames where the Scene hasn't been updated.
         for (container_id, display_list) in &scene.display_lists {
             let dirty_regions = display_list.dirty_regions();
             if !dirty_regions.is_empty() {
-                eprintln!(
-                    "[RASTER] Container {:?} has {} dirty regions",
-                    container_id,
-                    dirty_regions.len()
-                );
                 self.tile_cache.invalidate_tiles_for_dirty_regions(
                     container_id,
                     dirty_regions,
                     scale_factor,
+                    display_list.generation,
+                    display_list.dirty_generation,
                 );
-                containers_to_clear.push(container_id.clone());
             }
         }
 
         // Collect tiles that need rendering and submit to worker pool
         let mut submitted_count = 0;
-        let mut display_list_missing_count = 0;
 
         // Tile size in scaled pixels for bounds calculation
         let tile_size_scaled = super::tile_cache::TILE_SIZE as f32;
@@ -2294,11 +2321,6 @@ impl MetalRenderer {
 
             // Look up the display list for this container
             let Some(display_list) = scene.get_display_list(container_id) else {
-                display_list_missing_count += 1;
-                eprintln!(
-                    "[RASTER] MISSING display list for container {:?} tile ({},{})",
-                    container_id, coord.x, coord.y
-                );
                 continue;
             };
 
@@ -2319,12 +2341,14 @@ impl MetalRenderer {
                 content_generation,
             );
 
-            eprintln!(
-                "[RASTER] Tile ({},{}) container={:?} gen={} needs_render={} invalidated={}",
-                coord.x, coord.y, container_id, content_generation, needs_render, invalidated
-            );
-
             if needs_render || invalidated {
+                // If the worker pool is at capacity, defer rasterization of additional tiles
+                // until a future frame. The tile will remain invalidated/stale until it is
+                // successfully rasterized.
+                if self.raster_worker_pool.is_at_capacity() {
+                    continue;
+                }
+
                 // Calculate tile bounds in scaled pixels
                 let tile_bounds = Bounds {
                     origin: Point {
@@ -2348,6 +2372,7 @@ impl MetalRenderer {
                         display_list: Arc::clone(display_list),
                         tile_bounds,
                         scale_factor,
+                        content_generation,
                     },
                 };
 
@@ -2358,20 +2383,6 @@ impl MetalRenderer {
             }
         }
 
-        if display_list_missing_count > 0 {
-            eprintln!(
-                "[RASTER] WARNING: {} tiles had missing display lists!",
-                display_list_missing_count
-            );
-        }
-
-        // Phase 4: Clear invalidated tiles after collecting jobs
-        for container_id in containers_to_clear {
-            self.tile_cache.clear_invalidated_tiles(&container_id);
-        }
-
-        eprintln!("[RASTER] Submitted {} rasterization jobs to worker pool", submitted_count);
-
         if submitted_count == 0 {
             return;
         }
@@ -2380,33 +2391,47 @@ impl MetalRenderer {
         // (For now we block to maintain same behavior as rayon - Phase 3 will make this async)
         let mut results = Vec::new();
         while self.raster_worker_pool.in_flight_count() > 0 {
-            // Collect any completed results (this decrements in_flight_count)
-            results.extend(self.raster_worker_pool.collect_completed());
-            if self.raster_worker_pool.in_flight_count() > 0 {
-                std::thread::sleep(std::time::Duration::from_micros(100));
+            let mut batch = self.raster_worker_pool.collect_completed_blocking();
+            if batch.is_empty() {
+                break;
             }
+            results.append(&mut batch);
         }
-        // Collect any remaining results
         results.extend(self.raster_worker_pool.collect_completed());
-
-        eprintln!("[RASTER] Collected {} rasterization results", results.len());
 
         // P1: Batch all tiles into ONE command buffer.
         // This reduces command buffer creation overhead and improves GPU utilization.
         // Metal renders encoders in sequence, and queue ordering ensures
         // tiles are ready before the main pass uses them.
         let command_buffer = self.command_queue.new_command_buffer();
+
+        // Collect tiles to mark as rendered (to avoid borrow conflicts)
+        let mut tiles_to_mark = Vec::new();
+
         for result in results {
-            if let RasterResultType::TileRaster { tile_key, raster_result } = result.result_type {
+            if let RasterResultType::TileRaster {
+                tile_key,
+                raster_result,
+                content_generation,
+            } = result.result_type
+            {
                 self.encode_tile_to_command_buffer(
                     &tile_key.container_id,
                     tile_key.coord,
                     &raster_result,
                     command_buffer,
                 );
+                // Track this tile for generation update after encoding
+                tiles_to_mark.push((tile_key, content_generation));
             }
         }
         command_buffer.commit();
+
+        // Now mark all tiles as rendered with their correct generation
+        for (tile_key, generation) in tiles_to_mark {
+            self.tile_cache
+                .mark_tile_rendered(&tile_key.container_id, tile_key.coord, generation);
+        }
     }
 
     /// Render quads directly to an encoder (for RTT pre-pass).
@@ -3057,32 +3082,15 @@ impl MetalRenderer {
         command_encoder: &metal::RenderCommandEncoderRef,
         write_instances: bool,
     ) -> bool {
-        eprintln!("[DRAW_TILES] Drawing {} tile sprites", sprites.len());
-        let mut found_count = 0;
-        let mut missing_count = 0;
-
-        for (i, sprite) in sprites.iter().enumerate() {
-            // Log the positioning details for each tile
-            let final_y = sprite.stable_bounds.origin.y.0 + sprite.scroll_offset.y.0;
-            eprintln!(
-                "[DRAW_TILES] sprite[{}] tile={:?} stable_y={:.1} scroll_y={:.1} final_y={:.1} mask_y=[{:.1},{:.1}]",
-                i,
-                sprite.tile_key.coord,
-                sprite.stable_bounds.origin.y.0,
-                sprite.scroll_offset.y.0,
-                final_y,
-                sprite.content_mask.bounds.origin.y.0,
-                sprite.content_mask.bounds.origin.y.0 + sprite.content_mask.bounds.size.height.0,
-            );
+        for sprite in sprites {
             // Look up the tile texture from the tile cache and clone the reference
             // (metal::Texture implements Clone as an Arc-like reference)
             let texture = self
                 .tile_cache
-                .get_tile_texture(&sprite.tile_key)
+                .get_tile_texture_if_rendered(&sprite.tile_key)
                 .cloned();
 
             if let Some(texture) = texture {
-                found_count += 1;
                 // Tiles use full UV bounds (0,0 to 1,1) since they are exact size
                 let uv_bounds = Bounds {
                     origin: point(0.0, 0.0),
@@ -3105,18 +3113,33 @@ impl MetalRenderer {
                     return false;
                 }
             } else {
-                missing_count += 1;
-                eprintln!(
-                    "[DRAW_TILES] MISSING tile {:?} in cache!",
-                    sprite.tile_key
+                // Draw fallback checkerboard texture for missing tiles
+                // The small 8x8 texture will tile/repeat to fill the tile bounds
+                let uv_bounds = Bounds {
+                    origin: point(0.0, 0.0),
+                    size: size(1.0, 1.0),
+                };
+
+                // Clone texture reference to avoid borrow conflict
+                let fallback_texture = self.fallback_tile_texture.clone();
+                let ok = self.draw_cached_texture(
+                    sprite.stable_bounds,
+                    sprite.content_mask.clone(),
+                    [sprite.scroll_offset.x.0, sprite.scroll_offset.y.0],
+                    uv_bounds,
+                    &fallback_texture,
+                    viewport_size,
+                    command_encoder,
+                    instance_buffer,
+                    instance_offset,
+                    write_instances,
                 );
+                if !ok {
+                    return false;
+                }
             }
         }
 
-        eprintln!(
-            "[DRAW_TILES] Done: found={} missing={}",
-            found_count, missing_count
-        );
         true
     }
 }

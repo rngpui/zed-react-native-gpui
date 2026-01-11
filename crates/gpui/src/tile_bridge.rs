@@ -38,7 +38,7 @@ use std::sync::Arc;
 
 /// Mapping between platform-agnostic TextureId and platform-specific texture.
 /// This trait allows the bridge to work with any texture type.
-pub trait TextureRegistry {
+pub(crate) trait TextureRegistry {
     /// The platform-specific texture type.
     type Texture: Clone;
 
@@ -54,7 +54,7 @@ pub trait TextureRegistry {
 
 /// A simple in-memory texture registry for testing.
 #[derive(Default)]
-pub struct SimpleTextureRegistry<T> {
+pub(crate) struct SimpleTextureRegistry<T> {
     textures: FxHashMap<TextureId, T>,
 }
 
@@ -86,7 +86,7 @@ impl<T: Clone> SimpleTextureRegistry<T> {
 }
 
 /// Result of looking up a tile for rendering.
-pub struct TileLookupResult<T> {
+pub(crate) struct TileLookupResult<T> {
     /// The tile key.
     pub key: TileKey,
     /// The fallback tier being used.
@@ -98,7 +98,7 @@ pub struct TileLookupResult<T> {
 }
 
 /// Describes a tile that needs rasterization.
-pub struct TileRasterRequest {
+pub(crate) struct TileRasterRequest {
     /// The tile key.
     pub key: TileKey,
     /// The layer ID.
@@ -119,7 +119,7 @@ pub struct TileRasterRequest {
 /// 2. Get sorted list of tiles needing rasterization
 /// 3. Dispatch work to the worker pool
 /// 4. Collect results and update tile state
-pub struct TileBridge {
+pub(crate) struct TileBridge {
     /// The tile manager handling priorities and fallback.
     pub tile_manager: TileManager,
 
@@ -238,6 +238,7 @@ impl TileBridge {
             display_list,
             tile_bounds,
             scale_factor,
+            content_generation: self.content_generation,
         });
 
         Some(task_id)

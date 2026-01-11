@@ -1105,6 +1105,45 @@ pub trait InteractiveElement: Sized {
         self.interactivity().focus_visible_style = Some(Box::new(f(StyleRefinement::default())));
         self
     }
+
+    /// Bind the given callback to click events of this element.
+    /// The fluent API equivalent to [`Interactivity::on_click`].
+    ///
+    /// This method works on any element, with or without an explicit ID.
+    /// Click state is automatically tracked using a computed element ID based on
+    /// the element's position in the tree.
+    ///
+    /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
+    fn on_click(mut self, listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self
+    where
+        Self: Sized,
+    {
+        self.interactivity().on_click(listener);
+        self
+    }
+
+    /// On drag initiation, this callback will be used to create a new view to render the dragged value for a
+    /// drag and drop operation. This API should also be used as the equivalent of 'on drag start' with
+    /// the [`InteractiveElement::on_drag_move`] API.
+    /// The callback also has access to the offset of triggering click from the origin of parent element.
+    /// The fluent API equivalent to [`Interactivity::on_drag`].
+    ///
+    /// This method works on any element, with or without an explicit ID.
+    ///
+    /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
+    fn on_drag<T, W>(
+        mut self,
+        value: T,
+        constructor: impl Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<W> + 'static,
+    ) -> Self
+    where
+        Self: Sized,
+        T: 'static,
+        W: 'static + Render,
+    {
+        self.interactivity().on_drag(value, constructor);
+        self
+    }
 }
 
 /// A trait for elements that want to use the standard GPUI interactivity features
@@ -1178,39 +1217,6 @@ pub trait StatefulInteractiveElement: InteractiveElement {
             group: group_name.into(),
             style: Box::new(f(StyleRefinement::default())),
         });
-        self
-    }
-
-    /// Bind the given callback to click events of this element.
-    /// The fluent API equivalent to [`Interactivity::on_click`].
-    ///
-    /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
-    fn on_click(mut self, listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self
-    where
-        Self: Sized,
-    {
-        self.interactivity().on_click(listener);
-        self
-    }
-
-    /// On drag initiation, this callback will be used to create a new view to render the dragged value for a
-    /// drag and drop operation. This API should also be used as the equivalent of 'on drag start' with
-    /// the [`InteractiveElement::on_drag_move`] API.
-    /// The callback also has access to the offset of triggering click from the origin of parent element.
-    /// The fluent API equivalent to [`Interactivity::on_drag`].
-    ///
-    /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
-    fn on_drag<T, W>(
-        mut self,
-        value: T,
-        constructor: impl Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<W> + 'static,
-    ) -> Self
-    where
-        Self: Sized,
-        T: 'static,
-        W: 'static + Render,
-    {
-        self.interactivity().on_drag(value, constructor);
         self
     }
 
@@ -1357,9 +1363,28 @@ impl Div {
             // Note: Check overflow style directly since scroll_offset isn't set until interactivity.prepaint
             && self.interactivity.base_style.overflow.x != Some(Overflow::Scroll)
             && self.interactivity.base_style.overflow.y != Some(Overflow::Scroll)
-            // Can't cache if we have hover styles (state changes frequently)
+            // Can't cache if we have hover/active styles (state changes frequently)
             && self.interactivity.hover_style.is_none()
             && self.interactivity.group_hover_style.is_none()
+            && self.interactivity.active_style.is_none()
+            && self.interactivity.group_active_style.is_none()
+            // Can't cache if we have any event handlers. These often depend on external state
+            // (e.g., scroll handles) and must be re-evaluated each frame for correctness.
+            && self.interactivity.action_listeners.is_empty()
+            && self.interactivity.key_down_listeners.is_empty()
+            && self.interactivity.key_up_listeners.is_empty()
+            && self.interactivity.modifiers_changed_listeners.is_empty()
+            && self.interactivity.mouse_down_listeners.is_empty()
+            && self.interactivity.mouse_up_listeners.is_empty()
+            && self.interactivity.mouse_move_listeners.is_empty()
+            && self.interactivity.mouse_pressure_listeners.is_empty()
+            && self.interactivity.scroll_wheel_listeners.is_empty()
+            && self.interactivity.drop_listeners.is_empty()
+            && self.interactivity.can_drop_predicate.is_none()
+            && self.interactivity.click_listeners.is_empty()
+            && self.interactivity.drag_listener.is_none()
+            && self.interactivity.hover_listener.is_none()
+            && self.interactivity.tooltip_builder.is_none()
     }
 
     /// Determine if this Div's subtree should be rendered to a texture for caching.
@@ -1387,6 +1412,16 @@ impl Div {
 
         // Must already be cacheable at subtree level
         if !self.can_cache_subtree() {
+            return false;
+        }
+
+        // IMPORTANT: Exclude elements with children for now.
+        // Children might have interactive styles (hover, active) that would become
+        // stale in the cached texture. We can't easily check children's styles,
+        // so we conservatively disable RTT for containers.
+        // TODO: Add proper tracking of interactive descendants to enable RTT
+        // for containers with only non-interactive children.
+        if !self.children.is_empty() {
             return false;
         }
 
@@ -2552,8 +2587,24 @@ impl Interactivity {
                     None
                 };
 
-                if hitbox.is_some() {
-                    style = self.compute_style_internal(hitbox.as_ref(), element_state.as_mut(), window, cx);
+                if let Some(hitbox) = hitbox.as_ref() {
+                    style = self.compute_style_internal(Some(hitbox), element_state.as_mut(), window, cx);
+
+                    // For elements without explicit ID, check ComputedClickState for active styles
+                    if element_state.is_none() && self.active_style.is_some() {
+                        let computed_state = window.with_computed_element_state(
+                            hitbox.key.element_id,
+                            |state: Option<ComputedClickState>, _window| {
+                                let state = state.unwrap_or_default();
+                                (state.clone(), state)
+                            },
+                        );
+                        if computed_state.clicked_state.borrow().element {
+                            if let Some(active_style) = self.active_style.as_ref() {
+                                style.refine(active_style);
+                            }
+                        }
+                    }
                 }
 
                 window.with_text_style(style.text_style().cloned(), |window| {
@@ -2945,7 +2996,7 @@ impl Interactivity {
     fn paint_mouse_listeners(
         &mut self,
         hitbox: &Hitbox,
-        element_state: Option<&mut InteractiveElementState>,
+        mut element_state: Option<&mut InteractiveElementState>,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -3098,127 +3149,107 @@ impl Interactivity {
             });
         }
 
-        if let Some(element_state) = element_state {
-            if !click_listeners.is_empty() || drag_listener.is_some() {
-                let pending_mouse_down = element_state
-                    .pending_mouse_down
-                    .get_or_insert_with(Default::default)
-                    .clone();
+        // Handle click listeners - works with or without explicit element ID
+        if !click_listeners.is_empty() || drag_listener.is_some() {
+            // Get click state from either explicit element state or computed element state
+            let (pending_mouse_down, clicked_state): (
+                Rc<RefCell<Option<MouseDownEvent>>>,
+                Rc<RefCell<ElementClickedState>>,
+            ) = if let Some(element_state) = element_state.as_mut() {
+                (
+                    element_state
+                        .pending_mouse_down
+                        .get_or_insert_with(Default::default)
+                        .clone(),
+                    element_state
+                        .clicked_state
+                        .get_or_insert_with(Default::default)
+                        .clone(),
+                )
+            } else {
+                // Use computed element state for elements without explicit ID
+                let computed_state = window.with_computed_element_state(
+                    hitbox.key.element_id,
+                    |state: Option<ComputedClickState>, _window| {
+                        let state = state.unwrap_or_default();
+                        // Return the state for use and store it back
+                        (state.clone(), state)
+                    },
+                );
+                (computed_state.pending_mouse_down, computed_state.clicked_state)
+            };
 
-                let clicked_state = element_state
-                    .clicked_state
-                    .get_or_insert_with(Default::default)
-                    .clone();
-
-                window.on_mouse_event({
-                    let pending_mouse_down = pending_mouse_down.clone();
-                    let hitbox = hitbox.clone();
-                    move |event: &MouseDownEvent, phase, window, _cx| {
-                        if phase == DispatchPhase::Bubble
-                            && event.button == MouseButton::Left
-                            && hitbox.is_hovered(window)
-                        {
-                            *pending_mouse_down.borrow_mut() = Some(event.clone());
-                            window.refresh();
-                        }
+            window.on_mouse_event({
+                let pending_mouse_down = pending_mouse_down.clone();
+                let hitbox = hitbox.clone();
+                move |event: &MouseDownEvent, phase, window, _cx| {
+                    if phase == DispatchPhase::Bubble
+                        && event.button == MouseButton::Left
+                        && hitbox.is_hovered(window)
+                    {
+                        *pending_mouse_down.borrow_mut() = Some(event.clone());
+                        window.refresh();
                     }
-                });
-
-                window.on_mouse_event({
-                    let pending_mouse_down = pending_mouse_down.clone();
-                    let hitbox = hitbox.clone();
-                    move |event: &MouseMoveEvent, phase, window, cx| {
-                        if phase == DispatchPhase::Capture {
-                            return;
-                        }
-
-                        let mut pending_mouse_down = pending_mouse_down.borrow_mut();
-                        if let Some(mouse_down) = pending_mouse_down.clone()
-                            && !cx.has_active_drag()
-                            && (event.position - mouse_down.position).magnitude() > DRAG_THRESHOLD
-                            && let Some((drag_value, drag_listener)) = drag_listener.take()
-                        {
-                            *clicked_state.borrow_mut() = ElementClickedState::default();
-                            let cursor_offset = event.position - hitbox.origin;
-                            let drag =
-                                (drag_listener)(drag_value.as_ref(), cursor_offset, window, cx);
-                            cx.active_drag = Some(AnyDrag {
-                                view: drag,
-                                value: drag_value,
-                                cursor_offset,
-                                cursor_style: drag_cursor_style,
-                            });
-                            pending_mouse_down.take();
-                            window.refresh();
-                            cx.stop_propagation();
-                        }
-                    }
-                });
-
-                if is_focused {
-                    // Press enter, space to trigger click, when the element is focused.
-                    window.on_key_event({
-                        let click_listeners = click_listeners.clone();
-                        let hitbox = hitbox.clone();
-                        move |event: &KeyUpEvent, phase, window, cx| {
-                            if phase.bubble() && !window.default_prevented() {
-                                let stroke = &event.keystroke;
-                                let keyboard_button = if stroke.key.eq("enter") {
-                                    Some(KeyboardButton::Enter)
-                                } else if stroke.key.eq("space") {
-                                    Some(KeyboardButton::Space)
-                                } else {
-                                    None
-                                };
-
-                                if let Some(button) = keyboard_button
-                                    && !stroke.modifiers.modified()
-                                {
-                                    let click_event = ClickEvent::Keyboard(KeyboardClickEvent {
-                                        button,
-                                        bounds: hitbox.bounds,
-                                    });
-
-                                    for listener in &click_listeners {
-                                        listener(&click_event, window, cx);
-                                    }
-                                }
-                            }
-                        }
-                    });
                 }
+            });
 
-                window.on_mouse_event({
-                    let mut captured_mouse_down = None;
+            window.on_mouse_event({
+                let pending_mouse_down = pending_mouse_down.clone();
+                let hitbox = hitbox.clone();
+                move |event: &MouseMoveEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture {
+                        return;
+                    }
+
+                    let mut pending_mouse_down = pending_mouse_down.borrow_mut();
+                    if let Some(mouse_down) = pending_mouse_down.clone()
+                        && !cx.has_active_drag()
+                        && (event.position - mouse_down.position).magnitude() > DRAG_THRESHOLD
+                        && let Some((drag_value, drag_listener)) = drag_listener.take()
+                    {
+                        *clicked_state.borrow_mut() = ElementClickedState::default();
+                        let cursor_offset = event.position - hitbox.origin;
+                        let drag =
+                            (drag_listener)(drag_value.as_ref(), cursor_offset, window, cx);
+                        cx.active_drag = Some(AnyDrag {
+                            view: drag,
+                            value: drag_value,
+                            cursor_offset,
+                            cursor_style: drag_cursor_style,
+                        });
+                        pending_mouse_down.take();
+                        window.refresh();
+                        cx.stop_propagation();
+                    }
+                }
+            });
+
+            if is_focused {
+                // Press enter, space to trigger click, when the element is focused.
+                window.on_key_event({
+                    let click_listeners = click_listeners.clone();
                     let hitbox = hitbox.clone();
-                    move |event: &MouseUpEvent, phase, window, cx| match phase {
-                        // Clear the pending mouse down during the capture phase,
-                        // so that it happens even if another event handler stops
-                        // propagation.
-                        DispatchPhase::Capture => {
-                            let mut pending_mouse_down = pending_mouse_down.borrow_mut();
-                            if pending_mouse_down.is_some() && hitbox.is_hovered(window) {
-                                captured_mouse_down = pending_mouse_down.take();
-                                window.refresh();
-                            } else if pending_mouse_down.is_some() {
-                                // Clear the pending mouse down event (without firing click handlers)
-                                // if the hitbox is not being hovered.
-                                // This avoids dragging elements that changed their position
-                                // immediately after being clicked.
-                                // See https://github.com/zed-industries/zed/issues/24600 for more details
-                                pending_mouse_down.take();
-                                window.refresh();
-                            }
-                        }
-                        // Fire click handlers during the bubble phase.
-                        DispatchPhase::Bubble => {
-                            if let Some(mouse_down) = captured_mouse_down.take() {
-                                let mouse_click = ClickEvent::Mouse(MouseClickEvent {
-                                    down: mouse_down,
-                                    up: event.clone(),
+                    move |event: &KeyUpEvent, phase, window, cx| {
+                        if phase.bubble() && !window.default_prevented() {
+                            let stroke = &event.keystroke;
+                            let keyboard_button = if stroke.key.eq("enter") {
+                                Some(KeyboardButton::Enter)
+                            } else if stroke.key.eq("space") {
+                                Some(KeyboardButton::Space)
+                            } else {
+                                None
+                            };
+
+                            if let Some(button) = keyboard_button
+                                && !stroke.modifiers.modified()
+                            {
+                                let click_event = ClickEvent::Keyboard(KeyboardClickEvent {
+                                    button,
+                                    bounds: hitbox.bounds,
                                 });
+
                                 for listener in &click_listeners {
-                                    listener(&mouse_click, window, cx);
+                                    listener(&click_event, window, cx);
                                 }
                             }
                         }
@@ -3226,6 +3257,45 @@ impl Interactivity {
                 });
             }
 
+            window.on_mouse_event({
+                let mut captured_mouse_down = None;
+                let hitbox = hitbox.clone();
+                move |event: &MouseUpEvent, phase, window, cx| match phase {
+                    // Clear the pending mouse down during the capture phase,
+                    // so that it happens even if another event handler stops
+                    // propagation.
+                    DispatchPhase::Capture => {
+                        let mut pending_mouse_down = pending_mouse_down.borrow_mut();
+                        if pending_mouse_down.is_some() && hitbox.is_hovered(window) {
+                            captured_mouse_down = pending_mouse_down.take();
+                            window.refresh();
+                        } else if pending_mouse_down.is_some() {
+                            // Clear the pending mouse down event (without firing click handlers)
+                            // if the hitbox is not being hovered.
+                            // This avoids dragging elements that changed their position
+                            // immediately after being clicked.
+                            // See https://github.com/zed-industries/zed/issues/24600 for more details
+                            pending_mouse_down.take();
+                            window.refresh();
+                        }
+                    }
+                    // Fire click handlers during the bubble phase.
+                    DispatchPhase::Bubble => {
+                        if let Some(mouse_down) = captured_mouse_down.take() {
+                            let mouse_click = ClickEvent::Mouse(MouseClickEvent {
+                                down: mouse_down,
+                                up: event.clone(),
+                            });
+                            for listener in &click_listeners {
+                                listener(&mouse_click, window, cx);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        if let Some(element_state) = element_state {
             if let Some(hover_listener) = self.hover_listener.take() {
                 let hitbox = hitbox.clone();
                 let was_hovered = element_state
@@ -3464,7 +3534,6 @@ impl Interactivity {
                         if let Some(ref gid) = layer_global_id {
                             // Update the layer's scroll_offset and content_origin
                             let layer_id = window.layer_tree().find_by_element_id(gid);
-                            eprintln!("[SCROLL] layer lookup gid={:?} -> layer_id={:?}", gid, layer_id);
                             if let Some(layer_id) = layer_id {
                                 let new_scroll_offset = *scroll_offset;
 
@@ -3479,12 +3548,10 @@ impl Interactivity {
                                         x: layer.viewport_origin.x + new_scroll_offset.x,
                                         y: layer.viewport_origin.y + new_scroll_offset.y,
                                     };
-                                    eprintln!("[SCROLL] Updated layer content_origin={:?}", layer.content_origin);
                                 }
                             }
                             window.request_composite_only();
                         } else {
-                            eprintln!("[SCROLL] No layer_global_id, calling notify");
                             cx.notify(current_view);
                         }
                     }
@@ -3643,6 +3710,14 @@ pub struct InteractiveElementState {
     pub(crate) pending_mouse_down: Option<Rc<RefCell<Option<MouseDownEvent>>>>,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
     pub(crate) active_tooltip: Option<Rc<RefCell<Option<ActiveTooltip>>>>,
+}
+
+/// State for click tracking when using ComputedElementId (no explicit ID).
+/// This is a simplified version of InteractiveElementState's click-related fields.
+#[derive(Clone, Default)]
+pub(crate) struct ComputedClickState {
+    pub pending_mouse_down: Rc<RefCell<Option<MouseDownEvent>>>,
+    pub clicked_state: Rc<RefCell<ElementClickedState>>,
 }
 
 /// Whether or not the element or a group that contains it is clicked by the mouse.

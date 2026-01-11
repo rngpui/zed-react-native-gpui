@@ -68,6 +68,11 @@ impl CompositorState {
         self.scroll_offsets.get(&layer).copied().unwrap_or_default()
     }
 
+    /// Check if a scroll offset exists for a layer.
+    pub fn has_scroll_offset(&self, layer: LayerId) -> bool {
+        self.scroll_offsets.contains_key(&layer)
+    }
+
     /// Update transform for a layer - NO main thread involvement.
     pub fn set_transform(&mut self, layer: LayerId, transform: TransformationMatrix) {
         let changed = self.transforms.get(&layer) != Some(&transform);

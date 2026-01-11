@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 /// Work item sent to worker threads.
-pub struct RasterWork {
+pub(crate) struct RasterWork {
     /// Task ID for tracking completion.
     pub task_id: TaskId,
 
@@ -38,7 +38,7 @@ pub struct RasterWork {
 }
 
 /// Types of raster work.
-pub enum RasterWorkType {
+pub(crate) enum RasterWorkType {
     /// Rasterize a tile from a display list.
     TileRaster {
         /// The tile's key identifying its position.
@@ -49,6 +49,8 @@ pub enum RasterWorkType {
         tile_bounds: Bounds<ScaledPixels>,
         /// The display scale factor.
         scale_factor: f32,
+        /// The content generation this rasterization is for.
+        content_generation: u64,
     },
 
     /// Decode an image (placeholder for future implementation).
@@ -61,7 +63,7 @@ pub enum RasterWorkType {
 }
 
 /// Result from a completed raster job.
-pub struct RasterResult {
+pub(crate) struct RasterResult {
     /// Task ID for matching with TaskGraph.
     pub task_id: TaskId,
 
@@ -70,13 +72,15 @@ pub struct RasterResult {
 }
 
 /// Types of raster results.
-pub enum RasterResultType {
+pub(crate) enum RasterResultType {
     /// Tile rasterization completed.
     TileRaster {
         /// The tile's key.
         tile_key: TileKey,
         /// The rasterization result.
         raster_result: TileRasterResult,
+        /// The content generation that was rasterized.
+        content_generation: u64,
     },
 
     /// Image decode completed (placeholder).
@@ -149,6 +153,7 @@ impl RasterWorker {
                 display_list,
                 tile_bounds,
                 scale_factor,
+                content_generation,
             } => {
                 // Convert ScaledPixels bounds to Pixels for rasterization
                 let pixel_bounds = Bounds {
@@ -168,6 +173,7 @@ impl RasterWorker {
                 RasterResultType::TileRaster {
                     tile_key,
                     raster_result,
+                    content_generation,
                 }
             }
             RasterWorkType::ImageDecode { image_id, .. } => {
@@ -185,7 +191,7 @@ impl RasterWorker {
 
 /// Configuration for the worker pool.
 #[derive(Clone, Debug)]
-pub struct RasterWorkerPoolConfig {
+pub(crate) struct RasterWorkerPoolConfig {
     /// Number of worker threads.
     pub num_workers: usize,
 
@@ -212,7 +218,7 @@ impl Default for RasterWorkerPoolConfig {
 ///
 /// Provides controlled parallelism for CPU-bound rasterization work
 /// with job tracking and non-blocking result collection.
-pub struct RasterWorkerPool {
+pub(crate) struct RasterWorkerPool {
     /// Worker threads.
     workers: Vec<RasterWorker>,
 
@@ -296,6 +302,7 @@ impl RasterWorkerPool {
                         display_list,
                         tile_bounds,
                         scale_factor,
+                        content_generation,
                     } => RasterWork {
                         task_id,
                         work_type: RasterWorkType::TileRaster {
@@ -303,6 +310,7 @@ impl RasterWorkerPool {
                             display_list,
                             tile_bounds,
                             scale_factor,
+                            content_generation,
                         },
                     },
                     RasterTask::ImageDecode {
@@ -347,6 +355,25 @@ impl RasterWorkerPool {
             }
         }
 
+        results
+    }
+
+    /// Collect completed results, blocking until at least one result is available.
+    ///
+    /// This avoids busy-waiting in callers that want to wait for work to finish.
+    pub fn collect_completed_blocking(&self) -> Vec<RasterResult> {
+        let mut results = Vec::new();
+
+        match self.result_rx.recv() {
+            Ok(result) => {
+                self.in_flight.fetch_sub(1, Ordering::Relaxed);
+                results.push(result);
+            }
+            Err(_) => return results,
+        }
+
+        // Drain any additional results that are already available.
+        results.extend(self.collect_completed());
         results
     }
 

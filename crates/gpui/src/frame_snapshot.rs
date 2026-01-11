@@ -34,7 +34,7 @@ const TILE_SIZE: u32 = 512;
 /// without requiring main-thread work. This is the "commit boundary" that
 /// separates content production from presentation.
 #[derive(Clone)]
-pub struct FrameSnapshot {
+pub(crate) struct FrameSnapshot {
     /// Layer tree with display lists (immutable after commit).
     pub layers: Arc<LayerTreeSnapshot>,
 
@@ -76,7 +76,7 @@ impl Default for FrameSnapshot {
 ///
 /// Contains all layer data needed for compositing without main-thread access.
 #[derive(Clone, Default)]
-pub struct LayerTreeSnapshot {
+pub(crate) struct LayerTreeSnapshot {
     /// All layers indexed by ID.
     pub layers: FxHashMap<LayerId, LayerSnapshot>,
 
@@ -118,7 +118,7 @@ impl LayerTreeSnapshot {
 ///
 /// Contains all data needed to composite this layer without main-thread access.
 #[derive(Clone)]
-pub struct LayerSnapshot {
+pub(crate) struct LayerSnapshot {
     /// Layer identifier.
     pub id: LayerId,
 

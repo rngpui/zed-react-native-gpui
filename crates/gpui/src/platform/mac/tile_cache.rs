@@ -60,6 +60,10 @@ pub struct ScrollContainerTiles {
     /// Tiles that need re-rasterization due to dirty regions.
     /// Set during invalidate_tiles_for_dirty_regions(), cleared after rasterization.
     invalidated_tiles: FxHashSet<TileCoord>,
+
+    /// Last `(display_list.generation, display_list.dirty_generation)` token we processed.
+    /// Used to avoid re-processing the same dirty regions on composite_only frames.
+    last_processed_dirty_token: Option<(u64, u64)>,
 }
 
 impl ScrollContainerTiles {
@@ -70,6 +74,7 @@ impl ScrollContainerTiles {
             tiles: FxHashMap::default(),
             lru_order: VecDeque::new(),
             invalidated_tiles: FxHashSet::default(),
+            last_processed_dirty_token: None,
         }
     }
 
@@ -164,7 +169,6 @@ impl TileCache {
         content_size: Size<Pixels>,
         content_changed: bool,
     ) -> u64 {
-        let is_new = !self.containers.contains_key(id);
         let container = self
             .containers
             .entry(id.clone())
@@ -175,11 +179,6 @@ impl TileCache {
             container.content_generation += 1;
             container.content_size = content_size;
         }
-
-        eprintln!(
-            "[TILE_CACHE] register_scroll_container id={:?} is_new={} gen={} content_changed={}",
-            id, is_new, container.content_generation, content_changed
-        );
 
         container.content_generation
     }
@@ -242,12 +241,7 @@ impl TileCache {
 
         // Check if container is registered
         if !self.containers.contains_key(container_id) {
-            eprintln!(
-                "[TILE_CACHE] ERROR: Container {:?} not registered! Available containers: {:?}",
-                container_id,
-                self.containers.keys().collect::<Vec<_>>()
-            );
-            panic!("Container must be registered before acquiring tiles");
+            panic!("Container {:?} must be registered before acquiring tiles", container_id);
         }
 
         // First pass: check if tile exists and update it
@@ -259,10 +253,9 @@ impl TileCache {
 
             if let Some(tile) = container.tiles.get_mut(&coord) {
                 tile.last_used_frame = current_frame;
-                let needs_render = tile.rendered_generation < content_generation;
-                if needs_render {
-                    tile.rendered_generation = content_generation;
-                }
+                // Don't set rendered_generation here - wait until rasterization completes
+                let needs_render =
+                    tile.rendered_generation == 0 || tile.rendered_generation < content_generation;
                 Some(needs_render)
             } else {
                 None
@@ -279,30 +272,13 @@ impl TileCache {
         if let Some(needs_render) = existing_result {
             if needs_render {
                 self.stats.renders += 1;
-                eprintln!(
-                    "[TILE_CACHE] acquire_tile ({},{}) existing tile, needs_render (gen mismatch)",
-                    coord.x, coord.y
-                );
             } else {
                 self.stats.hits += 1;
-                // Log cache hit with generation info
-                if let Some(container) = self.containers.get(container_id) {
-                    if let Some(tile) = container.tiles.get(&coord) {
-                        eprintln!(
-                            "[TILE_CACHE] acquire_tile ({},{}) CACHE HIT: tile.rendered_gen={} content_gen={}",
-                            coord.x, coord.y, tile.rendered_generation, content_generation
-                        );
-                    }
-                }
             }
             return needs_render;
         }
 
         // Need to allocate - do this outside the container borrow
-        eprintln!(
-            "[TILE_CACHE] acquire_tile ({},{}) allocating NEW tile texture",
-            coord.x, coord.y
-        );
         let texture = self.allocate_tile_texture();
         self.stats.renders += 1;
 
@@ -315,7 +291,8 @@ impl TileCache {
 
             let tile = CachedTile {
                 texture,
-                rendered_generation: content_generation,
+                // Start at 0 - will be updated by mark_tile_rendered() after actual rasterization
+                rendered_generation: 0,
                 last_used_frame: current_frame,
             };
 
@@ -336,6 +313,37 @@ impl TileCache {
             .tiles
             .get(&key.coord)
             .map(|tile| &tile.texture)
+    }
+
+    /// Look up a tile's texture by key, but only if it has been rendered at least once.
+    ///
+    /// Newly-allocated tiles start with `rendered_generation == 0`. These textures are
+    /// uninitialized GPU memory and must never be sampled for drawing.
+    pub fn get_tile_texture_if_rendered(&self, key: &TileKey) -> Option<&metal::Texture> {
+        let container = self.containers.get(&key.container_id)?;
+        let tile = container.tiles.get(&key.coord)?;
+        if tile.rendered_generation == 0 {
+            None
+        } else {
+            Some(&tile.texture)
+        }
+    }
+
+    /// Mark a tile as having been successfully rendered to the given generation.
+    /// Call this after rasterization completes and the texture has been updated.
+    pub fn mark_tile_rendered(
+        &mut self,
+        container_id: &GlobalElementId,
+        coord: TileCoord,
+        generation: u64,
+    ) {
+        if let Some(container) = self.containers.get_mut(container_id) {
+            if let Some(tile) = container.tiles.get_mut(&coord) {
+                tile.rendered_generation = generation;
+            }
+            // Once we've successfully rasterized the tile, it's no longer considered invalidated.
+            container.invalidated_tiles.remove(&coord);
+        }
     }
 
     /// Allocate a new tile texture (or reuse from pool).
@@ -372,6 +380,7 @@ impl TileCache {
                     self.free_textures.push(tile.texture);
                     // Memory stays same (moved from active to pool)
                 }
+                container.invalidated_tiles.remove(&oldest_coord);
             } else {
                 break;
             }
@@ -394,6 +403,7 @@ impl TileCache {
                 if let Some(tile) = container.tiles.remove(&coord) {
                     self.free_textures.push(tile.texture);
                 }
+                container.invalidated_tiles.remove(&coord);
                 // Also remove from LRU
                 container.lru_order.retain(|&c| c != coord);
             }
@@ -422,6 +432,8 @@ impl TileCache {
                 self.free_textures.push(tile.texture);
             }
             container.lru_order.clear();
+            container.invalidated_tiles.clear();
+            container.last_processed_dirty_token = None;
         }
     }
 
@@ -453,11 +465,15 @@ impl TileCache {
     /// cached and don't need re-rasterization.
     ///
     /// Call this with dirty regions from DisplayList before rendering.
+    /// The `display_list_generation` is used to avoid re-processing the same
+    /// dirty regions on composite_only frames.
     pub fn invalidate_tiles_for_dirty_regions(
         &mut self,
         container_id: &GlobalElementId,
         dirty_regions: &[Bounds<Pixels>],
         scale_factor: f32,
+        display_list_generation: u64,
+        dirty_generation: u64,
     ) {
         if dirty_regions.is_empty() {
             return;
@@ -466,6 +482,13 @@ impl TileCache {
         let Some(container) = self.containers.get_mut(container_id) else {
             return;
         };
+
+        // Skip if we've already processed this exact dirty-region set.
+        let token = (display_list_generation, dirty_generation);
+        if container.last_processed_dirty_token == Some(token) {
+            return;
+        }
+        container.last_processed_dirty_token = Some(token);
 
         // For each existing tile, check if it intersects any dirty region
         for &coord in container.tiles.keys() {
@@ -502,7 +525,7 @@ impl TileCache {
 
         // Check generation mismatch
         if let Some(tile) = container.tiles.get(&coord) {
-            tile.rendered_generation < content_generation
+            tile.rendered_generation == 0 || tile.rendered_generation < content_generation
         } else {
             true // No tile = needs render
         }

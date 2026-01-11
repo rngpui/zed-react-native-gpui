@@ -704,6 +704,15 @@ pub(crate) struct DisplayList {
     /// Dirty regions that need re-rasterization.
     /// Empty means entire display list is valid (or was just cleared).
     dirty_regions: Vec<Bounds<Pixels>>,
+    /// Monotonic counter for dirty-region updates.
+    ///
+    /// `generation` changes when the entire display list is cleared/rebuilt.
+    /// `dirty_generation` changes when *incremental* invalidation adds/removes dirty regions.
+    ///
+    /// Renderers use `(generation, dirty_generation)` to avoid re-processing the same
+    /// dirty regions on composite-only frames while still picking up new dirty regions
+    /// within the same `generation`.
+    pub dirty_generation: u64,
 
     // ========================================================================
     // Phase 20: Per-Element Item Tracking
@@ -733,6 +742,7 @@ impl DisplayList {
             items: Vec::new(),
             spatial_index: SpatialIndex::default(),
             dirty_regions: Vec::new(),
+            dirty_generation: 0,
             // Phase 20: Per-element tracking
             element_entries: FxHashMap::default(),
             element_paint_stack: Vec::new(),
@@ -749,6 +759,7 @@ impl DisplayList {
         self.spatial_index.clear();
         self.content_bounds = Bounds::default();
         self.dirty_regions.clear();
+        self.dirty_generation = 0;
         // Phase 20: Clear per-element tracking
         self.element_entries.clear();
         self.element_paint_stack.clear();
@@ -1029,6 +1040,7 @@ impl DisplayList {
 
         if !dominated {
             self.dirty_regions.push(bounds);
+            self.dirty_generation = self.dirty_generation.wrapping_add(1);
             self.stats.dirty_regions_added += 1;
         }
     }
@@ -1040,11 +1052,13 @@ impl DisplayList {
     pub fn invalidate_all(&mut self) {
         self.dirty_regions.clear();
         self.dirty_regions.push(self.content_bounds);
+        self.dirty_generation = self.dirty_generation.wrapping_add(1);
     }
 
     /// Clear all dirty regions (call after tiles have been re-rasterized).
     pub fn clear_dirty_regions(&mut self) {
         self.dirty_regions.clear();
+        self.dirty_generation = self.dirty_generation.wrapping_add(1);
     }
 
     /// Check if there are any dirty regions.

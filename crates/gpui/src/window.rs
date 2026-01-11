@@ -183,6 +183,9 @@ struct WindowInvalidatorInner {
     /// P2: Flag for compositor-only updates (scroll offset changed, no content change).
     /// When set, the frame callback skips full draw() and only updates tile sprites.
     pub composite_only: bool,
+    /// P2: Count of consecutive composite-only frames while dirty is pending.
+    /// When this exceeds MAX_COMPOSITE_ONLY_FRAMES, we force a full draw.
+    pub consecutive_composite_frames: u32,
     pub draw_phase: DrawPhase,
     pub dirty_views: FxHashSet<EntityId>,
 }
@@ -192,12 +195,18 @@ pub(crate) struct WindowInvalidator {
     inner: Rc<RefCell<WindowInvalidatorInner>>,
 }
 
+/// Maximum consecutive composite-only frames before forcing a full draw.
+/// At 120fps, 4 frames = ~33ms. This ensures content updates aren't starved
+/// during continuous scrolling.
+const MAX_COMPOSITE_ONLY_FRAMES: u32 = 4;
+
 impl WindowInvalidator {
     pub fn new() -> Self {
         WindowInvalidator {
             inner: Rc::new(RefCell::new(WindowInvalidatorInner {
                 dirty: true,
                 composite_only: false,
+                consecutive_composite_frames: 0,
                 draw_phase: DrawPhase::None,
                 dirty_views: FxHashSet::default(),
             })),
@@ -245,6 +254,19 @@ impl WindowInvalidator {
     /// P2: Clear the compositor-only flag (called after composite_only() completes).
     pub fn clear_composite_only(&self) {
         self.inner.borrow_mut().composite_only = false
+    }
+
+    /// P2: Increment the consecutive composite-only frame counter.
+    /// Returns true if we should force a full draw (counter exceeded threshold).
+    pub fn increment_composite_frames(&self) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        inner.consecutive_composite_frames += 1;
+        inner.consecutive_composite_frames >= MAX_COMPOSITE_ONLY_FRAMES
+    }
+
+    /// P2: Reset the consecutive composite-only frame counter (called after full draw).
+    pub fn reset_composite_frames(&self) {
+        self.inner.borrow_mut().consecutive_composite_frames = 0;
     }
 
     pub fn set_phase(&self, phase: DrawPhase) {
@@ -864,6 +886,10 @@ pub(crate) struct Frame {
     pub(crate) window_active: bool,
     pub(crate) element_states: FxHashMap<(GlobalElementId, TypeId), ElementStateBox>,
     accessed_element_states: Vec<(GlobalElementId, TypeId)>,
+    /// Element state storage keyed by ComputedElementId (auto-generated).
+    /// Used for interactive elements that don't have explicit IDs.
+    pub(crate) computed_element_states: FxHashMap<(crate::display_list::ComputedElementId, TypeId), ElementStateBox>,
+    accessed_computed_element_states: Vec<(crate::display_list::ComputedElementId, TypeId)>,
     /// Cache for Div subtree prepaint/paint results, keyed by GlobalElementId
     pub(crate) subtree_cache: FxHashMap<GlobalElementId, SubtreeCacheEntry>,
     pub(crate) mouse_listeners: Vec<Option<AnyMouseListener>>,
@@ -891,6 +917,7 @@ pub(crate) struct PrepaintStateIndex {
     deferred_draws_index: usize,
     dispatch_tree_index: usize,
     accessed_element_states_index: usize,
+    accessed_computed_element_states_index: usize,
     line_layout_index: LineLayoutIndex,
 }
 
@@ -901,6 +928,7 @@ pub(crate) struct PaintIndex {
     input_handlers_index: usize,
     cursor_styles_index: usize,
     accessed_element_states_index: usize,
+    accessed_computed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
 }
@@ -912,6 +940,8 @@ impl Frame {
             window_active: false,
             element_states: FxHashMap::default(),
             accessed_element_states: Vec::new(),
+            computed_element_states: FxHashMap::default(),
+            accessed_computed_element_states: Vec::new(),
             subtree_cache: FxHashMap::default(),
             mouse_listeners: Vec::new(),
             dispatch_tree,
@@ -938,6 +968,8 @@ impl Frame {
     pub(crate) fn clear(&mut self) {
         self.element_states.clear();
         self.accessed_element_states.clear();
+        self.computed_element_states.clear();
+        self.accessed_computed_element_states.clear();
         self.subtree_cache.clear();
         self.mouse_listeners.clear();
         self.dispatch_tree.clear();
@@ -1008,6 +1040,14 @@ impl Frame {
                 prev_frame.element_states.remove_entry(element_state_key)
             {
                 self.element_states.insert(element_state_key, element_state);
+            }
+        }
+
+        for element_state_key in &self.accessed_computed_element_states {
+            if let Some((element_state_key, element_state)) =
+                prev_frame.computed_element_states.remove_entry(element_state_key)
+            {
+                self.computed_element_states.insert(element_state_key, element_state);
             }
         }
 
@@ -1388,7 +1428,12 @@ impl Window {
                 // Composite-only updates require presenting, but do not require a full draw().
                 let composite_only = invalidator.needs_composite_only();
                 let is_dirty = invalidator.is_dirty();
-                eprintln!("[FRAME] dirty={} composite_only={} force_render={}", is_dirty, composite_only, request_frame_options.force_render);
+
+                // When both composite_only and dirty are set, we need to balance smooth
+                // scrolling with content updates. Allow some composite-only frames, but
+                // force a full draw periodically to avoid starving content updates.
+                let force_full_draw = is_dirty && composite_only
+                    && invalidator.increment_composite_frames();
 
                 // Keep presenting if input was recently arriving at a high rate (>= 60fps).
                 // Once high-rate input is detected, we sustain presentation for 1 second
@@ -1398,11 +1443,23 @@ impl Window {
                     || composite_only
                     || (active.get() && input_rate_tracker.borrow_mut().is_high_rate());
 
-                // Prioritize composite_only for smooth scroll, even when dirty is also set.
-                // When both flags are set, composite_only runs this frame and dirty
-                // is handled on a subsequent frame (kept pending).
-                if composite_only {
-                    eprintln!("[FRAME] Taking COMPOSITE_ONLY path");
+                // Frame arbitration priority:
+                // 1. If dirty is pending too long (force_full_draw), do full draw
+                // 2. If composite_only is set (and not forced), do compositor-only update
+                // 3. If dirty or force_render, do full draw
+                // 4. Otherwise, just present if needed
+                if force_full_draw || (is_dirty && !composite_only) || request_frame_options.force_render {
+                    invalidator.reset_composite_frames();
+                    measure("frame duration", || {
+                        handle
+                            .update(&mut cx, |_, window, cx| {
+                                let arena_clear_needed = window.draw(cx);
+                                window.present();
+                                arena_clear_needed.clear();
+                            })
+                            .log_err();
+                    })
+                } else if composite_only {
                     handle
                         .update(&mut cx, |_, window, _| {
                             // Use compositor_present if we have a snapshot, otherwise fall back to composite_only
@@ -1414,17 +1471,6 @@ impl Window {
                             }
                         })
                         .log_err();
-                } else if is_dirty || request_frame_options.force_render {
-                    eprintln!("[FRAME] Taking FULL DRAW path");
-                    measure("frame duration", || {
-                        handle
-                            .update(&mut cx, |_, window, cx| {
-                                let arena_clear_needed = window.draw(cx);
-                                window.present();
-                                arena_clear_needed.clear();
-                            })
-                            .log_err();
-                    })
                 } else if needs_present {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
@@ -1770,15 +1816,11 @@ impl Window {
     /// retained hitboxes, but skips the full draw() cycle.
     pub fn request_composite_only(&mut self) {
         let not_drawing = self.invalidator.not_drawing();
-        eprintln!("[REQUEST_COMPOSITE_ONLY] not_drawing={}", not_drawing);
         if not_drawing {
             self.invalidator.request_composite_only();
             // Ensure a frame is presented (triggers platform frame callback)
             self.needs_present.set(true);
             self.platform_window.request_frame();
-            eprintln!("[REQUEST_COMPOSITE_ONLY] set composite_only=true, called request_frame()");
-        } else {
-            eprintln!("[REQUEST_COMPOSITE_ONLY] SKIPPED - currently drawing");
         }
     }
 
@@ -2720,8 +2762,6 @@ impl Window {
 
         // Collect all tile sprites from scroll layers and update hitboxes
         let mut all_tile_sprites = Vec::new();
-        let layer_count = self.layer_tree.layers_for_composite().count();
-        eprintln!("[COMPOSITE_ONLY] layer_count={}", layer_count);
 
         // Collect layer data for hitbox updates (layer_id, content_origin, retained_hitboxes, hitbox_range)
         let mut layer_hitbox_updates: Vec<(Point<Pixels>, Vec<crate::layer::RetainedHitbox>, std::ops::Range<usize>)> = Vec::new();
@@ -2735,10 +2775,6 @@ impl Window {
                     }
                 }
             }
-            eprintln!(
-                "[COMPOSITE_ONLY] layer {:?} reason={:?} has_element_id={} emitted {} sprites retained_hitboxes={}",
-                layer.id, layer.reason, layer.element_id.is_some(), sprites.len(), layer.retained_hitboxes.len()
-            );
             all_tile_sprites.extend(sprites);
 
             // Collect hitbox update data for layers with retained hitboxes
@@ -2756,20 +2792,6 @@ impl Window {
         // Ensure the scene's TileSprites remain sorted by order for batch iteration.
         all_tile_sprites.sort_by_key(|sprite| sprite.order);
 
-        eprintln!(
-            "[COMPOSITE_ONLY] total sprites={} display_lists_in_scene={}",
-            all_tile_sprites.len(),
-            self.rendered_frame.scene.display_lists.len()
-        );
-        // Log the container IDs in display_lists
-        for (container_id, display_list) in &self.rendered_frame.scene.display_lists {
-            eprintln!(
-                "[COMPOSITE_ONLY] display_list container={:?} gen={} items={}",
-                container_id,
-                display_list.generation,
-                display_list.items.len()
-            );
-        }
         // Replace tile sprites in the rendered scene
         self.rendered_frame.scene.replace_tile_sprites(all_tile_sprites);
 
@@ -2777,10 +2799,6 @@ impl Window {
         // Transform retained hitboxes from layer-local coords to window coords using
         // the current content_origin (which includes the updated scroll offset).
         for (content_origin, retained_hitboxes, range) in layer_hitbox_updates {
-            eprintln!(
-                "[COMPOSITE_ONLY] Updating {} hitboxes in range {:?} with content_origin={:?}",
-                retained_hitboxes.len(), range, content_origin
-            );
             // Update each hitbox in the range with its transformed position
             for (i, retained) in retained_hitboxes.iter().enumerate() {
                 let hitbox_idx = range.start + i;
@@ -2824,15 +2842,16 @@ impl Window {
     /// Unlike direct layer manipulation, this doesn't trigger main-thread invalidation.
     pub fn set_compositor_scroll_offset(&mut self, layer_id: crate::LayerId, offset: Point<Pixels>) {
         self.compositor_state.set_scroll_offset(layer_id, offset);
-        // Sync the offset to the layer tree for hit testing
-        self.layer_tree.set_scroll_offset(layer_id, offset);
+        // Note: We no longer sync to layer_tree here. The compositor_present() path
+        // reads from compositor_state combined with the snapshot. Hit testing uses
+        // the scroll offset from the snapshot + compositor state delta.
     }
 
     /// Create a frame snapshot from the current rendered frame.
     ///
     /// This captures the immutable state needed for compositor-driven presentation.
     /// The snapshot can be composited at different scroll offsets without main-thread work.
-    pub fn create_frame_snapshot(&mut self) -> crate::frame_snapshot::FrameSnapshot {
+    pub(crate) fn create_frame_snapshot(&mut self) -> crate::frame_snapshot::FrameSnapshot {
         use crate::frame_snapshot::{FrameSnapshot, LayerTreeSnapshot, LayerSnapshot, HitboxSnapshot};
 
         self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
@@ -2892,13 +2911,13 @@ impl Window {
     }
 
     /// Store the current frame snapshot for compositor use.
-    pub fn commit_frame_snapshot(&mut self) {
+    pub(crate) fn commit_frame_snapshot(&mut self) {
         let snapshot = self.create_frame_snapshot();
         self.current_snapshot = Some(snapshot);
     }
 
     /// Get the current frame snapshot.
-    pub fn current_snapshot(&self) -> Option<&crate::frame_snapshot::FrameSnapshot> {
+    pub(crate) fn current_snapshot(&self) -> Option<&crate::frame_snapshot::FrameSnapshot> {
         self.current_snapshot.as_ref()
     }
 
@@ -2913,10 +2932,7 @@ impl Window {
         use crate::frame_snapshot::emit_tile_sprites_from_snapshot;
         use crate::layer::LayerReason;
 
-        eprintln!("[COMPOSITOR_PRESENT] called, has_snapshot={}", self.current_snapshot.is_some());
-
         let Some(snapshot) = &self.current_snapshot else {
-            eprintln!("[COMPOSITOR_PRESENT] No snapshot, falling back to present()");
             self.present();
             return;
         };
@@ -2938,16 +2954,19 @@ impl Window {
             .map(|(id, _)| *id)
             .collect();
 
-        eprintln!("[COMPOSITOR_PRESENT] scroll_container_ids={}", scroll_container_ids.len());
-
         // Emit tile sprites from snapshot using current scroll offsets
         let mut all_tile_sprites = Vec::new();
         let mut layer_hitbox_updates: Vec<(crate::LayerId, Point<Pixels>)> = Vec::new();
 
         for &layer_id in &scroll_container_ids {
             if let Some(layer_snapshot) = snapshot.layers.get(layer_id) {
-                // Get current scroll offset from compositor state
-                let current_scroll = self.compositor_state.scroll_offset(layer_id);
+                // Get current scroll offset from compositor state, falling back to snapshot
+                // if compositor state doesn't have an entry for this layer yet.
+                let current_scroll = if self.compositor_state.has_scroll_offset(layer_id) {
+                    self.compositor_state.scroll_offset(layer_id)
+                } else {
+                    layer_snapshot.scroll_offset
+                };
 
                 // Emit tiles using snapshot data + current scroll
                 let mut sprites = emit_tile_sprites_from_snapshot(layer_snapshot, current_scroll);
@@ -2961,10 +2980,6 @@ impl Window {
                     }
                 }
 
-                eprintln!(
-                    "[COMPOSITOR_PRESENT] layer {:?} emitted {} sprites from snapshot",
-                    layer_id, sprites.len()
-                );
                 all_tile_sprites.extend(sprites);
 
                 // Compute content_origin for hitbox updates
@@ -2980,11 +2995,6 @@ impl Window {
         // Sort tile sprites by order for batch iteration
         all_tile_sprites.sort_by_key(|sprite| sprite.order);
 
-        eprintln!(
-            "[COMPOSITOR_PRESENT] total sprites={}",
-            all_tile_sprites.len()
-        );
-
         // Replace tile sprites in the rendered scene
         self.rendered_frame.scene.replace_tile_sprites(all_tile_sprites);
 
@@ -2992,10 +3002,6 @@ impl Window {
         for (layer_id, content_origin) in layer_hitbox_updates {
             if let Some(range) = snapshot.hitboxes.layer_hitbox_ranges.get(&layer_id) {
                 let hitbox_data = &snapshot.hitboxes.hitboxes[range.clone()];
-                eprintln!(
-                    "[COMPOSITOR_PRESENT] Updating {} hitboxes for layer {:?} with content_origin={:?}",
-                    hitbox_data.len(), layer_id, content_origin
-                );
 
                 // Get the corresponding range in rendered_frame.hitboxes from the layer snapshot
                 if let Some(layer_snapshot) = snapshot.layers.get(layer_id) {
@@ -3373,6 +3379,7 @@ impl Window {
             deferred_draws_index: self.next_frame.deferred_draws.len(),
             dispatch_tree_index: self.next_frame.dispatch_tree.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
+            accessed_computed_element_states_index: self.next_frame.accessed_computed_element_states.len(),
             line_layout_index: self.text_system.layout_index(),
         }
     }
@@ -3394,6 +3401,12 @@ impl Window {
                 ..range.end.accessed_element_states_index]
                 .iter()
                 .map(|(id, type_id)| (id.clone(), *type_id)),
+        );
+        self.next_frame.accessed_computed_element_states.extend(
+            self.rendered_frame.accessed_computed_element_states[range.start.accessed_computed_element_states_index
+                ..range.end.accessed_computed_element_states_index]
+                .iter()
+                .cloned(),
         );
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
@@ -3433,6 +3446,7 @@ impl Window {
             input_handlers_index: self.next_frame.input_handlers.len(),
             cursor_styles_index: self.next_frame.cursor_styles.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
+            accessed_computed_element_states_index: self.next_frame.accessed_computed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
         }
@@ -3462,6 +3476,12 @@ impl Window {
                 ..range.end.accessed_element_states_index]
                 .iter()
                 .map(|(id, type_id)| (id.clone(), *type_id)),
+        );
+        self.next_frame.accessed_computed_element_states.extend(
+            self.rendered_frame.accessed_computed_element_states[range.start.accessed_computed_element_states_index
+                ..range.end.accessed_computed_element_states_index]
+                .iter()
+                .cloned(),
         );
         self.next_frame.tab_stops.replay(
             &self.rendered_frame.tab_stops.insertion_history
@@ -4472,6 +4492,9 @@ impl Window {
             self.next_frame
                 .accessed_element_states
                 .truncate(index.accessed_element_states_index);
+            self.next_frame
+                .accessed_computed_element_states
+                .truncate(index.accessed_computed_element_states_index);
             self.text_system.truncate_layouts(index.line_layout_index);
             self.element_path_stack = element_path_stack;
             self.element_child_counters = element_child_counters;
@@ -4732,6 +4755,85 @@ impl Window {
             debug_assert!(
                 state.is_none(),
                 "you must not return an element state when passing None for the global id"
+            );
+            result
+        }
+    }
+
+    /// Store and retrieve element state using a ComputedElementId.
+    ///
+    /// This enables stateful interactions (like click handlers) without requiring
+    /// an explicit element ID. The ComputedElementId is auto-generated based on
+    /// the element's position in the tree.
+    ///
+    /// Note: If the tree structure changes, the computed ID changes too, which may
+    /// cause state to be lost. For elements that need stable state across tree
+    /// restructuring, use explicit IDs via `.id()`.
+    pub fn with_computed_element_state<S, R>(
+        &mut self,
+        computed_id: crate::display_list::ComputedElementId,
+        f: impl FnOnce(Option<S>, &mut Self) -> (R, S),
+    ) -> R
+    where
+        S: 'static,
+    {
+        self.invalidator.debug_assert_paint_or_prepaint();
+
+        let key = (computed_id, TypeId::of::<S>());
+        self.next_frame.accessed_computed_element_states.push(key.clone());
+
+        if let Some(any) = self
+            .next_frame
+            .computed_element_states
+            .remove(&key)
+            .or_else(|| self.rendered_frame.computed_element_states.remove(&key))
+        {
+            let ElementStateBox {
+                inner,
+                #[cfg(debug_assertions)]
+                type_name,
+            } = any;
+            let mut state_box = inner
+                .downcast::<Option<S>>()
+                .map_err(|_| {
+                    #[cfg(debug_assertions)]
+                    {
+                        anyhow::anyhow!(
+                            "invalid element state type for computed id, requested {:?}, actual: {:?}",
+                            std::any::type_name::<S>(),
+                            type_name
+                        )
+                    }
+
+                    #[cfg(not(debug_assertions))]
+                    anyhow::anyhow!("invalid element state type for computed id")
+                })
+                .unwrap();
+
+            let state = state_box
+                .take()
+                .expect("element state is already being updated");
+
+            let (result, state) = f(Some(state), self);
+            state_box.replace(state);
+            self.next_frame.computed_element_states.insert(
+                key,
+                ElementStateBox {
+                    inner: state_box,
+                    #[cfg(debug_assertions)]
+                    type_name,
+                },
+            );
+            result
+        } else {
+            let (result, state) = f(None, self);
+            self.next_frame.computed_element_states.insert(
+                key,
+                ElementStateBox {
+                    inner: Box::new(Some(state)),
+                    #[cfg(debug_assertions)]
+                    type_name: std::any::type_name::<S>(),
+                },
             );
             result
         }
@@ -6172,7 +6274,10 @@ impl Window {
         // Capture phase, events bubble from back to front. Handlers for this phase are used for
         // special purposes, such as detecting events outside of a given Bounds.
         for listener in &mut mouse_listeners {
-            let listener = listener.as_mut().unwrap();
+            // Listeners can be None if they were moved to retained layer storage
+            let Some(listener) = listener.as_mut() else {
+                continue;
+            };
             listener(event, DispatchPhase::Capture, self, cx);
             if !cx.propagate_event {
                 break;
@@ -6182,7 +6287,10 @@ impl Window {
         // Bubble phase, where most normal handlers do their work.
         if cx.propagate_event {
             for listener in mouse_listeners.iter_mut().rev() {
-                let listener = listener.as_mut().unwrap();
+                // Listeners can be None if they were moved to retained layer storage
+                let Some(listener) = listener.as_mut() else {
+                    continue;
+                };
                 listener(event, DispatchPhase::Bubble, self, cx);
                 if !cx.propagate_event {
                     break;

@@ -30,7 +30,7 @@ use collections::FxHashMap;
 /// exactly one path: either via tile sprites (for scroll containers) or
 /// via direct primitives (for non-scrolling content).
 #[derive(Default)]
-pub struct CompositorScene {
+pub(crate) struct CompositorScene {
     /// Each layer's contribution (either direct primitives OR tile sprites, never both).
     pub layer_outputs: Vec<LayerOutput>,
 
@@ -40,7 +40,7 @@ pub struct CompositorScene {
 
 /// How a layer's content should be rendered.
 #[derive(Clone)]
-pub enum LayerOutput {
+pub(crate) enum LayerOutput {
     /// Layer with tiled content - render via tile sprites.
     ///
     /// Used for scroll containers where content is rasterized into tiles
