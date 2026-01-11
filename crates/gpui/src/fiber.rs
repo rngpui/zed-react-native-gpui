@@ -1,5 +1,5 @@
 use crate::{
-    AnyDescriptor, Bounds, EntityId, LayoutId, PaintIndex, Pixels, PrepaintStateIndex,
+    AnyDescriptor, Bounds, EntityId, Hitbox, LayoutId, PaintIndex, Pixels, PrepaintStateIndex,
     SharedString, StyleRefinement, TaffyLayoutEngine,
 };
 use collections::FxHashMap;
@@ -89,6 +89,9 @@ pub struct Fiber {
     /// Cached text content for this fiber, if applicable.
     pub cached_text: Option<SharedString>,
 
+    /// Cached hitbox from the last prepaint, if any.
+    pub cached_hitbox: Option<Hitbox>,
+
     /// The taffy layout node for this fiber
     pub layout_id: Option<LayoutId>,
 
@@ -122,6 +125,7 @@ impl Fiber {
             descriptor_hash,
             cached_style: None,
             cached_text: None,
+            cached_hitbox: None,
             layout_id: None,
             bounds: None,
             prepaint_range: None,
@@ -293,6 +297,13 @@ impl FiberTree {
         self.view_roots.clear();
     }
 
+    /// Clear dirty flags on all fibers.
+    pub fn clear_all_dirty(&mut self) {
+        for fiber in self.fibers.values_mut() {
+            fiber.dirty.clear();
+        }
+    }
+
     /// Reconcile a descriptor against a fiber, returning whether it changed.
     /// If the descriptor's content hash differs from the fiber's stored hash,
     /// the fiber is marked as needing layout and its hash is updated.
@@ -328,6 +339,15 @@ impl FiberTree {
         // Reconcile children by position
         let children = descriptor.children();
         self.reconcile_children(fiber_id, children, _taffy);
+
+        if changed {
+            let child_ids: Vec<FiberId> = self.children(fiber_id).collect();
+            for child_id in child_ids {
+                if let Some(child) = self.fibers.get_mut(child_id) {
+                    child.dirty.insert(DirtyFlags::BOUNDS_CHANGED);
+                }
+            }
+        }
 
         if changed {
             self.propagate_subtree_dirty(fiber_id);
@@ -464,7 +484,7 @@ impl FiberTree {
                 fiber.cached_style = None;
                 fiber.cached_text = Some(desc.text.clone());
             }
-            AnyDescriptor::View(_) | AnyDescriptor::Empty => {
+            AnyDescriptor::View(_) | AnyDescriptor::Deferred(_) | AnyDescriptor::Empty => {
                 fiber.cached_style = None;
                 fiber.cached_text = None;
             }

@@ -11,6 +11,8 @@ pub enum AnyDescriptor {
     Div(Box<DivDescriptor>),
     /// A text element
     Text(TextDescriptor),
+    /// A deferred element - defers drawing its child
+    Deferred(Box<DeferredDescriptor>),
     /// A view element - delegates rendering to an entity
     View(ViewDescriptor),
     /// An empty placeholder element
@@ -22,6 +24,7 @@ impl Clone for AnyDescriptor {
         match self {
             AnyDescriptor::Div(desc) => AnyDescriptor::Div(desc.clone()),
             AnyDescriptor::Text(desc) => AnyDescriptor::Text(desc.clone()),
+            AnyDescriptor::Deferred(desc) => AnyDescriptor::Deferred(desc.clone()),
             AnyDescriptor::View(desc) => AnyDescriptor::View(desc.clone()),
             AnyDescriptor::Empty => AnyDescriptor::Empty,
         }
@@ -34,6 +37,7 @@ impl AnyDescriptor {
         match self {
             AnyDescriptor::Div(desc) => &desc.children,
             AnyDescriptor::Text(_) => &[],
+            AnyDescriptor::Deferred(desc) => &desc.children,
             AnyDescriptor::View(_) => &[],
             AnyDescriptor::Empty => &[],
         }
@@ -48,6 +52,7 @@ impl AnyDescriptor {
         match self {
             AnyDescriptor::Div(desc) => desc.content_hash_into(&mut hasher),
             AnyDescriptor::Text(desc) => desc.content_hash_into(&mut hasher),
+            AnyDescriptor::Deferred(desc) => desc.content_hash_into(&mut hasher),
             AnyDescriptor::View(desc) => desc.content_hash_into(&mut hasher),
             AnyDescriptor::Empty => {}
         }
@@ -64,6 +69,7 @@ impl AnyDescriptor {
     pub fn child_count(&self) -> usize {
         match self {
             AnyDescriptor::Div(desc) => desc.children.len(),
+            AnyDescriptor::Deferred(desc) => desc.children.len(),
             _ => 0,
         }
     }
@@ -124,6 +130,37 @@ pub struct TextDescriptor {
     pub text: SharedString,
     /// Text styling
     pub style: TextStyleRefinement,
+}
+
+/// Descriptor for a deferred element
+#[derive(Clone)]
+pub struct DeferredDescriptor {
+    /// Child of the deferred element
+    pub children: SmallVec<[AnyDescriptor; 1]>,
+    /// Priority for deferred drawing
+    pub priority: usize,
+}
+
+impl DeferredDescriptor {
+    /// Create a new DeferredDescriptor
+    pub fn new(child: AnyDescriptor, priority: usize) -> Self {
+        Self {
+            children: SmallVec::from_iter([child]),
+            priority,
+        }
+    }
+
+    /// Compute a content hash for change detection.
+    pub fn content_hash(&self) -> u64 {
+        let mut hasher = FxHasher::default();
+        self.content_hash_into(&mut hasher);
+        hasher.finish()
+    }
+
+    fn content_hash_into<H: Hasher>(&self, state: &mut H) {
+        self.priority.hash(state);
+        self.children.len().hash(state);
+    }
 }
 
 impl TextDescriptor {
@@ -209,6 +246,12 @@ impl IntoDescriptor for TextDescriptor {
 impl IntoDescriptor for ViewDescriptor {
     fn into_descriptor(self) -> AnyDescriptor {
         AnyDescriptor::View(self)
+    }
+}
+
+impl IntoDescriptor for DeferredDescriptor {
+    fn into_descriptor(self) -> AnyDescriptor {
+        AnyDescriptor::Deferred(Box::new(self))
     }
 }
 

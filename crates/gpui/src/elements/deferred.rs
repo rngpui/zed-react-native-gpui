@@ -1,6 +1,6 @@
 use crate::{
-    AnyElement, App, Bounds, Element, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
-    Pixels, Window,
+    AnyDescriptor, AnyElement, App, Bounds, Element, GlobalElementId, InspectorElementId,
+    IntoElement, LayoutId, Pixels, Window,
 };
 
 /// Builds a `Deferred` element, which delays the layout and paint of its child.
@@ -25,6 +25,24 @@ impl Deferred {
     pub fn with_priority(mut self, priority: usize) -> Self {
         self.priority = priority;
         self
+    }
+
+    pub(crate) fn build_descriptor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyDescriptor {
+        self.child
+            .as_mut()
+            .map(|child| child.build_descriptor(window, cx))
+            .unwrap_or(AnyDescriptor::Empty)
+    }
+
+    pub(crate) fn build_descriptor_without_context(&mut self) -> AnyDescriptor {
+        self.child
+            .as_mut()
+            .map(|child| child.build_descriptor_without_context())
+            .unwrap_or(AnyDescriptor::Empty)
     }
 }
 
@@ -83,6 +101,20 @@ impl IntoElement for Deferred {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+impl crate::IntoDescriptor for Deferred {
+    fn into_descriptor(mut self) -> crate::AnyDescriptor {
+        let child = self
+            .child
+            .take()
+            .map(|mut child| child.build_descriptor_without_context())
+            .unwrap_or(crate::AnyDescriptor::Empty);
+        crate::AnyDescriptor::Deferred(Box::new(crate::DeferredDescriptor::new(
+            child,
+            self.priority,
+        )))
     }
 }
 

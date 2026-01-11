@@ -32,10 +32,13 @@
 //! your own custom layout algorithm or rendering a code editor.
 
 use crate::{
-    App, ArenaBox, AvailableSpace, Bounds, Context, DispatchNodeId, ELEMENT_ARENA, ElementId,
-    FocusHandle, InspectorElementId, LayoutId, Pixels, Point, Size, Style, Window,
+    AnyDescriptor, AnyView, App, ArenaBox, AvailableSpace, Bounds, Context, Deferred,
+    DispatchNodeId, Div, ELEMENT_ARENA, ElementId, FocusHandle, InspectorElementId, LayoutId,
+    Pixels, Point, SharedString, Size, Style, TextDescriptor, TextStyleRefinement, ViewDescriptor,
+    Window,
     util::FluentBuilder,
 };
+use stacksafe::stacksafe;
 use derive_more::{Deref, DerefMut};
 use std::{
     any::{Any, type_name},
@@ -655,6 +658,64 @@ impl AnyElement {
     ) -> Option<FocusHandle> {
         self.layout_as_root(available_space, window, cx);
         window.with_absolute_element_offset(origin, |window| self.prepaint(window, cx))
+    }
+
+    #[stacksafe]
+    pub(crate) fn build_descriptor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyDescriptor {
+        if let Some(div) = self.downcast_mut::<Div>() {
+            return div.build_descriptor(window, cx);
+        }
+        if let Some(deferred) = self.downcast_mut::<Deferred>() {
+            return deferred.build_descriptor(window, cx);
+        }
+        if let Some(view) = self.downcast_mut::<AnyView>() {
+            return window.with_rendered_view(view.entity_id(), |window| {
+                let mut element = view.render_element(window, cx);
+                element.build_descriptor(window, cx)
+            });
+        }
+        if let Some(text) = self.downcast_mut::<SharedString>() {
+            let style = window
+                .text_style_stack
+                .last()
+                .cloned()
+                .unwrap_or_default();
+            return AnyDescriptor::Text(TextDescriptor {
+                text: text.clone(),
+                style,
+            });
+        }
+        if self.downcast_mut::<Empty>().is_some() {
+            return AnyDescriptor::Empty;
+        }
+        AnyDescriptor::Empty
+    }
+
+    #[stacksafe]
+    pub(crate) fn build_descriptor_without_context(&mut self) -> AnyDescriptor {
+        if let Some(div) = self.downcast_mut::<Div>() {
+            return div.build_descriptor_without_context();
+        }
+        if let Some(deferred) = self.downcast_mut::<Deferred>() {
+            return deferred.build_descriptor_without_context();
+        }
+        if let Some(view) = self.downcast_mut::<AnyView>() {
+            return AnyDescriptor::View(ViewDescriptor::new(view.entity_id()));
+        }
+        if let Some(text) = self.downcast_mut::<SharedString>() {
+            return AnyDescriptor::Text(TextDescriptor {
+                text: text.clone(),
+                style: TextStyleRefinement::default(),
+            });
+        }
+        if self.downcast_mut::<Empty>().is_some() {
+            return AnyDescriptor::Empty;
+        }
+        AnyDescriptor::Empty
     }
 }
 

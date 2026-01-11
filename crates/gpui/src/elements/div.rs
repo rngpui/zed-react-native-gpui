@@ -16,14 +16,14 @@
 //! constructed by combining these two systems into an all-in-one element.
 
 use crate::{
-    AbsoluteLength, Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent,
-    DispatchPhase, Display, Element, ElementId, Entity, FocusHandle, Global, GlobalElementId,
-    Hitbox, HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext,
-    KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent,
-    MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent,
-    Overflow, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
-    StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea, point, px,
-    size,
+    AbsoluteLength, Action, AnyDescriptor, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds,
+    ClickEvent, DirtyFlags, DispatchPhase, Display, DivDescriptor, Element, ElementId, Entity,
+    FiberId, FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior, HitboxId,
+    InspectorElementId, IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton,
+    KeyboardClickEvent, LayoutId, ModifiersChangedEvent, MouseButton, MouseClickEvent,
+    MouseDownEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent, Overflow, ParentElement,
+    Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style, StyleRefinement, Styled,
+    Task, TooltipId, Visibility, Window, WindowControlArea, point, px, size,
 };
 use collections::HashMap;
 use refineable::Refineable;
@@ -1322,6 +1322,43 @@ impl Div {
         self.image_cache = Some(Box::new(cache));
         self
     }
+
+    #[stacksafe]
+    pub(crate) fn build_descriptor(&mut self, window: &mut Window, cx: &mut App) -> AnyDescriptor {
+        let style = (*self.interactivity.base_style).clone();
+        let element_id = self.interactivity.element_id.clone();
+        let mut children = SmallVec::new();
+        let text_style = if style.text.is_some() {
+            Some(style.text.clone())
+        } else {
+            None
+        };
+        window.with_text_style(text_style, |window| {
+            for child in &mut self.children {
+                children.push(child.build_descriptor(window, cx));
+            }
+        });
+        AnyDescriptor::Div(Box::new(DivDescriptor {
+            style,
+            element_id,
+            children,
+        }))
+    }
+
+    #[stacksafe]
+    pub(crate) fn build_descriptor_without_context(&mut self) -> AnyDescriptor {
+        let style = (*self.interactivity.base_style).clone();
+        let element_id = self.interactivity.element_id.clone();
+        let mut children = SmallVec::new();
+        for child in &mut self.children {
+            children.push(child.build_descriptor_without_context());
+        }
+        AnyDescriptor::Div(Box::new(DivDescriptor {
+            style,
+            element_id,
+            children,
+        }))
+    }
 }
 
 /// A frame state for a `Div` element, which contains layout IDs for its children.
@@ -1332,6 +1369,7 @@ impl Div {
 /// bounds of the children after the layout phase is complete.
 pub struct DivFrameState {
     child_layout_ids: SmallVec<[LayoutId; 2]>,
+    fiber_id: Option<FiberId>,
 }
 
 /// Interactivity state displayed an manipulated in the inspector.
@@ -1388,6 +1426,31 @@ impl Element for Div {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut child_layout_ids = SmallVec::new();
+        let fiber_id = window.fiber_for_current_path();
+        if let Some(fiber_id) = fiber_id
+            && self.interactivity.element_id.is_none()
+            && !window.refreshing
+            && let Some(fiber) = window.fiber_tree.get(fiber_id)
+            && !fiber
+                .dirty
+                .intersects(DirtyFlags::NEEDS_LAYOUT | DirtyFlags::SUBTREE_DIRTY)
+            && let Some((cached_layout_id, cached_children)) = window
+                .cached_layout_node_for_current_path()
+                .map(|cached| (cached.layout_id, cached.children.clone()))
+        {
+            child_layout_ids = cached_children.iter().copied().collect();
+            window.mark_layout_path_used();
+            if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
+                fiber.layout_id = Some(cached_layout_id);
+            }
+            return (
+                cached_layout_id,
+                DivFrameState {
+                    child_layout_ids,
+                    fiber_id: Some(fiber_id),
+                },
+            );
+        }
         let image_cache = self
             .image_cache
             .as_mut()
@@ -1418,7 +1481,19 @@ impl Element for Div {
             )
         });
 
-        (layout_id, DivFrameState { child_layout_ids })
+        if let Some(fiber_id) = fiber_id {
+            if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
+                fiber.layout_id = Some(layout_id);
+            }
+        }
+
+        (
+            layout_id,
+            DivFrameState {
+                child_layout_ids,
+                fiber_id,
+            },
+        )
     }
 
     #[stacksafe]
@@ -1431,6 +1506,25 @@ impl Element for Div {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Hitbox> {
+        if let Some(fiber_id) = request_layout.fiber_id
+            && self.interactivity.element_id.is_none()
+            && !window.refreshing
+            && let Some(fiber) = window.fiber_tree.get(fiber_id)
+            && !fiber
+                .dirty
+                .intersects(DirtyFlags::NEEDS_LAYOUT | DirtyFlags::BOUNDS_CHANGED | DirtyFlags::SUBTREE_DIRTY)
+            && let Some(prepaint_range) = fiber.prepaint_range.clone()
+        {
+            let prepaint_start = window.prepaint_index();
+            window.reuse_prepaint(prepaint_range);
+            let prepaint_end = window.prepaint_index();
+            if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
+                fiber.prepaint_range = Some(prepaint_start..prepaint_end);
+                return fiber.cached_hitbox.clone();
+            }
+        }
+
+        let prepaint_start = window.prepaint_index();
         let image_cache = self
             .image_cache
             .as_mut()
@@ -1477,7 +1571,7 @@ impl Element for Div {
             scroll_handle.scroll_to_active_item();
         }
 
-        self.interactivity.prepaint(
+        let hitbox = self.interactivity.prepaint(
             global_id,
             inspector_id,
             bounds,
@@ -1504,7 +1598,17 @@ impl Element for Div {
 
                 hitbox
             },
-        )
+        );
+
+        let prepaint_end = window.prepaint_index();
+        if let Some(fiber_id) = request_layout.fiber_id {
+            if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
+                fiber.prepaint_range = Some(prepaint_start..prepaint_end);
+                fiber.cached_hitbox = hitbox.clone();
+            }
+        }
+
+        hitbox
     }
 
     #[stacksafe]
@@ -1513,11 +1617,30 @@ impl Element for Div {
         global_id: Option<&GlobalElementId>,
         inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
+        request_layout: &mut Self::RequestLayoutState,
         hitbox: &mut Option<Hitbox>,
         window: &mut Window,
         cx: &mut App,
     ) {
+        if let Some(fiber_id) = request_layout.fiber_id
+            && self.interactivity.element_id.is_none()
+            && !window.refreshing
+            && let Some(fiber) = window.fiber_tree.get(fiber_id)
+            && !fiber
+                .dirty
+                .intersects(DirtyFlags::NEEDS_PAINT | DirtyFlags::BOUNDS_CHANGED | DirtyFlags::SUBTREE_DIRTY)
+            && let Some(paint_range) = fiber.paint_range.clone()
+        {
+            let paint_start = window.paint_index();
+            window.reuse_paint(paint_range);
+            let paint_end = window.paint_index();
+            if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
+                fiber.paint_range = Some(paint_start..paint_end);
+            }
+            return;
+        }
+
+        let paint_start = window.paint_index();
         let image_cache = self
             .image_cache
             .as_mut()
@@ -1543,6 +1666,13 @@ impl Element for Div {
                 },
             )
         });
+
+        let paint_end = window.paint_index();
+        if let Some(fiber_id) = request_layout.fiber_id {
+            if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
+                fiber.paint_range = Some(paint_start..paint_end);
+            }
+        }
     }
 }
 
@@ -1555,11 +1685,19 @@ impl IntoElement for Div {
 }
 
 impl crate::IntoDescriptor for Div {
-    fn into_descriptor(self) -> crate::AnyDescriptor {
-        crate::AnyDescriptor::Div(Box::new(crate::DivDescriptor::new(
-            (*self.interactivity.base_style).clone(),
-            self.interactivity.element_id.clone(),
-        )))
+    #[stacksafe]
+    fn into_descriptor(mut self) -> crate::AnyDescriptor {
+        let style = (*self.interactivity.base_style).clone();
+        let element_id = self.interactivity.element_id.clone();
+        let mut children = SmallVec::new();
+        for child in &mut self.children {
+            children.push(child.build_descriptor_without_context());
+        }
+        crate::AnyDescriptor::Div(Box::new(crate::DivDescriptor {
+            style,
+            element_id,
+            children,
+        }))
     }
 }
 

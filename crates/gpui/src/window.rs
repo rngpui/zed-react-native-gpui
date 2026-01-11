@@ -1,12 +1,13 @@
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::Inspector;
 use crate::{
-    Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AvailableSpace, Background, BackdropBlur, BorderStyle, Bounds, BoxShadow,
-    Capslock, Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
-    DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
-    FiberTree, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla,
-    InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
+    Action, AnyDescriptor, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App,
+    AppContext, Arena, Asset, AsyncWindowContext, AvailableSpace, Background, BackdropBlur,
+    BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorStyle, Decorations,
+    DevicePixels, DirtyFlags, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId,
+    Edges, Effect, Entity, EntityId, EventEmitter, FiberId, FiberTree, FileDropEvent, FontId,
+    Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext,
+    KeyDownEvent, KeyEvent, Keystroke,
     KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite,
     MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas,
     PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
@@ -831,14 +832,14 @@ enum InputModality {
 
 /// Cached layout information for a node at a specific position in the element tree.
 /// Used to skip redundant set_style/set_children calls when nothing has changed.
-struct CachedLayoutNode {
+pub(crate) struct CachedLayoutNode {
     /// The taffy layout node ID.
-    layout_id: LayoutId,
+    pub(crate) layout_id: LayoutId,
     /// Hash of the style used to create this layout node.
-    style_hash: u64,
+    pub(crate) style_hash: u64,
     /// The child layout IDs from the previous frame.
     /// Used to detect when children have changed.
-    children: SmallVec<[LayoutId; 8]>,
+    pub(crate) children: SmallVec<[LayoutId; 8]>,
 }
 
 /// Holds the state for a specific window.
@@ -867,6 +868,9 @@ pub struct Window {
     layout_path_cache: FxHashMap<SmallVec<[u32; 16]>, CachedLayoutNode>,
     /// Tracks which paths were used this frame for cleanup.
     used_layout_paths: FxHashSet<SmallVec<[u32; 16]>>,
+    /// Maps layout paths to fiber IDs for quick lookup during element traversal.
+    fiber_path_cache: FxHashMap<SmallVec<[u32; 16]>, FiberId>,
+    last_layout_viewport_size: Option<Size<Pixels>>,
     pub(crate) root: Option<AnyView>,
     pub(crate) element_id_stack: SmallVec<[ElementId; 32]>,
     pub(crate) text_style_stack: Vec<TextStyleRefinement>,
@@ -1353,6 +1357,8 @@ impl Window {
             layout_path: SmallVec::new(),
             layout_path_cache: FxHashMap::default(),
             used_layout_paths: FxHashSet::default(),
+            fiber_path_cache: FxHashMap::default(),
+            last_layout_viewport_size: None,
             root: None,
             element_id_stack: SmallVec::default(),
             text_style_stack: Vec::new(),
@@ -2339,6 +2345,42 @@ impl Window {
         }
     }
 
+    fn reconcile_descriptor_tree(&mut self, descriptor: &AnyDescriptor) -> FiberId {
+        let layout_engine = self.layout_engine.as_mut().unwrap();
+        let root_id = self.fiber_tree.ensure_root(descriptor);
+        self.fiber_tree.reconcile(root_id, descriptor, layout_engine);
+
+        self.fiber_path_cache.clear();
+        let mut path = SmallVec::new();
+        self.populate_fiber_paths(root_id, descriptor, &mut path);
+        root_id
+    }
+
+    fn populate_fiber_paths(
+        &mut self,
+        fiber_id: FiberId,
+        descriptor: &AnyDescriptor,
+        path: &mut SmallVec<[u32; 16]>,
+    ) {
+        self.fiber_path_cache.insert(path.clone(), fiber_id);
+
+        if let AnyDescriptor::View(view_desc) = descriptor
+            && (self.dirty_views.contains(&view_desc.entity_id) || self.refreshing)
+        {
+            self.fiber_tree
+                .mark_dirty(fiber_id, DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT);
+        }
+
+        let child_fibers: Vec<FiberId> = self.fiber_tree.children(fiber_id).collect();
+        for (index, (child_fiber_id, child_desc)) in
+            child_fibers.into_iter().zip(descriptor.children()).enumerate()
+        {
+            path.push(index as u32);
+            self.populate_fiber_paths(child_fiber_id, child_desc, path);
+            path.pop();
+        }
+    }
+
     fn draw_roots(&mut self, cx: &mut App) {
         self.invalidator.set_phase(DrawPhase::Prepaint);
         self.tooltip_bounds.take();
@@ -2363,6 +2405,16 @@ impl Window {
 
         // Layout all root elements.
         let mut root_element = self.root.as_ref().unwrap().clone().into_any();
+        let descriptor = root_element.build_descriptor(self, cx);
+        let root_fiber = self.reconcile_descriptor_tree(&descriptor);
+        if self
+            .last_layout_viewport_size
+            .is_none_or(|size| size != root_size)
+        {
+            self.fiber_tree
+                .mark_dirty(root_fiber, DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT);
+            self.last_layout_viewport_size = Some(root_size);
+        }
         root_element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
 
         let mut render_layer_elements = self.prepaint_render_layers(root_size, cx);
@@ -2416,6 +2468,8 @@ impl Window {
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.paint_inspector_hitbox(cx);
+
+        self.fiber_tree.clear_all_dirty();
     }
 
     fn prepaint_tooltip(&mut self, cx: &mut App) -> Option<AnyElement> {
@@ -3804,6 +3858,18 @@ impl Window {
         self.layout_path.pop();
     }
 
+    pub(crate) fn fiber_for_current_path(&self) -> Option<FiberId> {
+        self.fiber_path_cache.get(&self.layout_path).copied()
+    }
+
+    pub(crate) fn cached_layout_node_for_current_path(&self) -> Option<&CachedLayoutNode> {
+        self.layout_path_cache.get(&self.layout_path)
+    }
+
+    pub(crate) fn mark_layout_path_used(&mut self) {
+        self.used_layout_paths.insert(self.layout_path.clone());
+    }
+
     /// Add a node to the layout tree for the current frame. Takes the `Style` of the element for which
     /// layout is being requested, along with the layout ids of any children. This method is called during
     /// calls to the [`Element::request_layout`] trait method and enables any element to participate in layout.
@@ -3867,6 +3933,11 @@ impl Window {
         };
 
         self.used_layout_paths.insert(path);
+        if let Some(fiber_id) = self.fiber_for_current_path() {
+            if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
+                fiber.layout_id = Some(layout_id);
+            }
+        }
         layout_id
     }
 
@@ -3887,10 +3958,18 @@ impl Window {
 
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
-        self.layout_engine
+        let layout_id = self
+            .layout_engine
             .as_mut()
             .unwrap()
             .request_measured_layout(style, rem_size, scale_factor, measure)
+            ;
+        if let Some(fiber_id) = self.fiber_for_current_path() {
+            if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
+                fiber.layout_id = Some(layout_id);
+            }
+        }
+        layout_id
     }
 
     /// Compute the layout for the given id within the given available space.

@@ -135,6 +135,10 @@ impl AnyView {
     pub fn entity_id(&self) -> EntityId {
         self.entity.entity_id()
     }
+
+    pub(crate) fn render_element(&self, window: &mut Window, cx: &mut App) -> AnyElement {
+        (self.render)(self, window, cx)
+    }
 }
 
 impl PartialEq for AnyView {
@@ -306,6 +310,18 @@ impl IntoElement for AnyView {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+impl crate::IntoDescriptor for AnyView {
+    fn into_descriptor(self) -> crate::AnyDescriptor {
+        crate::AnyDescriptor::View(crate::ViewDescriptor::new(self.entity_id()))
+    }
+}
+
+impl<V: 'static + Render> crate::IntoDescriptor for Entity<V> {
+    fn into_descriptor(self) -> crate::AnyDescriptor {
+        crate::AnyDescriptor::View(crate::ViewDescriptor::new(self.entity_id()))
     }
 }
 
