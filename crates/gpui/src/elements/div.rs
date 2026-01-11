@@ -24,6 +24,7 @@ use crate::{
     MousePressureEvent, MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render,
     ScrollWheelEvent, SharedString, Size, Style, StyleRefinement, Styled, Task, TooltipId,
     Visibility, Window, WindowControlArea, point, px, size, style_content_hash,
+    style_refinement_element_hash,
     window::{HitboxKey, PaintIndex, PrepaintStateIndex, SubtreeCacheEntry, SubtreeCacheHit},
 };
 use collections::HashMap;
@@ -1952,6 +1953,26 @@ impl Element for Div {
             || self.interactivity.group_active_style.is_some()
     }
 
+    fn element_hash(&self) -> u64 {
+        if self.interactivity.hover_style.is_some()
+            || self.interactivity.group_hover_style.is_some()
+            || self.interactivity.active_style.is_some()
+            || self.interactivity.group_active_style.is_some()
+            || self.interactivity.focus_style.is_some()
+            || self.interactivity.in_focus_style.is_some()
+            || self.interactivity.focus_visible_style.is_some()
+            || !self.interactivity.drag_over_styles.is_empty()
+            || !self.interactivity.group_drag_over_styles.is_empty()
+        {
+            return 0;
+        }
+
+        let mut hasher = ContentHasher::default();
+        hasher.write_u64(style_refinement_element_hash(&self.interactivity.base_style));
+        hasher.write_u64(self.children.len().content_hash());
+        hasher.finish()
+    }
+
     fn content_hash(
         &self,
         _id: Option<&GlobalElementId>,
@@ -2002,6 +2023,7 @@ impl Element for Div {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut child_layout_ids = SmallVec::new();
+        let element_hash = self.element_hash();
         let image_cache = self
             .image_cache
             .as_mut()
@@ -2015,14 +2037,29 @@ impl Element for Div {
                 cx,
                 |global_id, style, window, cx| {
                     window.with_text_style(style.text_style().cloned(), |window| {
+                        // NOTE: Layout cache (check_element_cache) is DISABLED.
+                        // Skipping child request_layout creates uninitialized AnyElement objects,
+                        // which causes flickering when SubtreeCache doesn't give Full hit.
+                        // To enable this optimization, we need true retained elements
+                        // (not recreating AnyElements in render() every frame).
+
+                        // Iterate children normally
                         child_layout_ids = self
                             .children
                             .iter_mut()
                             .map(|child| child.request_layout(window, cx))
                             .collect::<SmallVec<_>>();
+
                         // Use ID-aware layout when we have an element ID
                         if let Some(id) = global_id {
-                            window.request_layout_with_id(id, style, child_layout_ids.iter().copied(), cx)
+                            let (layout_id, _) = window.request_layout_with_id(
+                                id,
+                                element_hash,
+                                style,
+                                child_layout_ids.iter().copied(),
+                                cx,
+                            );
+                            layout_id
                         } else {
                             window.request_layout(style, child_layout_ids.iter().copied(), cx)
                         }

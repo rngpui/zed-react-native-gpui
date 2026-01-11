@@ -443,6 +443,29 @@ pub fn style_refinement_content_hash(style: &StyleRefinement, rem_size: Pixels) 
     hasher.finish()
 }
 
+/// Hash StyleRefinement inputs without incorporating rem size.
+pub fn style_refinement_element_hash(style: &StyleRefinement) -> u64 {
+    let mut hasher = ContentHasher::default();
+    hasher.write_u64(style.display.content_hash());
+    hasher.write_u64(style.visibility.content_hash());
+    hasher.write_u64(style.overflow.x.content_hash());
+    hasher.write_u64(style.overflow.y.content_hash());
+    hasher.write_u64(style.background.content_hash());
+    hasher.write_u64(style.border_color.content_hash());
+    hasher.write_u64(style.border_style.content_hash());
+    hasher.write_u64(style.border_widths.top.content_hash());
+    hasher.write_u64(style.border_widths.right.content_hash());
+    hasher.write_u64(style.border_widths.bottom.content_hash());
+    hasher.write_u64(style.border_widths.left.content_hash());
+    hasher.write_u64(style.corner_radii.top_left.content_hash());
+    hasher.write_u64(style.corner_radii.top_right.content_hash());
+    hasher.write_u64(style.corner_radii.bottom_right.content_hash());
+    hasher.write_u64(style.corner_radii.bottom_left.content_hash());
+    hasher.write_u64(style.box_shadow.content_hash());
+    hasher.write_u64(style.opacity.content_hash());
+    hasher.finish()
+}
+
 impl<T> ContentHash for Edges<T>
 where
     T: ContentHash + Clone + Debug + Default + PartialEq,

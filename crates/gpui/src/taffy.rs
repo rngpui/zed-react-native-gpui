@@ -41,17 +41,15 @@ type NodeMeasureFn = StackSafe<
 >;
 
 /// Cached prepaint state for an element (hitboxes, focus handles, etc.).
-/// Placeholder for Phase 6 implementation.
-#[derive(Default)]
+#[derive(Clone)]
 pub struct CachedPrepaint {
-    // TODO: Add prepaint cached state
+    pub range: std::ops::Range<crate::window::PrepaintStateIndex>,
 }
 
 /// Cached paint output for an element (display items).
-/// Placeholder for Phase 6 implementation.
-#[derive(Default)]
+#[derive(Clone)]
 pub struct CachedPaint {
-    // TODO: Add paint cached state (display items, bounds)
+    pub range: std::ops::Range<crate::window::PaintIndex>,
 }
 
 struct NodeContext {
@@ -64,6 +62,12 @@ struct NodeContext {
     /// The element stored in this node for retention across frames.
     element: Option<AnyElement>,
 
+    /// Hash of the element's inputs for retained element caching.
+    element_hash: u64,
+
+    /// Generation when this element was cached (0 if not cached this frame).
+    cached_generation: u64,
+
     /// Dirty flags indicating what work needs to be done.
     dirty_flags: DirtyFlags,
 
@@ -72,6 +76,14 @@ struct NodeContext {
 
     /// Cached paint output (display items).
     cached_paint: Option<CachedPaint>,
+
+    /// Cached child layout IDs for element-level caching.
+    /// When is_cached is true, callers can use these instead of iterating children.
+    cached_children: Option<smallvec::SmallVec<[LayoutId; 8]>>,
+
+    /// Element offset when this element was last cached.
+    /// Used to invalidate cache when scrolling changes position.
+    cached_element_offset: Option<crate::Point<crate::Pixels>>,
 }
 
 /// Statistics for layout cache performance.
@@ -158,24 +170,110 @@ impl TaffyLayoutEngine {
         self.stats
     }
 
+    /// Check if an element's children can be reused from cache.
+    /// Returns Some(cached_children) if the element is cached and has stored children,
+    /// None if the element needs to process its children fresh.
+    ///
+    /// This should be called BEFORE processing children to skip child iteration.
+    /// The element_offset is checked to ensure we don't use cache during scrolling.
+    pub fn check_element_cache(
+        &mut self,
+        element_id: &ComputedElementId,
+        element_hash: u64,
+        element_offset: crate::Point<crate::Pixels>,
+    ) -> Option<smallvec::SmallVec<[LayoutId; 8]>> {
+        if element_hash == 0 {
+            return None; // Caching disabled for this element
+        }
+
+        let node_id = self.element_to_node.get(element_id)?;
+        let context = self.taffy.get_node_context_mut(*node_id)?;
+
+        // Check if element is unchanged and not dirty
+        // Also check element_offset matches to invalidate during scrolling
+        if context.element_hash == element_hash
+            && context.cached_element_offset == Some(element_offset)
+            && !context
+                .dirty_flags
+                .intersects(DirtyFlags::NEEDS_RENDER | DirtyFlags::NEEDS_PAINT)
+        {
+            // Mark as accessed this frame
+            context.last_access = self.generation;
+            context.cached_generation = self.generation;
+
+            // Return cached children if available
+            if let Some(ref cached) = context.cached_children {
+                let cached = cached.clone();
+                // Mark all cached children (and their descendants) as accessed
+                // to prevent them from being pruned at end_frame
+                let generation = self.generation;
+                for &child_id in &cached {
+                    self.mark_subtree_accessed(child_id, generation);
+                }
+                return Some(cached);
+            }
+        }
+
+        None
+    }
+
+    /// Recursively mark a node and all its descendants as accessed this frame.
+    /// This prevents nodes from being pruned at end_frame when their parent gets a cache hit.
+    fn mark_subtree_accessed(&mut self, node_id: LayoutId, generation: u64) {
+        if let Some(context) = self.taffy.get_node_context_mut(node_id.0) {
+            context.last_access = generation;
+
+            // Get children and recurse
+            if let Some(ref cached_children) = context.cached_children {
+                let children = cached_children.clone();
+                for &child_id in &children {
+                    self.mark_subtree_accessed(child_id, generation);
+                }
+            }
+        }
+    }
+
     /// Request layout for an element with a known identity.
     /// Reuses the existing Taffy node if available.
     pub fn request_layout_with_id(
         &mut self,
         element_id: ComputedElementId,
+        element_hash: u64,
         style: Style,
         rem_size: Pixels,
         scale_factor: f32,
         children: &[LayoutId],
-    ) -> LayoutId {
+        element_offset: crate::Point<crate::Pixels>,
+    ) -> (LayoutId, bool) {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
 
         if let Some(&node_id) = self.element_to_node.get(&element_id) {
             // Reuse existing node
-            if let Some(context) = self.taffy.get_node_context_mut(node_id) {
+            let is_cached = if let Some(context) = self.taffy.get_node_context_mut(node_id) {
                 context.last_access = self.generation;
                 context.measure = None; // Clear any old measure function
-            }
+
+                // Store children and element_offset for element-level caching
+                context.cached_children = Some(smallvec::SmallVec::from_slice(children));
+                context.cached_element_offset = Some(element_offset);
+
+                if element_hash != 0
+                    && context.element_hash == element_hash
+                    && !context
+                        .dirty_flags
+                        .intersects(DirtyFlags::NEEDS_RENDER | DirtyFlags::NEEDS_PAINT)
+                {
+                    context.cached_generation = self.generation;
+                    true
+                } else {
+                    context.element_hash = element_hash;
+                    context.cached_generation = 0;
+                    context.dirty_flags |= DirtyFlags::NEEDS_RENDER | DirtyFlags::NEEDS_PAINT;
+                    false
+                }
+            } else {
+                false
+            };
 
             // Update style
             self.taffy.set_style(node_id, taffy_style).expect(EXPECT_MESSAGE);
@@ -186,7 +284,7 @@ impl TaffyLayoutEngine {
                 .expect(EXPECT_MESSAGE);
 
             self.stats.hits += 1;
-            node_id.into()
+            (node_id.into(), is_cached)
         } else {
             // Create new node
             let node_id = if children.is_empty() {
@@ -197,9 +295,13 @@ impl TaffyLayoutEngine {
                             measure: None,
                             last_access: self.generation,
                             element: None,
+                            element_hash,
+                            cached_generation: 0,
                             dirty_flags: DirtyFlags::empty(),
                             cached_prepaint: None,
                             cached_paint: None,
+                            cached_children: None,
+                            cached_element_offset: Some(element_offset),
                         },
                     )
                     .expect(EXPECT_MESSAGE)
@@ -218,9 +320,13 @@ impl TaffyLayoutEngine {
                             measure: None,
                             last_access: self.generation,
                             element: None,
+                            element_hash,
+                            cached_generation: 0,
                             dirty_flags: DirtyFlags::empty(),
                             cached_prepaint: None,
                             cached_paint: None,
+                            cached_children: Some(smallvec::SmallVec::from_slice(children)),
+                            cached_element_offset: Some(element_offset),
                         }),
                     )
                     .expect(EXPECT_MESSAGE);
@@ -228,7 +334,7 @@ impl TaffyLayoutEngine {
 
             self.element_to_node.insert(element_id, node_id);
             self.stats.misses += 1;
-            node_id.into()
+            (node_id.into(), false)
         }
     }
 
@@ -237,6 +343,7 @@ impl TaffyLayoutEngine {
     pub fn request_measured_layout_with_id(
         &mut self,
         element_id: ComputedElementId,
+        element_hash: u64,
         style: Style,
         rem_size: Pixels,
         scale_factor: f32,
@@ -247,7 +354,7 @@ impl TaffyLayoutEngine {
             &mut App,
         ) -> Size<Pixels>
             + 'static,
-    ) -> LayoutId {
+    ) -> (LayoutId, bool) {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
         // Cast to dyn FnMut to match the NodeMeasureFn type
         let boxed: Box<
@@ -265,10 +372,26 @@ impl TaffyLayoutEngine {
             self.taffy.set_style(node_id, taffy_style).expect(EXPECT_MESSAGE);
 
             // Update context, preserving dirty flags from previous mark_dirty_with_flags calls
-            if let Some(context) = self.taffy.get_node_context_mut(node_id) {
+            let is_cached = if let Some(context) = self.taffy.get_node_context_mut(node_id) {
                 context.measure = Some(measure_fn);
                 context.last_access = self.generation;
-            }
+                if element_hash != 0
+                    && context.element_hash == element_hash
+                    && !context
+                        .dirty_flags
+                        .intersects(DirtyFlags::NEEDS_RENDER | DirtyFlags::NEEDS_PAINT)
+                {
+                    context.cached_generation = self.generation;
+                    true
+                } else {
+                    context.element_hash = element_hash;
+                    context.cached_generation = 0;
+                    context.dirty_flags |= DirtyFlags::NEEDS_RENDER | DirtyFlags::NEEDS_PAINT;
+                    false
+                }
+            } else {
+                false
+            };
 
             // NOTE: We intentionally do NOT call taffy.mark_dirty() here.
             // The measure function is recreated each frame, but if its results
@@ -276,7 +399,7 @@ impl TaffyLayoutEngine {
             // for achieving O(unchanged) layout performance.
 
             self.stats.hits += 1;
-            node_id.into()
+            (node_id.into(), is_cached)
         } else {
             // Create new node
             let node_id = self
@@ -287,16 +410,20 @@ impl TaffyLayoutEngine {
                         measure: Some(measure_fn),
                         last_access: self.generation,
                         element: None,
+                        element_hash,
+                        cached_generation: 0,
                         dirty_flags: DirtyFlags::empty(),
                         cached_prepaint: None,
                         cached_paint: None,
+                        cached_children: None,
+                        cached_element_offset: None,
                     },
                 )
                 .expect(EXPECT_MESSAGE);
 
             self.element_to_node.insert(element_id, node_id);
             self.stats.misses += 1;
-            node_id.into()
+            (node_id.into(), false)
         }
     }
 
@@ -312,9 +439,13 @@ impl TaffyLayoutEngine {
             measure: None,
             last_access: self.generation,
             element: None,
+            element_hash: 0,
+            cached_generation: 0,
             dirty_flags: DirtyFlags::empty(),
+            cached_children: None,
             cached_prepaint: None,
             cached_paint: None,
+            cached_element_offset: None,
         };
 
         if children.is_empty() {
@@ -354,13 +485,25 @@ impl TaffyLayoutEngine {
                     measure: Some(StackSafe::new(Box::new(measure))),
                     last_access: self.generation,
                     element: None,
+                    element_hash: 0,
+                    cached_generation: 0,
                     dirty_flags: DirtyFlags::empty(),
                     cached_prepaint: None,
                     cached_paint: None,
+                    cached_children: None,
+                    cached_element_offset: None,
                 },
             )
             .expect(EXPECT_MESSAGE)
             .into()
+    }
+
+    /// Returns true if the node was cached during the current frame.
+    pub fn was_cached_this_frame(&self, id: LayoutId) -> bool {
+        self.taffy
+            .get_node_context(id.into())
+            .map(|ctx| ctx.cached_generation == self.generation)
+            .unwrap_or(false)
     }
 
     // Used to understand performance

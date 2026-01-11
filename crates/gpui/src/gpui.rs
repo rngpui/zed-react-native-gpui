@@ -72,6 +72,7 @@ mod measure_cache;
 pub use measure_cache::MeasureCacheStats;
 mod text_system;
 mod util;
+mod retained;
 mod view;
 mod window;
 

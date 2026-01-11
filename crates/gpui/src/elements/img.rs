@@ -285,6 +285,7 @@ impl Element for Img {
             frame_index: 0,
             replacement: None,
         };
+        let element_hash = self.element_hash();
 
         window.with_optional_element_state(global_id, |state, window| {
             let mut state = state.map(|state| {
@@ -406,7 +407,9 @@ impl Element for Img {
                     }
 
                     if let Some(id) = global_id {
-                        window.request_layout_with_id(id, style, replacement_id, cx)
+                        let (layout_id, _is_cached) =
+                            window.request_layout_with_id(id, element_hash, style, replacement_id, cx);
+                        layout_id
                     } else {
                         window.request_layout(style, replacement_id, cx)
                     }

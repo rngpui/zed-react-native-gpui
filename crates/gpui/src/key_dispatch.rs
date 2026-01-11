@@ -52,6 +52,7 @@
 use crate::{
     Action, ActionRegistry, App, DispatchPhase, EntityId, FocusId, KeyBinding, KeyContext, Keymap,
     Keystroke, ModifiersChangedEvent, Window,
+    display_list::ComputedElementId,
 };
 use collections::FxHashMap;
 use smallvec::SmallVec;
@@ -75,6 +76,7 @@ pub(crate) struct DispatchTree {
     nodes: Vec<DispatchNode>,
     focusable_node_ids: FxHashMap<FocusId, DispatchNodeId>,
     view_node_ids: FxHashMap<EntityId, DispatchNodeId>,
+    handlers: Rc<RefCell<DispatchTreeHandlers>>,
     keymap: Rc<RefCell<Keymap>>,
     action_registry: Rc<ActionRegistry>,
 }
@@ -88,6 +90,29 @@ pub(crate) struct DispatchNode {
     pub focus_id: Option<FocusId>,
     view_id: Option<EntityId>,
     parent: Option<DispatchNodeId>,
+    computed_id: Option<ComputedElementId>,
+}
+
+#[derive(Default)]
+pub(crate) struct DispatchTreeHandlers {
+    generation: u64,
+    handlers: FxHashMap<ComputedElementId, HandlerSet>,
+}
+
+#[derive(Default)]
+struct HandlerSet {
+    key_listeners: Vec<KeyListener>,
+    action_listeners: Vec<DispatchActionListener>,
+    modifiers_changed_listeners: Vec<ModifiersChangedListener>,
+    last_access: u64,
+}
+
+impl HandlerSet {
+    fn is_empty(&self) -> bool {
+        self.key_listeners.is_empty()
+            && self.action_listeners.is_empty()
+            && self.modifiers_changed_listeners.is_empty()
+    }
 }
 
 pub(crate) struct ReusedSubtree {
@@ -138,6 +163,15 @@ pub(crate) struct DispatchActionListener {
 
 impl DispatchTree {
     pub fn new(keymap: Rc<RefCell<Keymap>>, action_registry: Rc<ActionRegistry>) -> Self {
+        let handlers = Rc::new(RefCell::new(DispatchTreeHandlers::default()));
+        Self::new_with_handlers(keymap, action_registry, handlers)
+    }
+
+    pub fn new_with_handlers(
+        keymap: Rc<RefCell<Keymap>>,
+        action_registry: Rc<ActionRegistry>,
+        handlers: Rc<RefCell<DispatchTreeHandlers>>,
+    ) -> Self {
         Self {
             node_stack: Vec::new(),
             context_stack: Vec::new(),
@@ -145,6 +179,7 @@ impl DispatchTree {
             nodes: Vec::new(),
             focusable_node_ids: FxHashMap::default(),
             view_node_ids: FxHashMap::default(),
+            handlers,
             keymap,
             action_registry,
         }
@@ -157,6 +192,28 @@ impl DispatchTree {
         self.nodes.clear();
         self.focusable_node_ids.clear();
         self.view_node_ids.clear();
+    }
+
+    pub fn begin_frame(&mut self) {
+        self.clear();
+        let mut handlers = self.handlers.borrow_mut();
+        handlers.generation = handlers.generation.wrapping_add(1);
+    }
+
+    pub fn end_frame(&mut self) {
+        let mut handlers = self.handlers.borrow_mut();
+        let generation = handlers.generation;
+        for node in &self.nodes {
+            if let Some(computed_id) = node.computed_id {
+                if let Some(entry) = handlers.handlers.get_mut(&computed_id) {
+                    entry.last_access = generation;
+                }
+            }
+        }
+
+        handlers
+            .handlers
+            .retain(|_, entry| entry.last_access == generation && !entry.is_empty());
     }
 
     pub fn len(&self) -> usize {
@@ -173,6 +230,16 @@ impl DispatchTree {
         });
         self.node_stack.push(node_id);
         node_id
+    }
+
+    pub fn push_node_with_id(&mut self, computed_id: ComputedElementId) -> DispatchNodeId {
+        let node_id = self.push_node();
+        self.nodes[node_id.0].computed_id = Some(computed_id);
+        node_id
+    }
+
+    pub fn clear_handlers_for(&mut self, computed_id: ComputedElementId) {
+        self.handlers.borrow_mut().handlers.remove(&computed_id);
     }
 
     pub fn set_active_node(&mut self, node_id: DispatchNodeId) {
@@ -256,6 +323,7 @@ impl DispatchTree {
         }
 
         let target = self.active_node();
+        target.computed_id = source.computed_id;
         target.key_listeners = mem::take(&mut source.key_listeners);
         target.action_listeners = mem::take(&mut source.action_listeners);
         target.modifiers_changed_listeners = mem::take(&mut source.modifiers_changed_listeners);
@@ -321,13 +389,31 @@ impl DispatchTree {
     }
 
     pub fn on_key_event(&mut self, listener: KeyListener) {
-        self.active_node().key_listeners.push(listener);
+        let computed_id = {
+            let node = self.active_node();
+            node.key_listeners.push(listener.clone());
+            node.computed_id
+        };
+
+        if let Some(computed_id) = computed_id {
+            self.with_handler_set_mut(computed_id, |handlers| {
+                handlers.key_listeners.push(listener);
+            });
+        }
     }
 
     pub fn on_modifiers_changed(&mut self, listener: ModifiersChangedListener) {
-        self.active_node()
-            .modifiers_changed_listeners
-            .push(listener);
+        let computed_id = {
+            let node = self.active_node();
+            node.modifiers_changed_listeners.push(listener.clone());
+            node.computed_id
+        };
+
+        if let Some(computed_id) = computed_id {
+            self.with_handler_set_mut(computed_id, |handlers| {
+                handlers.modifiers_changed_listeners.push(listener);
+            });
+        }
     }
 
     pub fn on_action(
@@ -335,12 +421,21 @@ impl DispatchTree {
         action_type: TypeId,
         listener: Rc<dyn Fn(&dyn Any, DispatchPhase, &mut Window, &mut App)>,
     ) {
-        self.active_node()
-            .action_listeners
-            .push(DispatchActionListener {
-                action_type,
-                listener,
+        let action_listener = DispatchActionListener {
+            action_type,
+            listener,
+        };
+        let computed_id = {
+            let node = self.active_node();
+            node.action_listeners.push(action_listener.clone());
+            node.computed_id
+        };
+
+        if let Some(computed_id) = computed_id {
+            self.with_handler_set_mut(computed_id, |handlers| {
+                handlers.action_listeners.push(action_listener);
             });
+        }
     }
 
     pub fn focus_contains(&self, parent: FocusId, child: FocusId) -> bool {
@@ -602,6 +697,19 @@ impl DispatchTree {
     fn active_node(&mut self) -> &mut DispatchNode {
         let active_node_id = self.active_node_id().unwrap();
         &mut self.nodes[active_node_id.0]
+    }
+
+    fn with_handler_set_mut(
+        &mut self,
+        computed_id: ComputedElementId,
+        f: impl FnOnce(&mut HandlerSet),
+    ) {
+        let mut handlers = self.handlers.borrow_mut();
+        let entry = handlers
+            .handlers
+            .entry(computed_id)
+            .or_insert_with(HandlerSet::default);
+        f(entry);
     }
 
     pub fn focusable_node_id(&self, target: FocusId) -> Option<DispatchNodeId> {

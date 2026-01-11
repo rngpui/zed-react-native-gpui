@@ -115,6 +115,12 @@ pub trait Element: 'static + IntoElement {
         cx: &mut App,
     );
 
+    /// Hash of the element's inputs for retained element caching.
+    /// Returns 0 to disable caching (always repaint).
+    fn element_hash(&self) -> u64 {
+        0
+    }
+
     /// Optionally provide a hash of the content that affects this element's rendering.
     /// Returning `None` disables primitive caching for this element.
     fn content_hash(
@@ -392,6 +398,12 @@ enum ElementDrawPhase<RequestLayoutState, PrepaintState> {
         inspector_id: Option<InspectorElementId>,
         request_layout: RequestLayoutState,
     },
+    Cached {
+        layout_id: LayoutId,
+        global_id: Option<GlobalElementId>,
+        inspector_id: Option<InspectorElementId>,
+        request_layout: RequestLayoutState,
+    },
     LayoutComputed {
         layout_id: LayoutId,
         global_id: Option<GlobalElementId>,
@@ -400,12 +412,18 @@ enum ElementDrawPhase<RequestLayoutState, PrepaintState> {
         request_layout: RequestLayoutState,
     },
     Prepaint {
+        layout_id: LayoutId,
         node_id: DispatchNodeId,
         global_id: Option<GlobalElementId>,
         inspector_id: Option<InspectorElementId>,
         bounds: Bounds<Pixels>,
         request_layout: RequestLayoutState,
         prepaint: PrepaintState,
+    },
+    CachedPrepaint {
+        layout_id: LayoutId,
+        global_id: Option<GlobalElementId>,
+        inspector_id: Option<InspectorElementId>,
     },
     Painted,
 }
@@ -454,12 +472,21 @@ impl<E: Element> Drawable<E> {
                     window.element_id_stack.pop();
                 }
 
-                self.phase = ElementDrawPhase::RequestLayout {
-                    layout_id,
-                    global_id,
-                    inspector_id,
-                    request_layout,
-                };
+                if window.is_layout_cached(layout_id) {
+                    self.phase = ElementDrawPhase::Cached {
+                        layout_id,
+                        global_id,
+                        inspector_id,
+                        request_layout,
+                    };
+                } else {
+                    self.phase = ElementDrawPhase::RequestLayout {
+                        layout_id,
+                        global_id,
+                        inspector_id,
+                        request_layout,
+                    };
+                }
                 layout_id
             }
             _ => panic!("must call request_layout only once"),
@@ -491,7 +518,11 @@ impl<E: Element> Drawable<E> {
                 window.begin_element_prepaint_identity(computed_id);
 
                 let bounds = window.layout_bounds(layout_id);
-                let node_id = window.next_frame.dispatch_tree.push_node();
+                let node_id = window
+                    .next_frame
+                    .dispatch_tree
+                    .push_node_with_id(computed_id);
+                let prepaint_start = window.prepaint_index();
                 let prepaint = self.element.prepaint(
                     global_id.as_ref(),
                     inspector_id.as_ref(),
@@ -500,6 +531,8 @@ impl<E: Element> Drawable<E> {
                     window,
                     cx,
                 );
+                let prepaint_end = window.prepaint_index();
+                window.set_cached_prepaint_range(layout_id, prepaint_start..prepaint_end);
                 window.next_frame.dispatch_tree.pop_node();
 
                 window.end_element_prepaint_identity();
@@ -509,6 +542,7 @@ impl<E: Element> Drawable<E> {
                 }
 
                 self.phase = ElementDrawPhase::Prepaint {
+                    layout_id,
                     node_id,
                     global_id,
                     inspector_id,
@@ -517,17 +551,85 @@ impl<E: Element> Drawable<E> {
                     prepaint,
                 };
             }
+            ElementDrawPhase::Cached {
+                layout_id,
+                global_id,
+                inspector_id,
+                mut request_layout,
+            } => {
+                if let Some(element_id) = self.element.id() {
+                    window.element_id_stack.push(element_id);
+                    debug_assert_eq!(&*global_id.as_ref().unwrap().0, &*window.element_id_stack);
+                }
+
+                let computed_id = window.compute_element_id::<E>(global_id.as_ref());
+                window.begin_element_prepaint_identity(computed_id);
+
+                let cached_prepaint = window.cached_prepaint_range(layout_id);
+                let cached_paint = window.cached_paint_range(layout_id);
+
+                if let (Some(prepaint_range), Some(_paint_range)) = (cached_prepaint, cached_paint)
+                {
+                    let prepaint_start = window.prepaint_index();
+                    window.reuse_prepaint(prepaint_range);
+                    let prepaint_end = window.prepaint_index();
+                    window.set_cached_prepaint_range(layout_id, prepaint_start..prepaint_end);
+
+                    window.end_element_prepaint_identity();
+
+                    if global_id.is_some() {
+                        window.element_id_stack.pop();
+                    }
+
+                    self.phase = ElementDrawPhase::CachedPrepaint {
+                        layout_id,
+                        global_id,
+                        inspector_id,
+                    };
+                } else {
+                    let bounds = window.layout_bounds(layout_id);
+                    let node_id = window
+                        .next_frame
+                        .dispatch_tree
+                        .push_node_with_id(computed_id);
+                    let prepaint_start = window.prepaint_index();
+                    let prepaint = self.element.prepaint(
+                        global_id.as_ref(),
+                        inspector_id.as_ref(),
+                        bounds,
+                        &mut request_layout,
+                        window,
+                        cx,
+                    );
+                    let prepaint_end = window.prepaint_index();
+                    window.set_cached_prepaint_range(layout_id, prepaint_start..prepaint_end);
+                    window.next_frame.dispatch_tree.pop_node();
+
+                    window.end_element_prepaint_identity();
+
+                    if global_id.is_some() {
+                        window.element_id_stack.pop();
+                    }
+
+                    self.phase = ElementDrawPhase::Prepaint {
+                        layout_id,
+                        node_id,
+                        global_id,
+                        inspector_id,
+                        bounds,
+                        request_layout,
+                        prepaint,
+                    };
+                }
+            }
             _ => panic!("must call request_layout before prepaint"),
         }
     }
 
-    pub(crate) fn paint(
-        &mut self,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (E::RequestLayoutState, E::PrepaintState) {
+    pub(crate) fn paint(&mut self, window: &mut Window, cx: &mut App) {
         match mem::take(&mut self.phase) {
             ElementDrawPhase::Prepaint {
+                layout_id,
                 node_id,
                 global_id,
                 inspector_id,
@@ -545,6 +647,10 @@ impl<E: Element> Drawable<E> {
                 // Compute element ID and maintain path stack for ALL elements.
                 // This ensures consistent child indices for cache key stability.
                 let computed_id = window.compute_element_id::<E>(global_id.as_ref());
+                window
+                    .next_frame
+                    .dispatch_tree
+                    .clear_handlers_for(computed_id);
 
                 // Only do caching overhead if the element supports it (non-zero hash)
                 let input_hash = self
@@ -554,6 +660,7 @@ impl<E: Element> Drawable<E> {
 
                 window.next_frame.dispatch_tree.set_active_node(node_id);
 
+                let paint_start = window.paint_index();
                 if input_hash != 0 {
                     // Element supports caching - do full per-element tracking
                     use crate::display_list::PaintCacheResult;
@@ -595,12 +702,45 @@ impl<E: Element> Drawable<E> {
                     window.pop_element_path();
                 }
 
+                let paint_end = window.paint_index();
+                window.set_cached_paint_range(layout_id, paint_start..paint_end);
+                window.clear_layout_dirty_flags(layout_id);
+
                 if global_id.is_some() {
                     window.element_id_stack.pop();
                 }
 
                 self.phase = ElementDrawPhase::Painted;
-                (request_layout, prepaint)
+            }
+            ElementDrawPhase::CachedPrepaint {
+                layout_id,
+                global_id,
+                inspector_id: _,
+            } => {
+                if let Some(element_id) = self.element.id() {
+                    window.element_id_stack.push(element_id);
+                    debug_assert_eq!(&*global_id.as_ref().unwrap().0, &*window.element_id_stack);
+                }
+
+                let computed_id = window.compute_element_id::<E>(global_id.as_ref());
+                if let Some(global_id) = global_id.as_ref() {
+                    window.reuse_scene_display_list(global_id);
+                }
+                window.reuse_display_list_subtree(computed_id);
+                let paint_start = window.paint_index();
+                if let Some(paint_range) = window.cached_paint_range(layout_id) {
+                    window.reuse_paint(paint_range);
+                }
+                let paint_end = window.paint_index();
+                window.set_cached_paint_range(layout_id, paint_start..paint_end);
+                window.pop_element_path();
+                window.clear_layout_dirty_flags(layout_id);
+
+                if global_id.is_some() {
+                    window.element_id_stack.pop();
+                }
+
+                self.phase = ElementDrawPhase::Painted;
             }
             _ => panic!("must call prepaint before paint"),
         }
@@ -648,6 +788,21 @@ impl<E: Element> Drawable<E> {
                     global_id,
                     inspector_id,
                     available_space,
+                    request_layout,
+                };
+                layout_id
+            }
+            ElementDrawPhase::Cached {
+                layout_id,
+                global_id,
+                inspector_id,
+                request_layout,
+            } => {
+                window.compute_layout(layout_id, available_space, cx);
+                self.phase = ElementDrawPhase::Cached {
+                    layout_id,
+                    global_id,
+                    inspector_id,
                     request_layout,
                 };
                 layout_id

@@ -269,6 +269,7 @@ impl Element for UniformList {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let max_items = self.item_count;
         let item_size = self.measure_item(None, window, cx);
+        let element_hash = self.element_hash();
         let layout_id = self.interactivity.request_layout(
             global_id,
             inspector_id,
@@ -305,7 +306,9 @@ impl Element for UniformList {
                 ListSizingBehavior::Auto => window
                     .with_text_style(style.text_style().cloned(), |window| {
                         if let Some(id) = global_id {
-                            window.request_layout_with_id(id, style, None, cx)
+                            let (layout_id, _is_cached) =
+                                window.request_layout_with_id(id, element_hash, style, None, cx);
+                            layout_id
                         } else {
                             window.request_layout(style, None, cx)
                         }

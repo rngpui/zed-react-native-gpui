@@ -25,8 +25,16 @@ struct ViewCacheKey {
     text_style: TextStyle,
 }
 
+/// State indicating whether we need to call render() or can use retained element.
+pub struct EntityLayoutState {
+    /// The element to use - either freshly rendered or taken from retained storage.
+    element: Option<AnyElement>,
+    /// Whether we used a retained element (for returning it after paint).
+    used_retained: bool,
+}
+
 impl<V: Render> Element for Entity<V> {
-    type RequestLayoutState = AnyElement;
+    type RequestLayoutState = EntityLayoutState;
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
@@ -45,25 +53,66 @@ impl<V: Render> Element for Entity<V> {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let entity_id = self.entity_id();
+
+        // Check if we can use retained element (view not dirty, has retained element)
+        let is_dirty = window.is_view_dirty(entity_id);
+
+        if !is_dirty {
+            // Try to use retained element
+            if let Some(retained) = window.get_retained_view_mut(entity_id) {
+                if let Some(mut element) = retained.take_element() {
+                    // Reuse retained element - skip render()!
+                    let layout_id = window.with_rendered_view(entity_id, |window| {
+                        element.request_layout(window, cx)
+                    });
+                    window.register_view_layout(entity_id, layout_id);
+                    window.record_view_skipped();
+                    return (
+                        layout_id,
+                        EntityLayoutState {
+                            element: Some(element),
+                            used_retained: true,
+                        },
+                    );
+                }
+            }
+        }
+
+        // Need to call render() - either view is dirty or no retained element
         let mut element = self.update(cx, |view, cx| view.render(window, cx).into_any_element());
         let layout_id = window.with_rendered_view(entity_id, |window| {
             element.request_layout(window, cx)
         });
         window.register_view_layout(entity_id, layout_id);
-        (layout_id, element)
+        window.record_view_rendered();
+
+        (
+            layout_id,
+            EntityLayoutState {
+                element: Some(element),
+                used_retained: false,
+            },
+        )
     }
 
     fn prepaint(
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
-        element: &mut Self::RequestLayoutState,
+        bounds: Bounds<Pixels>,
+        state: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) {
-        window.set_view_id(self.entity_id());
-        window.with_rendered_view(self.entity_id(), |window| element.prepaint(window, cx));
+        let entity_id = self.entity_id();
+        window.set_view_id(entity_id);
+        if let Some(element) = &mut state.element {
+            window.with_rendered_view(entity_id, |window| element.prepaint(window, cx));
+        }
+
+        // Store bounds in retained view for cache hit detection
+        let retained = window.get_or_create_retained_view::<V>(entity_id);
+        retained.bounds = Some(bounds);
     }
 
     fn paint(
@@ -71,12 +120,21 @@ impl<V: Render> Element for Entity<V> {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
-        element: &mut Self::RequestLayoutState,
+        state: &mut Self::RequestLayoutState,
         _: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
-        window.with_rendered_view(self.entity_id(), |window| element.paint(window, cx));
+        let entity_id = self.entity_id();
+        if let Some(element) = &mut state.element {
+            window.with_rendered_view(entity_id, |window| element.paint(window, cx));
+        }
+
+        // Store the element back in retained view for next frame
+        if let Some(element) = state.element.take() {
+            let retained = window.get_or_create_retained_view::<V>(entity_id);
+            retained.store_element(element);
+        }
     }
 }
 

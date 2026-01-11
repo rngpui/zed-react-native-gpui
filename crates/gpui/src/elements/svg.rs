@@ -67,6 +67,7 @@ impl Element for Svg {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        let element_hash = self.element_hash();
         let layout_id = self.interactivity.request_layout(
             global_id,
             inspector_id,
@@ -74,7 +75,9 @@ impl Element for Svg {
             cx,
             |global_id, style, window, cx| {
                 if let Some(id) = global_id {
-                    window.request_layout_with_id(id, style, None, cx)
+                    let (layout_id, _is_cached) =
+                        window.request_layout_with_id(id, element_hash, style, None, cx);
+                    layout_id
                 } else {
                     window.request_layout(style, None, cx)
                 }

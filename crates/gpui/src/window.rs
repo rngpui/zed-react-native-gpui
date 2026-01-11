@@ -4,7 +4,8 @@ use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Asset,
     AsyncWindowContext, AvailableSpace, Background, BackdropBlur, BorderStyle, Bounds, BoxShadow,
     Capslock, Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
-    DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
+    DispatchNodeId, DispatchTree, DispatchTreeHandlers, DisplayId, Edges, Effect, Entity, EntityId,
+    EventEmitter,
     FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
     KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
     LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent,
@@ -1177,6 +1178,9 @@ pub struct Window {
     /// Cache of view sizes for automatic view caching.
     /// Allows skipping render() in request_layout when views are clean.
     pub(crate) view_cache_sizes: FxHashMap<EntityId, Size<Pixels>>,
+    /// Retained element trees for views. Enables O(changed) frame work by
+    /// storing element trees persistently and only calling render() for dirty views.
+    pub(crate) retained_views: FxHashMap<EntityId, crate::retained::RetainedView>,
     /// Mapping from view EntityId to its root LayoutId in the layout tree.
     /// Used by Phase 2 dirty flag propagation to mark layout nodes when views call notify().
     view_to_layout: FxHashMap<EntityId, LayoutId>,
@@ -1676,6 +1680,8 @@ impl Window {
 
         platform_window.map_window().unwrap();
 
+        let dispatch_tree_handlers = Rc::new(RefCell::new(DispatchTreeHandlers::default()));
+
         Ok(Window {
             handle,
             invalidator,
@@ -1698,8 +1704,16 @@ impl Window {
             clip_node_stack: Vec::new(),
             element_opacity: 1.0,
             requested_autoscroll: None,
-            rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
-            next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            rendered_frame: Frame::new(DispatchTree::new_with_handlers(
+                cx.keymap.clone(),
+                cx.actions.clone(),
+                dispatch_tree_handlers.clone(),
+            )),
+            next_frame: Frame::new(DispatchTree::new_with_handlers(
+                cx.keymap.clone(),
+                cx.actions.clone(),
+                dispatch_tree_handlers,
+            )),
             text_shape_cache: crate::text_shape_cache::TextShapeCache::new(DEFAULT_TEXT_SHAPE_CACHE_ENTRIES),
             measure_cache: crate::measure_cache::MeasureCache::new(DEFAULT_MEASURE_CACHE_ENTRIES),
             inside_tiled_scroll_container: false,
@@ -1717,6 +1731,7 @@ impl Window {
             next_render_layer_seq: 0,
             dirty_views: FxHashSet::default(),
             view_cache_sizes: FxHashMap::default(),
+            retained_views: FxHashMap::default(),
             view_to_layout: FxHashMap::default(),
             view_stats: ViewStats::default(),
             subtree_cache_stats: SubtreeCacheStats::default(),
@@ -1807,6 +1822,28 @@ impl Window {
                 break;
             }
         }
+    }
+
+    /// Get the retained view for an entity, creating it if it doesn't exist.
+    pub(crate) fn get_or_create_retained_view<V: 'static>(&mut self, entity_id: EntityId) -> &mut crate::retained::RetainedView {
+        self.retained_views
+            .entry(entity_id)
+            .or_insert_with(crate::retained::RetainedView::new::<V>)
+    }
+
+    /// Get the retained view for an entity if it exists.
+    pub(crate) fn get_retained_view(&self, entity_id: EntityId) -> Option<&crate::retained::RetainedView> {
+        self.retained_views.get(&entity_id)
+    }
+
+    /// Get mutable reference to the retained view for an entity.
+    pub(crate) fn get_retained_view_mut(&mut self, entity_id: EntityId) -> Option<&mut crate::retained::RetainedView> {
+        self.retained_views.get_mut(&entity_id)
+    }
+
+    /// Check if a view is dirty and needs to call render().
+    pub(crate) fn is_view_dirty(&self, entity_id: EntityId) -> bool {
+        self.dirty_views.contains(&entity_id) || self.refreshing
     }
 
     /// Registers a callback to be invoked when the window appearance changes.
@@ -2670,6 +2707,7 @@ impl Window {
     pub fn draw(&mut self, cx: &mut App) {
         self.invalidate_entities();
         self.layout_engine.as_mut().unwrap().begin_frame();
+        self.next_frame.dispatch_tree.begin_frame();
         // Phase 2: Mark dirty views in the layout engine for incremental updates
         self.mark_dirty_views_in_layout_engine();
         // Phase 20: Swap display lists in layers for per-element caching
@@ -2685,6 +2723,10 @@ impl Window {
         // Phase 5: Reset frame stats
         self.view_stats.reset();
         self.subtree_cache_stats.reset();
+        // Retained views: reset per-frame state
+        for retained in self.retained_views.values_mut() {
+            retained.begin_frame();
+        }
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
         self.invalidator.set_dirty(false);
@@ -2708,6 +2750,7 @@ impl Window {
                 .set_input_handler(input_handler.unwrap());
         }
 
+        self.next_frame.dispatch_tree.end_frame();
         self.layout_engine.as_mut().unwrap().end_frame();
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
@@ -3551,6 +3594,28 @@ impl Window {
             range.start.scene_index..range.end.scene_index,
             &self.rendered_frame.scene,
         );
+    }
+
+    pub(crate) fn reuse_display_list_subtree(
+        &mut self,
+        id: crate::display_list::ComputedElementId,
+    ) -> bool {
+        let layer = self.layer_tree.current_layer_mut();
+        let Some(prev_list) = layer.previous_display_list.as_ref() else {
+            return false;
+        };
+        let Some(ref mut arc) = layer.display_list else {
+            return false;
+        };
+        Arc::make_mut(arc).reuse_subtree_from_previous(prev_list, id)
+    }
+
+    pub(crate) fn reuse_scene_display_list(&mut self, id: &GlobalElementId) {
+        if let Some(display_list) = self.rendered_frame.scene.get_display_list(id) {
+            self.next_frame
+                .scene
+                .insert_display_list(id.clone(), Arc::clone(display_list));
+        }
     }
 
     /// Look up a cached subtree entry, distinguishing between full hits and offset-only hits.
@@ -5681,10 +5746,11 @@ impl Window {
     pub fn request_layout_with_id(
         &mut self,
         element_id: &GlobalElementId,
+        element_hash: u64,
         style: Style,
         children: impl IntoIterator<Item = LayoutId>,
         cx: &mut App,
-    ) -> LayoutId {
+    ) -> (LayoutId, bool) {
         self.invalidator.debug_assert_prepaint();
 
         cx.layout_id_buffer.clear();
@@ -5699,12 +5765,17 @@ impl Window {
             std::any::TypeId::of::<()>(),
         );
 
+        // Pass a default element_offset since layout cache check is currently disabled
+        // in Div (see note in div.rs request_layout about why).
+        let element_offset = point(px(0.0), px(0.0));
         self.layout_engine.as_mut().unwrap().request_layout_with_id(
             computed_id,
+            element_hash,
             style,
             rem_size,
             scale_factor,
             &cx.layout_id_buffer,
+            element_offset,
         )
     }
 
@@ -5715,9 +5786,10 @@ impl Window {
     pub fn request_measured_layout_with_id<F>(
         &mut self,
         element_id: &GlobalElementId,
+        element_hash: u64,
         style: Style,
         measure: F,
-    ) -> LayoutId
+    ) -> (LayoutId, bool)
     where
         F: FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
             + 'static,
@@ -5735,12 +5807,105 @@ impl Window {
         self.layout_engine
             .as_mut()
             .unwrap()
-            .request_measured_layout_with_id(computed_id, style, rem_size, scale_factor, measure)
+            .request_measured_layout_with_id(
+                computed_id,
+                element_hash,
+                style,
+                rem_size,
+                scale_factor,
+                measure,
+            )
+    }
+
+    /// Check if an element's layout is cached and return cached child layout IDs.
+    ///
+    /// This should be called BEFORE iterating children to skip child processing entirely
+    /// on cache hit. Returns `Some(child_layout_ids)` if the element is cached with the
+    /// same hash and no dirty flags, `None` if children need to be processed.
+    ///
+    /// Usage pattern:
+    /// ```ignore
+    /// if let Some(cached_children) = window.check_element_cache(id, hash) {
+    ///     // Cache hit: use cached children, skip iteration
+    ///     let layout_id = window.request_layout_with_cached(id, style, &cached_children);
+    ///     return (layout_id, DivFrameState::cached(cached_children));
+    /// }
+    /// // Cache miss: iterate children normally
+    /// ```
+    /// NOTE: This function is currently unused because layout cache checking in Div
+    /// was disabled. The layout cache check cannot work without true retained elements
+    /// because AnyElement objects are recreated fresh each frame in render(), and
+    /// skipping their request_layout leaves them uninitialized for prepaint/paint.
+    pub fn check_element_cache(
+        &mut self,
+        element_id: &GlobalElementId,
+        element_hash: u64,
+    ) -> Option<smallvec::SmallVec<[LayoutId; 8]>> {
+        let computed_id = crate::display_list::ComputedElementId::from_global(
+            element_id,
+            std::any::TypeId::of::<()>(),
+        );
+        // Pass a default element_offset - this function is currently unused
+        let element_offset = point(px(0.0), px(0.0));
+        self.layout_engine
+            .as_mut()?
+            .check_element_cache(&computed_id, element_hash, element_offset)
     }
 
     /// Returns layout cache statistics and resets the counters.
     pub fn take_layout_cache_stats(&mut self) -> crate::taffy::LayoutCacheStats {
         self.layout_engine.as_mut().unwrap().take_stats()
+    }
+
+    pub(crate) fn is_layout_cached(&self, layout_id: LayoutId) -> bool {
+        self.layout_engine
+            .as_ref()
+            .unwrap()
+            .was_cached_this_frame(layout_id)
+    }
+
+    pub(crate) fn cached_prepaint_range(
+        &self,
+        layout_id: LayoutId,
+    ) -> Option<Range<PrepaintStateIndex>> {
+        self.layout_engine
+            .as_ref()
+            .unwrap()
+            .get_cached_prepaint(layout_id)
+            .map(|cached| cached.range.clone())
+    }
+
+    pub(crate) fn cached_paint_range(
+        &self,
+        layout_id: LayoutId,
+    ) -> Option<Range<PaintIndex>> {
+        self.layout_engine
+            .as_ref()
+            .unwrap()
+            .get_cached_paint(layout_id)
+            .map(|cached| cached.range.clone())
+    }
+
+    pub(crate) fn set_cached_prepaint_range(
+        &mut self,
+        layout_id: LayoutId,
+        range: Range<PrepaintStateIndex>,
+    ) {
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .set_cached_prepaint(layout_id, crate::taffy::CachedPrepaint { range });
+    }
+
+    pub(crate) fn set_cached_paint_range(&mut self, layout_id: LayoutId, range: Range<PaintIndex>) {
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .set_cached_paint(layout_id, crate::taffy::CachedPaint { range });
+    }
+
+    pub(crate) fn clear_layout_dirty_flags(&mut self, layout_id: LayoutId) {
+        self.layout_engine.as_mut().unwrap().clear_dirty_flags(layout_id);
     }
 
     /// Compute the layout for the given id within the given available space.

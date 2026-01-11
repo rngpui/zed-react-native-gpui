@@ -1000,6 +1000,63 @@ impl DisplayList {
         Some(self.calculate_bounds_for_range(start_index, end_index))
     }
 
+    /// Reuse a cached subtree from the previous display list.
+    ///
+    /// This copies the subtree's items and element entries into the current list,
+    /// adjusting ranges based on the current insertion offset.
+    pub fn reuse_subtree_from_previous(
+        &mut self,
+        prev_list: &DisplayList,
+        root_id: ComputedElementId,
+    ) -> bool {
+        let Some(root_entry) = prev_list.get_element_entry(&root_id) else {
+            return false;
+        };
+
+        let insertion_start = self.items.len();
+        self.copy_items_from_range(prev_list, root_entry.subtree_items.clone());
+
+        let offset = insertion_start as isize - root_entry.subtree_items.start as isize;
+        self.copy_element_entries_recursive(prev_list, root_id, offset);
+        self.record_subtree_skip();
+        true
+    }
+
+    fn copy_element_entries_recursive(
+        &mut self,
+        prev_list: &DisplayList,
+        id: ComputedElementId,
+        offset: isize,
+    ) {
+        let Some(entry) = prev_list.get_element_entry(&id) else {
+            return;
+        };
+
+        fn shift(range: &Range<usize>, offset: isize) -> Range<usize> {
+            let start = (range.start as isize + offset) as usize;
+            let end = (range.end as isize + offset) as usize;
+            start..end
+        }
+
+        self.element_entries.insert(
+            id,
+            ElementEntry {
+                own_items: shift(&entry.own_items, offset),
+                items_after_children: shift(&entry.items_after_children, offset),
+                subtree_items: shift(&entry.subtree_items, offset),
+                own_bounds: entry.own_bounds,
+                input_hash: entry.input_hash,
+                children: entry.children.clone(),
+                subtree_cache_valid: entry.subtree_cache_valid,
+                has_event_handlers: entry.has_event_handlers,
+            },
+        );
+
+        for child in &entry.children {
+            self.copy_element_entries_recursive(prev_list, *child, offset);
+        }
+    }
+
     /// Check if we're currently inside an element paint operation (Phase 20).
     pub fn is_painting_element(&self) -> bool {
         !self.element_paint_stack.is_empty()
