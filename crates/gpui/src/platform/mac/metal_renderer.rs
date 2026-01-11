@@ -2376,14 +2376,18 @@ impl MetalRenderer {
             return;
         }
 
-        // Wait for all submitted work to complete
+        // Wait for all submitted work to complete, collecting results as they arrive.
         // (For now we block to maintain same behavior as rayon - Phase 3 will make this async)
+        let mut results = Vec::new();
         while self.raster_worker_pool.in_flight_count() > 0 {
-            std::thread::sleep(std::time::Duration::from_micros(100));
+            // Collect any completed results (this decrements in_flight_count)
+            results.extend(self.raster_worker_pool.collect_completed());
+            if self.raster_worker_pool.in_flight_count() > 0 {
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            }
         }
-
-        // Collect all completed results
-        let results = self.raster_worker_pool.collect_completed();
+        // Collect any remaining results
+        results.extend(self.raster_worker_pool.collect_completed());
 
         eprintln!("[RASTER] Collected {} rasterization results", results.len());
 
