@@ -18,8 +18,6 @@ pub mod metal_renderer;
 pub mod texture_cache;
 #[cfg(not(feature = "macos-blade"))]
 pub mod tile_cache;
-#[cfg(not(feature = "macos-blade"))]
-pub mod tile_rasterizer;
 
 use core_video::image_buffer::CVImageBuffer;
 #[cfg(not(feature = "macos-blade"))]

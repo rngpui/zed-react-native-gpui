@@ -416,9 +416,6 @@ impl Drop for RasterWorkerPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::display_list::DisplayList;
-    use crate::scene::TileCoord;
-    use crate::GlobalElementId;
 
     #[test]
     fn test_worker_pool_creation() {

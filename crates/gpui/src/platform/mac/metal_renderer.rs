@@ -1,6 +1,9 @@
 use super::metal_atlas::MetalAtlas;
 use super::tile_cache::TileCache;
-use super::tile_rasterizer::{rasterize_tiles_parallel, TilePriority, TileRasterJob};
+use crate::raster_worker_pool::{
+    RasterResultType, RasterWork, RasterWorkType, RasterWorkerPool,
+};
+use crate::task_graph::TaskId;
 use crate::{
     AtlasTextureId, BackdropBlur, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite,
     PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow,
@@ -308,6 +311,10 @@ pub(crate) struct MetalRenderer {
     texture_cache: super::texture_cache::TextureCacheManager,
     /// Tile cache for scroll container tiled rendering.
     tile_cache: TileCache,
+    /// Dedicated worker pool for tile rasterization (Phase 2).
+    raster_worker_pool: RasterWorkerPool,
+    /// Next task ID for rasterization jobs.
+    next_task_id: u64,
 }
 
 #[repr(C)]
@@ -510,6 +517,8 @@ impl MetalRenderer {
             path_sample_count: PATH_SAMPLE_COUNT,
             texture_cache: super::texture_cache::TextureCacheManager::new(),
             tile_cache: TileCache::new(device),
+            raster_worker_pool: RasterWorkerPool::new(),
+            next_task_id: 1,
         }
     }
 
@@ -2272,9 +2281,12 @@ impl MetalRenderer {
             }
         }
 
-        // Collect tiles that need rendering as TileRasterJobs
-        let mut jobs: Vec<TileRasterJob> = Vec::new();
+        // Collect tiles that need rendering and submit to worker pool
+        let mut submitted_count = 0;
         let mut display_list_missing_count = 0;
+
+        // Tile size in scaled pixels for bounds calculation
+        let tile_size_scaled = super::tile_cache::TILE_SIZE as f32;
 
         for sprite in tile_sprites {
             let container_id = &sprite.tile_key.container_id;
@@ -2313,12 +2325,36 @@ impl MetalRenderer {
             );
 
             if needs_render || invalidated {
-                jobs.push(TileRasterJob {
-                    container_id: container_id.clone(),
-                    coord,
-                    display_list: Arc::clone(display_list),
-                    priority: TilePriority::VISIBLE,
-                });
+                // Calculate tile bounds in scaled pixels
+                let tile_bounds = Bounds {
+                    origin: Point {
+                        x: ScaledPixels(coord.x as f32 * tile_size_scaled),
+                        y: ScaledPixels(coord.y as f32 * tile_size_scaled),
+                    },
+                    size: Size {
+                        width: ScaledPixels(tile_size_scaled),
+                        height: ScaledPixels(tile_size_scaled),
+                    },
+                };
+
+                // Create work item for the worker pool
+                let task_id = TaskId(self.next_task_id);
+                self.next_task_id += 1;
+
+                let work = RasterWork {
+                    task_id,
+                    work_type: RasterWorkType::TileRaster {
+                        tile_key: sprite.tile_key.clone(),
+                        display_list: Arc::clone(display_list),
+                        tile_bounds,
+                        scale_factor,
+                    },
+                };
+
+                // Submit to worker pool (may fail if at capacity, but we'll collect results anyway)
+                if self.raster_worker_pool.submit(work) {
+                    submitted_count += 1;
+                }
             }
         }
 
@@ -2334,15 +2370,22 @@ impl MetalRenderer {
             self.tile_cache.clear_invalidated_tiles(&container_id);
         }
 
-        eprintln!("[RASTER] Queued {} rasterization jobs", jobs.len());
+        eprintln!("[RASTER] Submitted {} rasterization jobs to worker pool", submitted_count);
 
-        if jobs.is_empty() {
+        if submitted_count == 0 {
             return;
         }
 
-        // Parallel CPU rasterization using rayon
-        // This is the performance-critical change: multiple tiles rasterize concurrently
-        let results = rasterize_tiles_parallel(jobs, scale_factor);
+        // Wait for all submitted work to complete
+        // (For now we block to maintain same behavior as rayon - Phase 3 will make this async)
+        while self.raster_worker_pool.in_flight_count() > 0 {
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+
+        // Collect all completed results
+        let results = self.raster_worker_pool.collect_completed();
+
+        eprintln!("[RASTER] Collected {} rasterization results", results.len());
 
         // P1: Batch all tiles into ONE command buffer.
         // This reduces command buffer creation overhead and improves GPU utilization.
@@ -2350,12 +2393,14 @@ impl MetalRenderer {
         // tiles are ready before the main pass uses them.
         let command_buffer = self.command_queue.new_command_buffer();
         for result in results {
-            self.encode_tile_to_command_buffer(
-                &result.container_id,
-                result.coord,
-                &result.raster_result,
-                command_buffer,
-            );
+            if let RasterResultType::TileRaster { tile_key, raster_result } = result.result_type {
+                self.encode_tile_to_command_buffer(
+                    &tile_key.container_id,
+                    tile_key.coord,
+                    &raster_result,
+                    command_buffer,
+                );
+            }
         }
         command_buffer.commit();
     }
