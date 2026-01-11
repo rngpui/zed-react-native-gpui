@@ -3,6 +3,24 @@
 
 using namespace metal;
 
+struct SceneTransform {
+  float2 offset;
+  float scale;
+  uint parent_index;
+};
+
+struct ResolvedTransform {
+  float2 offset;
+  float scale;
+};
+
+ResolvedTransform resolve_transform(uint transform_index,
+                                   constant SceneTransform *transforms);
+float2 apply_context_transform(float2 position, uint transform_index,
+                               constant SceneTransform *transforms);
+float2 apply_context_transform_inverse(float2 position, uint transform_index,
+                                       constant SceneTransform *transforms);
+
 float4 hsla_to_rgba(Hsla hsla);
 float srgb_to_linear_component(float a);
 float3 srgb_to_linear(float3 srgb);
@@ -14,8 +32,14 @@ float4 linear_srgb_to_oklab(float4 color);
 float4 oklab_to_linear_srgb(float4 color);
 float4 to_device_position(float2 unit_vertex, Bounds_ScaledPixels bounds,
                           constant Size_DevicePixels *viewport_size);
+float4 to_device_position_with_context(float2 unit_vertex, Bounds_ScaledPixels bounds,
+                          uint transform_index,
+                          constant SceneTransform *transforms,
+                          constant Size_DevicePixels *viewport_size);
 float4 to_device_position_transformed(float2 unit_vertex, Bounds_ScaledPixels bounds,
                           TransformationMatrix transformation,
+                          uint transform_index,
+                          constant SceneTransform *transforms,
                           constant Size_DevicePixels *input_viewport_size);
 float2 apply_transform(float2 position, TransformationMatrix transformation);
 
@@ -23,8 +47,15 @@ float2 to_tile_position(float2 unit_vertex, AtlasTile tile,
                         constant Size_DevicePixels *atlas_size);
 float4 distance_from_clip_rect(float2 unit_vertex, Bounds_ScaledPixels bounds,
                                Bounds_ScaledPixels clip_bounds);
+float4 distance_from_clip_rect_with_context(float2 unit_vertex, Bounds_ScaledPixels bounds,
+                               Bounds_ScaledPixels clip_bounds,
+                               uint transform_index,
+                               constant SceneTransform *transforms);
 float4 distance_from_clip_rect_transformed(float2 unit_vertex, Bounds_ScaledPixels bounds,
-                               Bounds_ScaledPixels clip_bounds, TransformationMatrix transformation);
+                               Bounds_ScaledPixels clip_bounds,
+                               TransformationMatrix transformation,
+                               uint transform_index,
+                               constant SceneTransform *transforms);
 float2 to_local_position(float2 world, TransformationMatrix transformation);
 float corner_dash_velocity(float dv1, float dv2);
 float dash_alpha(float t, float period, float length, float dash_velocity,
@@ -81,15 +112,17 @@ struct QuadFragmentInput {
 	                                    [[buffer(QuadInputIndex_Quads)]],
 	                                    constant TransformationMatrix *quad_transforms
 	                                    [[buffer(QuadInputIndex_Transforms)]],
+	                                    constant SceneTransform *context_transforms
+	                                    [[buffer(QuadInputIndex_ContextTransforms)]],
 	                                    constant Size_DevicePixels *viewport_size
 	                                    [[buffer(QuadInputIndex_ViewportSize)]]) {
 	  float2 unit_vertex = unit_vertices[unit_vertex_id];
 	  Quad quad = quads[quad_id];
 	  TransformationMatrix transform = quad_transforms[quad_id];
 	  float4 device_position =
-	      to_device_position_transformed(unit_vertex, quad.bounds, transform, viewport_size);
+	      to_device_position_transformed(unit_vertex, quad.bounds, transform, quad.transform_index, context_transforms, viewport_size);
 	   float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, quad.bounds,
-	                                                 quad.content_mask.bounds, transform);
+	                                                 quad.content_mask.bounds, transform, quad.transform_index, context_transforms);
 	  float4 border_color = hsla_to_rgba(quad.border_color);
 
   GradientColor gradient = prepare_fill_color(
@@ -114,11 +147,15 @@ struct QuadFragmentInput {
 	                              constant Quad *quads
 	                              [[buffer(QuadInputIndex_Quads)]],
 	                              constant TransformationMatrix *quad_transforms
-	                              [[buffer(QuadInputIndex_Transforms)]]) {
+	                              [[buffer(QuadInputIndex_Transforms)]],
+	                              constant SceneTransform *context_transforms
+	                              [[buffer(QuadInputIndex_ContextTransforms)]]) {
 	  Quad quad = quads[input.quad_id];
 	  TransformationMatrix transform = quad_transforms[input.quad_id];
 	  // Map device-space position to the quad's local space using the inverse transform
-	  float2 local_position = to_local_position(input.position.xy, transform);
+	  float2 visual_world =
+	      apply_context_transform_inverse(input.position.xy, quad.transform_index, context_transforms);
+	  float2 local_position = to_local_position(visual_world, transform);
 
   float4 background_color = fill_color(quad.background, local_position, quad.bounds,
     input.background_solid, input.background_color0, input.background_color1);
@@ -482,15 +519,17 @@ struct BackdropBlurFragmentInput {
 	    constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_BackdropBlurs)]],
 	    constant TransformationMatrix *blur_transforms
 	    [[buffer(BackdropBlurInputIndex_Transforms)]],
+	    constant SceneTransform *context_transforms
+	    [[buffer(BackdropBlurInputIndex_ContextTransforms)]],
 	    constant Size_DevicePixels *viewport_size [[buffer(BackdropBlurInputIndex_ViewportSize)]]) {
 	  float2 unit_vertex = unit_vertices[unit_vertex_id];
 	  BackdropBlur blur = blurs[blur_id];
 	  TransformationMatrix transform = blur_transforms[blur_id];
 
 	  float4 device_position =
-	      to_device_position_transformed(unit_vertex, blur.bounds, transform, viewport_size);
+	      to_device_position_transformed(unit_vertex, blur.bounds, transform, blur.transform_index, context_transforms, viewport_size);
 	  float4 clip_distance =
-	      distance_from_clip_rect_transformed(unit_vertex, blur.bounds, blur.content_mask.bounds, transform);
+	      distance_from_clip_rect_transformed(unit_vertex, blur.bounds, blur.content_mask.bounds, transform, blur.transform_index, context_transforms);
 
   return BackdropBlurVertexOutput{
       blur_id,
@@ -503,13 +542,17 @@ struct BackdropBlurFragmentInput {
 	    constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_BackdropBlurs)]],
 	    constant TransformationMatrix *blur_transforms
 	    [[buffer(BackdropBlurInputIndex_Transforms)]],
+	    constant SceneTransform *context_transforms
+	    [[buffer(BackdropBlurInputIndex_ContextTransforms)]],
 	    constant Size_DevicePixels *viewport_size [[buffer(BackdropBlurInputIndex_ViewportSize)]],
 	    texture2d<float> backdrop_texture [[texture(BackdropBlurInputIndex_BackdropTexture)]]) {
 	  BackdropBlur blur = blurs[input.blur_id];
 	  TransformationMatrix transform = blur_transforms[input.blur_id];
 
 	  // Compute mask in the quad's local space so rotations/transforms work.
-	  float2 local_position = to_local_position(input.position.xy, transform);
+	  float2 visual_world =
+	      apply_context_transform_inverse(input.position.xy, blur.transform_index, context_transforms);
+	  float2 local_position = to_local_position(visual_world, transform);
 	  float mask = saturate(0.5 - quad_sdf(local_position, blur.bounds, blur.corner_radii));
 
   float2 viewport = float2(viewport_size->width, viewport_size->height);
@@ -604,6 +647,8 @@ struct ShadowFragmentInput {
 	    constant Shadow *shadows [[buffer(ShadowInputIndex_Shadows)]],
 	    constant TransformationMatrix *shadow_transforms
 	    [[buffer(ShadowInputIndex_Transforms)]],
+	    constant SceneTransform *context_transforms
+	    [[buffer(ShadowInputIndex_ContextTransforms)]],
 	    constant Size_DevicePixels *viewport_size
 	    [[buffer(ShadowInputIndex_ViewportSize)]]) {
 	  float2 unit_vertex = unit_vertices[unit_vertex_id];
@@ -620,9 +665,9 @@ struct ShadowFragmentInput {
   bounds.size.height += 2. * margin;
 
 	  float4 device_position =
-	      to_device_position_transformed(unit_vertex, bounds, transform, viewport_size);
+	      to_device_position_transformed(unit_vertex, bounds, transform, shadow.transform_index, context_transforms, viewport_size);
 	  float4 clip_distance =
-	      distance_from_clip_rect_transformed(unit_vertex, bounds, shadow.content_mask.bounds, transform);
+	      distance_from_clip_rect_transformed(unit_vertex, bounds, shadow.content_mask.bounds, transform, shadow.transform_index, context_transforms);
 	  float4 color = hsla_to_rgba(shadow.color);
 
   return ShadowVertexOutput{
@@ -636,11 +681,15 @@ struct ShadowFragmentInput {
 	                                constant Shadow *shadows
 	                                [[buffer(ShadowInputIndex_Shadows)]],
 	                                constant TransformationMatrix *shadow_transforms
-	                                [[buffer(ShadowInputIndex_Transforms)]]) {
+	                                [[buffer(ShadowInputIndex_Transforms)]],
+	                                constant SceneTransform *context_transforms
+	                                [[buffer(ShadowInputIndex_ContextTransforms)]]) {
 	  Shadow shadow = shadows[input.shadow_id];
 	  TransformationMatrix transform = shadow_transforms[input.shadow_id];
 
-	  float2 local_position = to_local_position(input.position.xy, transform);
+	  float2 visual_world =
+	      apply_context_transform_inverse(input.position.xy, shadow.transform_index, context_transforms);
+	  float2 local_position = to_local_position(visual_world, transform);
   float2 origin = float2(shadow.bounds.origin.x, shadow.bounds.origin.y);
   float2 size = float2(shadow.bounds.size.width, shadow.bounds.size.height);
   float2 half_size = size / 2.;
@@ -663,7 +712,7 @@ struct ShadowFragmentInput {
 
   float alpha;
   if (shadow.blur_radius == 0.) {
-    float distance = quad_sdf(input.position.xy, shadow.bounds, shadow.corner_radii);
+    float distance = quad_sdf(local_position, shadow.bounds, shadow.corner_radii);
     alpha = saturate(0.5 - distance);
   } else {
     // The signal is only non-zero in a limited range, so don't waste samples
@@ -706,15 +755,17 @@ struct UnderlineFragmentInput {
 	    constant Underline *underlines [[buffer(UnderlineInputIndex_Underlines)]],
 	    constant TransformationMatrix *underline_transforms
 	    [[buffer(UnderlineInputIndex_Transforms)]],
+	    constant SceneTransform *context_transforms
+	    [[buffer(UnderlineInputIndex_ContextTransforms)]],
 	    constant Size_DevicePixels *viewport_size
 	    [[buffer(ShadowInputIndex_ViewportSize)]]) {
 	  float2 unit_vertex = unit_vertices[unit_vertex_id];
 	  Underline underline = underlines[underline_id];
 	  TransformationMatrix transform = underline_transforms[underline_id];
 	  float4 device_position =
-	      to_device_position_transformed(unit_vertex, underline.bounds, transform, viewport_size);
+	      to_device_position_transformed(unit_vertex, underline.bounds, transform, underline.transform_index, context_transforms, viewport_size);
 	  float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, underline.bounds,
-	                                                 underline.content_mask.bounds, transform);
+	                                                 underline.content_mask.bounds, transform, underline.transform_index, context_transforms);
 	  float4 color = hsla_to_rgba(underline.color);
   return UnderlineVertexOutput{
       device_position,
@@ -727,7 +778,9 @@ struct UnderlineFragmentInput {
 	                                   constant Underline *underlines
 	                                   [[buffer(UnderlineInputIndex_Underlines)]],
 	                                   constant TransformationMatrix *underline_transforms
-	                                   [[buffer(UnderlineInputIndex_Transforms)]]) {
+	                                   [[buffer(UnderlineInputIndex_Transforms)]],
+	                                   constant SceneTransform *context_transforms
+	                                   [[buffer(UnderlineInputIndex_ContextTransforms)]]) {
   const float WAVE_FREQUENCY = 2.0;
   const float WAVE_HEIGHT_RATIO = 0.8;
 
@@ -737,7 +790,9 @@ struct UnderlineFragmentInput {
 	    float half_thickness = underline.thickness * 0.5;
 	    float2 origin =
 	        float2(underline.bounds.origin.x, underline.bounds.origin.y);
-	    float2 local_position = to_local_position(input.position.xy, transform);
+	    float2 visual_world =
+	        apply_context_transform_inverse(input.position.xy, underline.transform_index, context_transforms);
+	    float2 local_position = to_local_position(visual_world, transform);
 
     float2 st = ((local_position - origin) / underline.bounds.size.height) -
                 float2(0., 0.5);
@@ -776,6 +831,8 @@ vertex MonochromeSpriteVertexOutput monochrome_sprite_vertex(
     uint unit_vertex_id [[vertex_id]], uint sprite_id [[instance_id]],
     constant float2 *unit_vertices [[buffer(SpriteInputIndex_Vertices)]],
     constant MonochromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
+    constant SceneTransform *context_transforms
+    [[buffer(SpriteInputIndex_ContextTransforms)]],
     constant Size_DevicePixels *viewport_size
     [[buffer(SpriteInputIndex_ViewportSize)]],
     constant Size_DevicePixels *atlas_size
@@ -783,9 +840,9 @@ vertex MonochromeSpriteVertexOutput monochrome_sprite_vertex(
   float2 unit_vertex = unit_vertices[unit_vertex_id];
   MonochromeSprite sprite = sprites[sprite_id];
   float4 device_position =
-      to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation, viewport_size);
+      to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation, sprite.transform_index, context_transforms, viewport_size);
   float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds,
-                                                 sprite.content_mask.bounds, sprite.transformation);
+                                                 sprite.content_mask.bounds, sprite.transformation, sprite.transform_index, context_transforms);
   float2 tile_position = to_tile_position(unit_vertex, sprite.tile, atlas_size);
   float4 color = hsla_to_rgba(sprite.color);
   return MonochromeSpriteVertexOutput{
@@ -831,6 +888,8 @@ struct PolychromeSpriteFragmentInput {
 	    constant PolychromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
 	    constant TransformationMatrix *sprite_transforms
 	    [[buffer(SpriteInputIndex_Transforms)]],
+	    constant SceneTransform *context_transforms
+	    [[buffer(SpriteInputIndex_ContextTransforms)]],
 	    constant Size_DevicePixels *viewport_size
 	    [[buffer(SpriteInputIndex_ViewportSize)]],
 	    constant Size_DevicePixels *atlas_size
@@ -840,9 +899,9 @@ struct PolychromeSpriteFragmentInput {
 	  PolychromeSprite sprite = sprites[sprite_id];
 	  TransformationMatrix transform = sprite_transforms[sprite_id];
 	  float4 device_position =
-	      to_device_position_transformed(unit_vertex, sprite.bounds, transform, viewport_size);
+	      to_device_position_transformed(unit_vertex, sprite.bounds, transform, sprite.transform_index, context_transforms, viewport_size);
 	  float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds,
-	                                                 sprite.content_mask.bounds, transform);
+	                                                 sprite.content_mask.bounds, transform, sprite.transform_index, context_transforms);
 	  float2 tile_position = to_tile_position(unit_vertex, sprite.tile, atlas_size);
   return PolychromeSpriteVertexOutput{
       device_position,
@@ -856,6 +915,8 @@ struct PolychromeSpriteFragmentInput {
 	    constant PolychromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
 	    constant TransformationMatrix *sprite_transforms
 	    [[buffer(SpriteInputIndex_Transforms)]],
+	    constant SceneTransform *context_transforms
+	    [[buffer(SpriteInputIndex_ContextTransforms)]],
 	    texture2d<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
 	  PolychromeSprite sprite = sprites[input.sprite_id];
 	  TransformationMatrix transform = sprite_transforms[input.sprite_id];
@@ -864,7 +925,9 @@ struct PolychromeSpriteFragmentInput {
 	  float4 sample =
 	      atlas_texture.sample(atlas_texture_sampler, input.tile_position);
 	  // Map to local coordinates for correct rounded-corner SDF when transformed.
-	  float2 local_position = to_local_position(input.position.xy, transform);
+	  float2 visual_world =
+	      apply_context_transform_inverse(input.position.xy, sprite.transform_index, context_transforms);
+	  float2 local_position = to_local_position(visual_world, transform);
   float distance =
       quad_sdf(local_position, sprite.bounds, sprite.corner_radii);
 
@@ -895,10 +958,14 @@ struct PathRasterizationFragmentInput {
 vertex PathRasterizationVertexOutput path_rasterization_vertex(
   uint vertex_id [[vertex_id]],
   constant PathRasterizationVertex *vertices [[buffer(PathRasterizationInputIndex_Vertices)]],
-  constant Size_DevicePixels *atlas_size [[buffer(PathRasterizationInputIndex_ViewportSize)]]
+  constant Size_DevicePixels *atlas_size [[buffer(PathRasterizationInputIndex_ViewportSize)]],
+  constant SceneTransform *context_transforms [[buffer(PathRasterizationInputIndex_ContextTransforms)]]
 ) {
   PathRasterizationVertex v = vertices[vertex_id];
-  float2 vertex_position = float2(v.xy_position.x, v.xy_position.y);
+  ResolvedTransform t = resolve_transform(v.transform_index, context_transforms);
+  float2 vertex_position =
+      float2(v.xy_position.x, v.xy_position.y) * t.scale + t.offset;
+  Bounds_ScaledPixels bounds = v.bounds;
   float4 position = float4(
     vertex_position * float2(2. / atlas_size->width, -2. / atlas_size->height) + float2(-1., 1.),
     0.,
@@ -909,17 +976,18 @@ vertex PathRasterizationVertexOutput path_rasterization_vertex(
       float2(v.st_position.x, v.st_position.y),
       vertex_id,
       {
-        v.xy_position.x - v.bounds.origin.x,
-        v.bounds.origin.x + v.bounds.size.width - v.xy_position.x,
-        v.xy_position.y - v.bounds.origin.y,
-        v.bounds.origin.y + v.bounds.size.height - v.xy_position.y
+        vertex_position.x - bounds.origin.x,
+        bounds.origin.x + bounds.size.width - vertex_position.x,
+        vertex_position.y - bounds.origin.y,
+        bounds.origin.y + bounds.size.height - vertex_position.y
       }
   };
 }
 
 fragment float4 path_rasterization_fragment(
   PathRasterizationFragmentInput input [[stage_in]],
-  constant PathRasterizationVertex *vertices [[buffer(PathRasterizationInputIndex_Vertices)]]
+  constant PathRasterizationVertex *vertices [[buffer(PathRasterizationInputIndex_Vertices)]],
+  constant SceneTransform *context_transforms [[buffer(PathRasterizationInputIndex_ContextTransforms)]]
 ) {
   float2 dx = dfdx(input.st_position);
   float2 dy = dfdy(input.st_position);
@@ -1010,6 +1078,7 @@ vertex SurfaceVertexOutput surface_vertex(
     uint unit_vertex_id [[vertex_id]], uint surface_id [[instance_id]],
     constant float2 *unit_vertices [[buffer(SurfaceInputIndex_Vertices)]],
     constant SurfaceBounds *surfaces [[buffer(SurfaceInputIndex_Surfaces)]],
+    constant SceneTransform *context_transforms [[buffer(SurfaceInputIndex_ContextTransforms)]],
     constant Size_DevicePixels *viewport_size
     [[buffer(SurfaceInputIndex_ViewportSize)]],
     constant Size_DevicePixels *texture_size
@@ -1017,9 +1086,9 @@ vertex SurfaceVertexOutput surface_vertex(
   float2 unit_vertex = unit_vertices[unit_vertex_id];
   SurfaceBounds surface = surfaces[surface_id];
   float4 device_position =
-      to_device_position(unit_vertex, surface.bounds, viewport_size);
-  float4 clip_distance = distance_from_clip_rect(unit_vertex, surface.bounds,
-                                                 surface.content_mask.bounds);
+      to_device_position_with_context(unit_vertex, surface.bounds, surface.transform_index, context_transforms, viewport_size);
+  float4 clip_distance = distance_from_clip_rect_with_context(unit_vertex, surface.bounds,
+                                                 surface.content_mask.bounds, surface.transform_index, context_transforms);
   // We are going to copy the whole texture, so the texture position corresponds
   // to the current vertex of the unit triangle.
   float2 texture_position = unit_vertex;
@@ -1183,6 +1252,22 @@ float4 to_device_position(float2 unit_vertex, Bounds_ScaledPixels bounds,
   return float4(device_position, 0., 1.);
 }
 
+float4 to_device_position_with_context(float2 unit_vertex, Bounds_ScaledPixels bounds,
+                                       uint transform_index,
+                                       constant SceneTransform *transforms,
+                                       constant Size_DevicePixels *input_viewport_size) {
+  float2 position =
+      unit_vertex * float2(bounds.size.width, bounds.size.height) +
+      float2(bounds.origin.x, bounds.origin.y);
+  float2 world_position = apply_context_transform(position, transform_index, transforms);
+
+  float2 viewport_size = float2((float)input_viewport_size->width,
+                                (float)input_viewport_size->height);
+  float2 device_position =
+      world_position / viewport_size * float2(2., -2.) + float2(-1., 1.);
+  return float4(device_position, 0., 1.);
+}
+
 float2 apply_transform(float2 position, TransformationMatrix transformation) {
   float2 transformed_position = float2(0, 0);
   transformed_position[0] = position[0] * transformation.rotation_scale[0][0] + position[1] * transformation.rotation_scale[0][1];
@@ -1208,19 +1293,52 @@ float2 to_local_position(float2 world, TransformationMatrix transformation) {
   return local_position;
 }
 
+ResolvedTransform resolve_transform(uint transform_index,
+                                   constant SceneTransform *transforms) {
+  ResolvedTransform out;
+  out.offset = float2(0.0);
+  out.scale = 1.0;
+
+  uint current = transform_index;
+  for (int i = 0; i < 16 && current != 0; i++) {
+    SceneTransform t = transforms[current];
+    out.offset = out.offset * t.scale + t.offset;
+    out.scale *= t.scale;
+    current = t.parent_index;
+  }
+
+  return out;
+}
+
+float2 apply_context_transform(float2 position, uint transform_index,
+                               constant SceneTransform *transforms) {
+  ResolvedTransform t = resolve_transform(transform_index, transforms);
+  return position * t.scale + t.offset;
+}
+
+float2 apply_context_transform_inverse(float2 position, uint transform_index,
+                                       constant SceneTransform *transforms) {
+  ResolvedTransform t = resolve_transform(transform_index, transforms);
+  return (position - t.offset) / t.scale;
+}
+
 float4 to_device_position_transformed(float2 unit_vertex, Bounds_ScaledPixels bounds,
                           TransformationMatrix transformation,
+                          uint transform_index,
+                          constant SceneTransform *transforms,
                           constant Size_DevicePixels *input_viewport_size) {
   float2 position =
       unit_vertex * float2(bounds.size.width, bounds.size.height) +
       float2(bounds.origin.x, bounds.origin.y);
 
   float2 transformed_position = apply_transform(position, transformation);
+  float2 world_position =
+      apply_context_transform(transformed_position, transform_index, transforms);
 
   float2 viewport_size = float2((float)input_viewport_size->width,
                                 (float)input_viewport_size->height);
   float2 device_position =
-      transformed_position / viewport_size * float2(2., -2.) + float2(-1., 1.);
+      world_position / viewport_size * float2(2., -2.) + float2(-1., 1.);
   return float4(device_position, 0., 1.);
 }
 
@@ -1316,17 +1434,40 @@ float4 distance_from_clip_rect(float2 unit_vertex, Bounds_ScaledPixels bounds,
                 clip_bounds.origin.y + clip_bounds.size.height - position.y);
 }
 
+float4 distance_from_clip_rect_with_context(float2 unit_vertex, Bounds_ScaledPixels bounds,
+                                            Bounds_ScaledPixels clip_bounds,
+                                            uint transform_index,
+                                            constant SceneTransform *transforms) {
+  ResolvedTransform t = resolve_transform(transform_index, transforms);
+
+  float2 position =
+      unit_vertex * float2(bounds.size.width, bounds.size.height) +
+      float2(bounds.origin.x, bounds.origin.y);
+  float2 world_position = position * t.scale + t.offset;
+
+  return float4(world_position.x - clip_bounds.origin.x,
+                clip_bounds.origin.x + clip_bounds.size.width - world_position.x,
+                world_position.y - clip_bounds.origin.y,
+                clip_bounds.origin.y + clip_bounds.size.height - world_position.y);
+}
+
 float4 distance_from_clip_rect_transformed(float2 unit_vertex, Bounds_ScaledPixels bounds,
-                               Bounds_ScaledPixels clip_bounds, TransformationMatrix transformation) {
+                               Bounds_ScaledPixels clip_bounds,
+                               TransformationMatrix transformation,
+                               uint transform_index,
+                               constant SceneTransform *transforms) {
+  ResolvedTransform t = resolve_transform(transform_index, transforms);
+
   float2 position =
       unit_vertex * float2(bounds.size.width, bounds.size.height) +
       float2(bounds.origin.x, bounds.origin.y);
   float2 transformed_position = apply_transform(position, transformation);
+  float2 world_position = transformed_position * t.scale + t.offset;
 
-  return float4(transformed_position.x - clip_bounds.origin.x,
-                clip_bounds.origin.x + clip_bounds.size.width - transformed_position.x,
-                transformed_position.y - clip_bounds.origin.y,
-                clip_bounds.origin.y + clip_bounds.size.height - transformed_position.y);
+  return float4(world_position.x - clip_bounds.origin.x,
+                clip_bounds.origin.x + clip_bounds.size.width - world_position.x,
+                world_position.y - clip_bounds.origin.y,
+                clip_bounds.origin.y + clip_bounds.size.height - world_position.y);
 }
 
 float4 over(float4 below, float4 above) {

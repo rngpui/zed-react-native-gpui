@@ -1,3 +1,4 @@
+use crate::window::context::PaintCx;
 use crate::{
     App, Bounds, Half, Hsla, LineLayout, Pixels, Point, Result, SharedString, StrikethroughStyle,
     TextAlign, TransformationMatrix, UnderlineStyle, Window, WrapBoundary, WrappedLineLayout,
@@ -520,57 +521,61 @@ fn paint_line(
                     size: max_glyph_size,
                 };
 
-                let content_mask = window.content_mask();
-                let glyph_intersects_mask = if transform.is_unit() {
-                    max_glyph_bounds.intersects(&content_mask.bounds)
+                let glyph_intersects_mask = if !window.should_cull_scene_primitives() {
+                    true
                 } else {
-                    // Transform glyph bounds into window space for correct masking when a
-                    // visual transform is applied.
-                    let corners = [
-                        max_glyph_bounds.origin,
-                        point(
-                            max_glyph_bounds.origin.x + max_glyph_bounds.size.width,
-                            max_glyph_bounds.origin.y,
-                        ),
-                        point(
-                            max_glyph_bounds.origin.x,
-                            max_glyph_bounds.origin.y + max_glyph_bounds.size.height,
-                        ),
-                        point(
-                            max_glyph_bounds.origin.x + max_glyph_bounds.size.width,
-                            max_glyph_bounds.origin.y + max_glyph_bounds.size.height,
-                        ),
-                    ];
+                    let content_mask = PaintCx::new(window).content_mask();
+                    if transform.is_unit() {
+                        max_glyph_bounds.intersects(&content_mask.bounds)
+                    } else {
+                        // Transform glyph bounds into window space for correct masking when a
+                        // visual transform is applied.
+                        let corners = [
+                            max_glyph_bounds.origin,
+                            point(
+                                max_glyph_bounds.origin.x + max_glyph_bounds.size.width,
+                                max_glyph_bounds.origin.y,
+                            ),
+                            point(
+                                max_glyph_bounds.origin.x,
+                                max_glyph_bounds.origin.y + max_glyph_bounds.size.height,
+                            ),
+                            point(
+                                max_glyph_bounds.origin.x + max_glyph_bounds.size.width,
+                                max_glyph_bounds.origin.y + max_glyph_bounds.size.height,
+                            ),
+                        ];
 
-                    let mut min_x = f32::INFINITY;
-                    let mut max_x = f32::NEG_INFINITY;
-                    let mut min_y = f32::INFINITY;
-                    let mut max_y = f32::NEG_INFINITY;
+                        let mut min_x = f32::INFINITY;
+                        let mut max_x = f32::NEG_INFINITY;
+                        let mut min_y = f32::INFINITY;
+                        let mut max_y = f32::NEG_INFINITY;
 
-                    for corner in corners {
-                        let p = transform.apply(corner);
-                        let x = f32::from(p.x);
-                        let y = f32::from(p.y);
-                        if x < min_x {
-                            min_x = x;
+                        for corner in corners {
+                            let p = transform.apply(corner);
+                            let x = f32::from(p.x);
+                            let y = f32::from(p.y);
+                            if x < min_x {
+                                min_x = x;
+                            }
+                            if x > max_x {
+                                max_x = x;
+                            }
+                            if y < min_y {
+                                min_y = y;
+                            }
+                            if y > max_y {
+                                max_y = y;
+                            }
                         }
-                        if x > max_x {
-                            max_x = x;
-                        }
-                        if y < min_y {
-                            min_y = y;
-                        }
-                        if y > max_y {
-                            max_y = y;
-                        }
+
+                        let world_bounds = Bounds {
+                            origin: point(px(min_x), px(min_y)),
+                            size: size(px((max_x - min_x).max(0.0)), px((max_y - min_y).max(0.0))),
+                        };
+
+                        world_bounds.intersects(&content_mask.bounds)
                     }
-
-                    let world_bounds = Bounds {
-                        origin: point(px(min_x), px(min_y)),
-                        size: size(px((max_x - min_x).max(0.0)), px((max_y - min_y).max(0.0))),
-                    };
-
-                    world_bounds.intersects(&content_mask.bounds)
                 };
 
                 if glyph_intersects_mask {

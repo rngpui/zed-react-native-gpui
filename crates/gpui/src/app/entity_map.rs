@@ -57,6 +57,7 @@ impl Display for EntityId {
 pub(crate) struct EntityMap {
     entities: SecondaryMap<EntityId, Box<dyn Any>>,
     pub accessed_entities: RefCell<FxHashSet<EntityId>>,
+    access_scopes: RefCell<Vec<FxHashSet<EntityId>>>,
     ref_counts: Arc<RwLock<EntityRefCounts>>,
 }
 
@@ -72,6 +73,7 @@ impl EntityMap {
         Self {
             entities: SecondaryMap::new(),
             accessed_entities: RefCell::new(FxHashSet::default()),
+            access_scopes: RefCell::new(Vec::new()),
             ref_counts: Arc::new(RwLock::new(EntityRefCounts {
                 counts: SlotMap::with_key(),
                 dropped_entity_ids: Vec::new(),
@@ -95,8 +97,7 @@ impl EntityMap {
     where
         T: 'static,
     {
-        let mut accessed_entities = self.accessed_entities.borrow_mut();
-        accessed_entities.insert(slot.entity_id);
+        self.record_access(slot.entity_id);
 
         let handle = slot.0;
         self.entities.insert(handle.entity_id, Box::new(entity));
@@ -107,8 +108,7 @@ impl EntityMap {
     #[track_caller]
     pub fn lease<T>(&mut self, pointer: &Entity<T>) -> Lease<T> {
         self.assert_valid_context(pointer);
-        let mut accessed_entities = self.accessed_entities.borrow_mut();
-        accessed_entities.insert(pointer.entity_id);
+        self.record_access(pointer.entity_id);
 
         let entity = Some(
             self.entities
@@ -129,8 +129,7 @@ impl EntityMap {
 
     pub fn read<T: 'static>(&self, entity: &Entity<T>) -> &T {
         self.assert_valid_context(entity);
-        let mut accessed_entities = self.accessed_entities.borrow_mut();
-        accessed_entities.insert(entity.entity_id);
+        self.record_access(entity.entity_id);
 
         self.entities
             .get(entity.entity_id)
@@ -145,20 +144,48 @@ impl EntityMap {
         );
     }
 
-    pub fn extend_accessed(&mut self, entities: &FxHashSet<EntityId>) {
+    pub(crate) fn record_access(&self, entity_id: EntityId) {
+        self.accessed_entities.borrow_mut().insert(entity_id);
+        if let Some(scope) = self.access_scopes.borrow_mut().last_mut() {
+            scope.insert(entity_id);
+        }
+    }
+
+    pub(crate) fn push_access_scope(&self) {
+        self.access_scopes.borrow_mut().push(FxHashSet::default());
+    }
+
+    pub(crate) fn pop_access_scope(&self) -> FxHashSet<EntityId> {
+        let mut scopes = self.access_scopes.borrow_mut();
+        let scope = scopes.pop().unwrap_or_default();
+        if let Some(parent) = scopes.last_mut() {
+            parent.extend(scope.iter().copied());
+        }
+        scope
+    }
+
+    pub(crate) fn extend_accessed(&self, entities: &FxHashSet<EntityId>) {
+        if entities.is_empty() {
+            return;
+        }
         self.accessed_entities
             .borrow_mut()
             .extend(entities.iter().copied());
+        if let Some(scope) = self.access_scopes.borrow_mut().last_mut() {
+            scope.extend(entities.iter().copied());
+        }
     }
 
-    pub fn clear_accessed(&mut self) {
+    pub(crate) fn clear_accessed(&mut self) {
         self.accessed_entities.borrow_mut().clear();
+        self.access_scopes.borrow_mut().clear();
     }
 
     pub fn take_dropped(&mut self) -> Vec<(EntityId, Box<dyn Any>)> {
         let mut ref_counts = self.ref_counts.write();
         let dropped_entity_ids = mem::take(&mut ref_counts.dropped_entity_ids);
         let mut accessed_entities = self.accessed_entities.borrow_mut();
+        let mut access_scopes = self.access_scopes.borrow_mut();
 
         dropped_entity_ids
             .into_iter()
@@ -170,6 +197,9 @@ impl EntityMap {
                     "dropped an entity that was referenced"
                 );
                 accessed_entities.remove(&entity_id);
+                for scope in access_scopes.iter_mut() {
+                    scope.remove(&entity_id);
+                }
                 // If the EntityId was allocated with `Context::reserve`,
                 // the entity may not have been inserted.
                 Some((entity_id, self.entities.remove(entity_id)?))

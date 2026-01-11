@@ -3,15 +3,16 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use slotmap::{SlotMap, new_key_type};
 
 use crate::{
     AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Pixels,
-    Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    Point, Radians, ScaledPixels, Size, TransformId, TransformTable, point,
 };
 use std::{
     fmt::Debug,
     iter::Peekable,
-    ops::{Add, Range, Sub},
+    ops::{Add, Sub},
     slice,
 };
 
@@ -20,39 +21,96 @@ pub(crate) type PathVertex_ScaledPixels = PathVertex<ScaledPixels>;
 
 pub(crate) type DrawOrder = u32;
 
-#[derive(Default)]
-pub(crate) struct Scene {
-    pub(crate) paint_operations: Vec<PaintOperation>,
-    primitive_bounds: BoundsTree<ScaledPixels>,
-    layer_stack: Vec<DrawOrder>,
-    pub(crate) shadows: Vec<Shadow>,
-    pub(crate) shadow_transforms: Vec<TransformationMatrix>,
-    pub(crate) quads: Vec<Quad>,
-    pub(crate) quad_transforms: Vec<TransformationMatrix>,
-    pub(crate) backdrop_blurs: Vec<BackdropBlur>,
-    pub(crate) backdrop_blur_transforms: Vec<TransformationMatrix>,
-    pub(crate) paths: Vec<Path<ScaledPixels>>,
-    pub(crate) underlines: Vec<Underline>,
-    pub(crate) underline_transforms: Vec<TransformationMatrix>,
-    pub(crate) monochrome_sprites: Vec<MonochromeSprite>,
-    pub(crate) subpixel_sprites: Vec<SubpixelSprite>,
-    pub(crate) polychrome_sprites: Vec<PolychromeSprite>,
-    pub(crate) polychrome_sprite_transforms: Vec<TransformationMatrix>,
-    pub(crate) surfaces: Vec<PaintSurface>,
+new_key_type! { pub(crate) struct SceneSegmentId; }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SceneSegmentRef {
+    Fiber(SceneSegmentId),
+    Transient,
 }
 
-impl Scene {
-    pub fn clear(&mut self) {
-        self.paint_operations.clear();
-        self.primitive_bounds.clear();
+/// Shared storage for fiber scene segments that persists across frame swaps.
+/// This is stored at the Window level so segment IDs remain valid when
+/// rendered_frame and next_frame are swapped.
+#[derive(Default)]
+pub(crate) struct SceneSegmentPool {
+    segments: SlotMap<SceneSegmentId, SceneSegment>,
+    pub(crate) transforms: TransformTable,
+}
+
+impl SceneSegmentPool {
+    pub fn alloc_segment(&mut self) -> SceneSegmentId {
+        self.segments.insert(SceneSegment::default())
+    }
+
+    pub fn reset_segment(&mut self, id: SceneSegmentId, mutation_epoch: u64) {
+        if let Some(segment) = self.segment_mut(id) {
+            segment.clear();
+            segment.mutated_epoch = mutation_epoch;
+        }
+    }
+
+    pub fn remove_segment(&mut self, id: SceneSegmentId) {
+        let _ = self.segments.remove(id);
+    }
+
+    fn segment_mut(&mut self, id: SceneSegmentId) -> Option<&mut SceneSegment> {
+        self.segments.get_mut(id)
+    }
+
+    fn segment(&self, id: SceneSegmentId) -> Option<&SceneSegment> {
+        self.segments.get(id)
+    }
+
+    /// Clear all segments in the pool without deallocating them.
+    /// Used on window refresh to ensure stale data is removed.
+    #[cfg(test)]
+    pub fn reset_all(&mut self, mutation_epoch: u64) {
+        for segment in self.segments.values_mut() {
+            segment.clear();
+            segment.mutated_epoch = mutation_epoch;
+        }
+    }
+
+    /// Returns the number of segments currently allocated in the pool.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.segments.len()
+    }
+}
+
+#[derive(Default)]
+struct SceneSegment {
+    next_order: DrawOrder,
+    mutated_epoch: u64,
+    layer_stack: Vec<DrawOrder>,
+    shadows: Vec<Shadow>,
+    shadow_transforms: Vec<TransformationMatrix>,
+    quads: Vec<Quad>,
+    quad_transforms: Vec<TransformationMatrix>,
+    backdrop_blurs: Vec<BackdropBlur>,
+    backdrop_blur_transforms: Vec<TransformationMatrix>,
+    paths: Vec<Path<ScaledPixels>>,
+    underlines: Vec<Underline>,
+    underline_transforms: Vec<TransformationMatrix>,
+    monochrome_sprites: Vec<MonochromeSprite>,
+    subpixel_sprites: Vec<SubpixelSprite>,
+    polychrome_sprites: Vec<PolychromeSprite>,
+    polychrome_sprite_transforms: Vec<TransformationMatrix>,
+    surfaces: Vec<PaintSurface>,
+}
+
+impl SceneSegment {
+    fn clear(&mut self) {
+        self.next_order = 0;
         self.layer_stack.clear();
-        self.paths.clear();
         self.shadows.clear();
         self.shadow_transforms.clear();
         self.quads.clear();
         self.quad_transforms.clear();
         self.backdrop_blurs.clear();
         self.backdrop_blur_transforms.clear();
+        self.paths.clear();
         self.underlines.clear();
         self.underline_transforms.clear();
         self.monochrome_sprites.clear();
@@ -62,78 +120,202 @@ impl Scene {
         self.surfaces.clear();
     }
 
-    pub fn len(&self) -> usize {
-        self.paint_operations.len()
+    fn next_draw_order(&mut self) -> DrawOrder {
+        let order = self.next_order;
+        self.next_order = self.next_order.saturating_add(1);
+        order
+    }
+}
+
+pub(crate) struct Scene {
+    segment_order: Vec<SceneSegmentRef>,
+    segment_order_epoch: u64,
+    mutation_epoch: u64,
+    transient: SceneSegment,
+    active_stack: Vec<SceneSegmentRef>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SceneFinishStats {
+    pub(crate) total_pool_segments: usize,
+    pub(crate) mutated_pool_segments: usize,
+    pub(crate) transient_mutated: bool,
+}
+
+impl Default for Scene {
+    fn default() -> Self {
+        Self {
+            segment_order: vec![SceneSegmentRef::Transient],
+            segment_order_epoch: u64::MAX,
+            mutation_epoch: 0,
+            transient: SceneSegment::default(),
+            active_stack: vec![SceneSegmentRef::Transient],
+        }
+    }
+}
+
+impl Scene {
+    #[cfg(test)]
+    pub fn mutation_epoch(&self) -> u64 {
+        self.mutation_epoch
     }
 
-    pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
-        let order = self.primitive_bounds.insert(bounds);
-        self.layer_stack.push(order);
-        self.paint_operations
-            .push(PaintOperation::StartLayer(bounds));
+    pub fn begin_frame(&mut self) {
+        self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+        self.active_stack.clear();
+        self.active_stack.push(SceneSegmentRef::Transient);
+        self.clear_transient();
     }
 
-    pub fn pop_layer(&mut self) {
-        self.layer_stack.pop();
-        self.paint_operations.push(PaintOperation::EndLayer);
+    pub fn clear_transient(&mut self) {
+        self.transient.clear();
     }
 
-    pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
+    pub fn segment_order_epoch(&self) -> u64 {
+        self.segment_order_epoch
+    }
+
+    pub fn set_segment_order(&mut self, order: Vec<SceneSegmentId>, structure_epoch: u64) {
+        self.segment_order.clear();
+        self.segment_order
+            .extend(order.into_iter().map(SceneSegmentRef::Fiber));
+        self.segment_order.push(SceneSegmentRef::Transient);
+        self.segment_order_epoch = structure_epoch;
+    }
+
+    pub fn alloc_segment(&mut self, pool: &mut SceneSegmentPool) -> SceneSegmentId {
+        pool.alloc_segment()
+    }
+
+    pub fn reset_segment(&mut self, pool: &mut SceneSegmentPool, id: SceneSegmentId) {
+        let mutation_epoch = self.mutation_epoch;
+        pool.reset_segment(id, mutation_epoch);
+    }
+
+    pub fn push_fiber_segment(&mut self, id: SceneSegmentId) {
+        self.active_stack.push(SceneSegmentRef::Fiber(id));
+    }
+
+    pub fn pop_segment(&mut self) {
+        if self.active_stack.len() > 1 {
+            self.active_stack.pop();
+        }
+    }
+
+    fn active_segment_mut<'a>(
+        &'a mut self,
+        pool: &'a mut SceneSegmentPool,
+    ) -> &'a mut SceneSegment {
+        let active = self
+            .active_stack
+            .last()
+            .copied()
+            .unwrap_or(SceneSegmentRef::Transient);
+        if let SceneSegmentRef::Fiber(id) = active {
+            if let Some(segment) = pool.segment_mut(id) {
+                return segment;
+            }
+        }
+        &mut self.transient
+    }
+
+    pub fn push_layer(&mut self, pool: &mut SceneSegmentPool) {
+        let segment = self.active_segment_mut(pool);
+        let order = segment.next_draw_order();
+        segment.layer_stack.push(order);
+    }
+
+    pub fn pop_layer(&mut self, pool: &mut SceneSegmentPool) {
+        let segment = self.active_segment_mut(pool);
+        segment.layer_stack.pop();
+    }
+
+    pub fn insert_primitive(
+        &mut self,
+        pool: &mut SceneSegmentPool,
+        primitive: impl Into<Primitive>,
+        cull: bool,
+    ) {
         let mut primitive = primitive.into();
         let transformed_bounds = transformed_bounds(&primitive);
-        let clipped_bounds = transformed_bounds.intersect(&primitive.content_mask().bounds);
-
-        if clipped_bounds.is_empty() {
+        if transformed_bounds.is_empty() {
             return;
         }
+        if cull {
+            let transform_index = primitive.transform_index();
+            let world_bounds = if transform_index == 0 {
+                transformed_bounds
+            } else {
+                let world_transform =
+                    pool.transforms
+                        .get_world_no_cache(TransformId::from_u32(transform_index));
+                Bounds {
+                    origin: world_transform.apply(transformed_bounds.origin),
+                    size: Size {
+                        width: ScaledPixels(transformed_bounds.size.width.0 * world_transform.scale),
+                        height: ScaledPixels(
+                            transformed_bounds.size.height.0 * world_transform.scale,
+                        ),
+                    },
+                }
+            };
 
-        let order = self
+            let clipped_bounds = world_bounds.intersect(&primitive.content_mask().bounds);
+            if clipped_bounds.is_empty() {
+                return;
+            }
+        }
+
+        let mutation_epoch = self.mutation_epoch;
+        let segment = self.active_segment_mut(pool);
+        segment.mutated_epoch = mutation_epoch;
+        let order = segment
             .layer_stack
             .last()
             .copied()
-            .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
+            .unwrap_or_else(|| segment.next_draw_order());
         match &mut primitive {
             Primitive::Shadow(shadow, transform) => {
                 shadow.order = order;
-                self.shadows.push(shadow.clone());
-                self.shadow_transforms.push(*transform);
+                segment.shadows.push(shadow.clone());
+                segment.shadow_transforms.push(*transform);
             }
             Primitive::Quad(quad, transform) => {
                 quad.order = order;
-                self.quads.push(quad.clone());
-                self.quad_transforms.push(*transform);
+                segment.quads.push(quad.clone());
+                segment.quad_transforms.push(*transform);
             }
             Primitive::BackdropBlur(blur, transform) => {
                 blur.order = order;
-                self.backdrop_blurs.push(blur.clone());
-                self.backdrop_blur_transforms.push(*transform);
+                segment.backdrop_blurs.push(blur.clone());
+                segment.backdrop_blur_transforms.push(*transform);
             }
             Primitive::Path(path) => {
                 path.order = order;
-                path.id = PathId(self.paths.len());
-                self.paths.push(path.clone());
+                path.id = PathId(segment.paths.len());
+                segment.paths.push(path.clone());
             }
             Primitive::Underline(underline, transform) => {
                 underline.order = order;
-                self.underlines.push(underline.clone());
-                self.underline_transforms.push(*transform);
+                segment.underlines.push(underline.clone());
+                segment.underline_transforms.push(*transform);
             }
             Primitive::MonochromeSprite(sprite) => {
                 sprite.order = order;
-                self.monochrome_sprites.push(sprite.clone());
+                segment.monochrome_sprites.push(sprite.clone());
             }
             Primitive::SubpixelSprite(sprite) => {
                 sprite.order = order;
-                self.subpixel_sprites.push(sprite.clone());
+                segment.subpixel_sprites.push(sprite.clone());
             }
             Primitive::PolychromeSprite(sprite, transform) => {
                 sprite.order = order;
-                self.polychrome_sprites.push(sprite.clone());
-                self.polychrome_sprite_transforms.push(*transform);
+                segment.polychrome_sprites.push(sprite.clone());
+                segment.polychrome_sprite_transforms.push(*transform);
             }
             Primitive::Surface(surface) => {
                 surface.order = order;
-                self.surfaces.push(surface.clone());
+                segment.surfaces.push(surface.clone());
             }
         }
 
@@ -182,7 +364,9 @@ impl Scene {
             match primitive {
                 Primitive::Shadow(shadow, transform) => apply_transform(&shadow.bounds, transform),
                 Primitive::Quad(quad, transform) => apply_transform(&quad.bounds, transform),
-                Primitive::BackdropBlur(blur, transform) => apply_transform(&blur.bounds, transform),
+                Primitive::BackdropBlur(blur, transform) => {
+                    apply_transform(&blur.bounds, transform)
+                }
                 Primitive::Underline(underline, transform) => {
                     apply_transform(&underline.bounds, transform)
                 }
@@ -199,18 +383,6 @@ impl Scene {
                 Primitive::Surface(surface) => surface.bounds,
             }
         }
-        self.paint_operations
-            .push(PaintOperation::Primitive(primitive));
-    }
-
-    pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
-        for operation in &prev_scene.paint_operations[range] {
-            match operation {
-                PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
-                PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
-                PaintOperation::EndLayer => self.pop_layer(),
-            }
-        }
     }
 
     fn sort_with_aux_by_key<T, U, K: Ord>(
@@ -223,54 +395,109 @@ impl Scene {
             return;
         }
 
-        let mut perm: Vec<usize> = (0..items.len()).collect();
+        let len = items.len();
+
+        let mut perm: Vec<usize> = (0..len).collect();
         perm.sort_by_key(|&index| key_fn(&items[index]));
 
-        let mut desired_pos_by_current_pos = vec![0usize; perm.len()];
-        for (desired_pos, current_pos) in perm.into_iter().enumerate() {
-            desired_pos_by_current_pos[current_pos] = desired_pos;
+        let mut pos: Vec<usize> = vec![0; len];
+        for (desired_pos, &current_pos) in perm.iter().enumerate() {
+            pos[current_pos] = desired_pos;
         }
 
-        for i in 0..items.len() {
-            while desired_pos_by_current_pos[i] != i {
-                let j = desired_pos_by_current_pos[i];
+        for i in 0..len {
+            while pos[i] != i {
+                let j = pos[i];
                 items.swap(i, j);
                 aux.swap(i, j);
-                desired_pos_by_current_pos.swap(i, j);
+                pos.swap(i, j);
             }
         }
     }
 
-    pub fn finish(&mut self) {
-        Self::sort_with_aux_by_key(&mut self.shadows, &mut self.shadow_transforms, |shadow| {
-            shadow.order
-        });
-        Self::sort_with_aux_by_key(&mut self.quads, &mut self.quad_transforms, |quad| {
-            quad.order
-        });
-        Self::sort_with_aux_by_key(
-            &mut self.backdrop_blurs,
-            &mut self.backdrop_blur_transforms,
-            |blur| blur.order,
-        );
-        self.paths.sort_by_key(|path| path.order);
-        Self::sort_with_aux_by_key(
-            &mut self.underlines,
-            &mut self.underline_transforms,
-            |underline| underline.order,
-        );
-        self.monochrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
-        self.subpixel_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
-        self.polychrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
-        Self::sort_with_aux_by_key(
-            &mut self.polychrome_sprites,
-            &mut self.polychrome_sprite_transforms,
-            |sprite| (sprite.order, sprite.tile.tile_id),
-        );
-        self.surfaces.sort_by_key(|surface| surface.order);
+    pub(crate) fn finish(&mut self, pool: &mut SceneSegmentPool) -> SceneFinishStats {
+        let mutation_epoch = self.mutation_epoch;
+        let mut stats = SceneFinishStats::default();
+        // NOTE: `finish` sorts only segments that were mutated this frame, to avoid
+        // re-sorting cached fiber segments that were replayed from a previous frame.
+        //
+        // `SlotMap::values_mut` is O(n) over occupied segments and is fine here.
+        for segment in pool.segments.values_mut() {
+            stats.total_pool_segments += 1;
+            if segment.mutated_epoch != mutation_epoch {
+                continue;
+            }
+            stats.mutated_pool_segments += 1;
+            Self::sort_with_aux_by_key(
+                &mut segment.shadows,
+                &mut segment.shadow_transforms,
+                |shadow| shadow.order,
+            );
+            Self::sort_with_aux_by_key(&mut segment.quads, &mut segment.quad_transforms, |quad| {
+                quad.order
+            });
+            Self::sort_with_aux_by_key(
+                &mut segment.backdrop_blurs,
+                &mut segment.backdrop_blur_transforms,
+                |blur| blur.order,
+            );
+            segment.paths.sort_by_key(|path| path.order);
+            Self::sort_with_aux_by_key(
+                &mut segment.underlines,
+                &mut segment.underline_transforms,
+                |underline| underline.order,
+            );
+            segment
+                .monochrome_sprites
+                .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
+            segment
+                .subpixel_sprites
+                .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
+            Self::sort_with_aux_by_key(
+                &mut segment.polychrome_sprites,
+                &mut segment.polychrome_sprite_transforms,
+                |sprite| (sprite.order, sprite.tile.tile_id),
+            );
+            segment.surfaces.sort_by_key(|surface| surface.order);
+        }
+        if self.transient.mutated_epoch == mutation_epoch {
+            stats.transient_mutated = true;
+            Self::sort_with_aux_by_key(
+                &mut self.transient.shadows,
+                &mut self.transient.shadow_transforms,
+                |shadow| shadow.order,
+            );
+            Self::sort_with_aux_by_key(
+                &mut self.transient.quads,
+                &mut self.transient.quad_transforms,
+                |quad| quad.order,
+            );
+            Self::sort_with_aux_by_key(
+                &mut self.transient.backdrop_blurs,
+                &mut self.transient.backdrop_blur_transforms,
+                |blur| blur.order,
+            );
+            self.transient.paths.sort_by_key(|path| path.order);
+            Self::sort_with_aux_by_key(
+                &mut self.transient.underlines,
+                &mut self.transient.underline_transforms,
+                |underline| underline.order,
+            );
+            self.transient
+                .monochrome_sprites
+                .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
+            self.transient
+                .subpixel_sprites
+                .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
+            Self::sort_with_aux_by_key(
+                &mut self.transient.polychrome_sprites,
+                &mut self.transient.polychrome_sprite_transforms,
+                |sprite| (sprite.order, sprite.tile.tile_id),
+            );
+            self.transient.surfaces.sort_by_key(|surface| surface.order);
+        }
+
+        stats
     }
 
     #[cfg_attr(
@@ -280,41 +507,60 @@ impl Scene {
         ),
         allow(dead_code)
     )]
-    pub(crate) fn batches(&self) -> impl Iterator<Item = PrimitiveBatch<'_>> {
-        BatchIterator {
-            shadows: &self.shadows,
-            shadow_transforms: &self.shadow_transforms,
-            shadows_start: 0,
-            shadows_iter: self.shadows.iter().peekable(),
-            quads: &self.quads,
-            quad_transforms: &self.quad_transforms,
-            quads_start: 0,
-            quads_iter: self.quads.iter().peekable(),
-            backdrop_blurs: &self.backdrop_blurs,
-            backdrop_blur_transforms: &self.backdrop_blur_transforms,
-            backdrop_blurs_start: 0,
-            backdrop_blurs_iter: self.backdrop_blurs.iter().peekable(),
-            paths: &self.paths,
-            paths_start: 0,
-            paths_iter: self.paths.iter().peekable(),
-            underlines: &self.underlines,
-            underline_transforms: &self.underline_transforms,
-            underlines_start: 0,
-            underlines_iter: self.underlines.iter().peekable(),
-            monochrome_sprites: &self.monochrome_sprites,
-            monochrome_sprites_start: 0,
-            monochrome_sprites_iter: self.monochrome_sprites.iter().peekable(),
-            subpixel_sprites: &self.subpixel_sprites,
-            subpixel_sprites_start: 0,
-            subpixel_sprites_iter: self.subpixel_sprites.iter().peekable(),
-            polychrome_sprites: &self.polychrome_sprites,
-            polychrome_sprite_transforms: &self.polychrome_sprite_transforms,
-            polychrome_sprites_start: 0,
-            polychrome_sprites_iter: self.polychrome_sprites.iter().peekable(),
-            surfaces: &self.surfaces,
-            surfaces_start: 0,
-            surfaces_iter: self.surfaces.iter().peekable(),
+    pub(crate) fn batches<'a>(
+        &'a self,
+        pool: &'a SceneSegmentPool,
+    ) -> impl Iterator<Item = PrimitiveBatch<'a>> {
+        SegmentBatchIterator {
+            scene: self,
+            pool,
+            order_index: 0,
+            current: None,
         }
+    }
+
+    fn count_segments(&self, pool: &SceneSegmentPool, f: impl Fn(&SceneSegment) -> usize) -> usize {
+        let mut total = f(&self.transient);
+        for segment in pool.segments.values() {
+            total += f(segment);
+        }
+        total
+    }
+
+    pub(crate) fn paths_len(&self, pool: &SceneSegmentPool) -> usize {
+        self.count_segments(pool, |segment| segment.paths.len())
+    }
+
+    pub(crate) fn shadows_len(&self, pool: &SceneSegmentPool) -> usize {
+        self.count_segments(pool, |segment| segment.shadows.len())
+    }
+
+    pub(crate) fn quads_len(&self, pool: &SceneSegmentPool) -> usize {
+        self.count_segments(pool, |segment| segment.quads.len())
+    }
+
+    pub(crate) fn backdrop_blurs_len(&self, pool: &SceneSegmentPool) -> usize {
+        self.count_segments(pool, |segment| segment.backdrop_blurs.len())
+    }
+
+    pub(crate) fn underlines_len(&self, pool: &SceneSegmentPool) -> usize {
+        self.count_segments(pool, |segment| segment.underlines.len())
+    }
+
+    pub(crate) fn monochrome_sprites_len(&self, pool: &SceneSegmentPool) -> usize {
+        self.count_segments(pool, |segment| segment.monochrome_sprites.len())
+    }
+
+    pub(crate) fn subpixel_sprites_len(&self, pool: &SceneSegmentPool) -> usize {
+        self.count_segments(pool, |segment| segment.subpixel_sprites.len())
+    }
+
+    pub(crate) fn polychrome_sprites_len(&self, pool: &SceneSegmentPool) -> usize {
+        self.count_segments(pool, |segment| segment.polychrome_sprites.len())
+    }
+
+    pub(crate) fn surfaces_len(&self, pool: &SceneSegmentPool) -> usize {
+        self.count_segments(pool, |segment| segment.surfaces.len())
     }
 }
 
@@ -337,12 +583,6 @@ pub(crate) enum PrimitiveKind {
     SubpixelSprite,
     PolychromeSprite,
     Surface,
-}
-
-pub(crate) enum PaintOperation {
-    Primitive(Primitive),
-    StartLayer(Bounds<ScaledPixels>),
-    EndLayer,
 }
 
 #[derive(Clone)]
@@ -385,6 +625,20 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
             Primitive::PolychromeSprite(sprite, _) => &sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
+        }
+    }
+
+    fn transform_index(&self) -> u32 {
+        match self {
+            Primitive::Shadow(shadow, _) => shadow.transform_index,
+            Primitive::Quad(quad, _) => quad.transform_index,
+            Primitive::BackdropBlur(blur, _) => blur.transform_index,
+            Primitive::Path(path) => path.transform_index,
+            Primitive::Underline(underline, _) => underline.transform_index,
+            Primitive::MonochromeSprite(sprite) => sprite.transform_index,
+            Primitive::SubpixelSprite(sprite) => sprite.transform_index,
+            Primitive::PolychromeSprite(sprite, _) => sprite.transform_index,
+            Primitive::Surface(surface) => surface.transform_index,
         }
     }
 }
@@ -644,6 +898,69 @@ impl<'a> Iterator for BatchIterator<'a> {
     }
 }
 
+struct SegmentBatchIterator<'a> {
+    scene: &'a Scene,
+    pool: &'a SceneSegmentPool,
+    order_index: usize,
+    current: Option<BatchIterator<'a>>,
+}
+
+impl<'a> Iterator for SegmentBatchIterator<'a> {
+    type Item = PrimitiveBatch<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(current) = self.current.as_mut() {
+                if let Some(batch) = current.next() {
+                    return Some(batch);
+                }
+            }
+
+            let segment_ref = self.scene.segment_order.get(self.order_index)?;
+            self.order_index += 1;
+            let segment = match segment_ref {
+                SceneSegmentRef::Fiber(id) => self.pool.segment(*id),
+                SceneSegmentRef::Transient => Some(&self.scene.transient),
+            };
+
+            self.current = segment.map(|segment| BatchIterator {
+                shadows: &segment.shadows,
+                shadow_transforms: &segment.shadow_transforms,
+                shadows_start: 0,
+                shadows_iter: segment.shadows.iter().peekable(),
+                quads: &segment.quads,
+                quad_transforms: &segment.quad_transforms,
+                quads_start: 0,
+                quads_iter: segment.quads.iter().peekable(),
+                backdrop_blurs: &segment.backdrop_blurs,
+                backdrop_blur_transforms: &segment.backdrop_blur_transforms,
+                backdrop_blurs_start: 0,
+                backdrop_blurs_iter: segment.backdrop_blurs.iter().peekable(),
+                paths: &segment.paths,
+                paths_start: 0,
+                paths_iter: segment.paths.iter().peekable(),
+                underlines: &segment.underlines,
+                underline_transforms: &segment.underline_transforms,
+                underlines_start: 0,
+                underlines_iter: segment.underlines.iter().peekable(),
+                monochrome_sprites: &segment.monochrome_sprites,
+                monochrome_sprites_start: 0,
+                monochrome_sprites_iter: segment.monochrome_sprites.iter().peekable(),
+                subpixel_sprites: &segment.subpixel_sprites,
+                subpixel_sprites_start: 0,
+                subpixel_sprites_iter: segment.subpixel_sprites.iter().peekable(),
+                polychrome_sprites: &segment.polychrome_sprites,
+                polychrome_sprite_transforms: &segment.polychrome_sprite_transforms,
+                polychrome_sprites_start: 0,
+                polychrome_sprites_iter: segment.polychrome_sprites.iter().peekable(),
+                surfaces: &segment.surfaces,
+                surfaces_start: 0,
+                surfaces_iter: segment.surfaces.iter().peekable(),
+            });
+        }
+    }
+}
+
 #[derive(Debug)]
 #[cfg_attr(
     all(
@@ -680,6 +997,8 @@ pub(crate) enum PrimitiveBatch<'a> {
 pub(crate) struct Quad {
     pub order: DrawOrder,
     pub border_style: BorderStyle,
+    pub transform_index: u32,
+    pub pad: u32,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub background: Background,
@@ -699,6 +1018,8 @@ impl From<(Quad, TransformationMatrix)> for Primitive {
 pub(crate) struct BackdropBlur {
     pub order: DrawOrder,
     pub blur_radius: ScaledPixels,
+    pub transform_index: u32,
+    pub pad: u32,
     pub bounds: Bounds<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
@@ -715,7 +1036,7 @@ impl From<(BackdropBlur, TransformationMatrix)> for Primitive {
 #[repr(C)]
 pub(crate) struct Underline {
     pub order: DrawOrder,
-    pub pad: u32, // align to 8 bytes
+    pub transform_index: u32,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub color: Hsla,
@@ -734,6 +1055,8 @@ impl From<(Underline, TransformationMatrix)> for Primitive {
 pub(crate) struct Shadow {
     pub order: DrawOrder,
     pub blur_radius: ScaledPixels,
+    pub transform_index: u32,
+    pub pad: u32,
     pub bounds: Bounds<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
@@ -912,7 +1235,7 @@ impl Default for TransformationMatrix {
 #[repr(C)]
 pub(crate) struct MonochromeSprite {
     pub order: DrawOrder,
-    pub pad: u32, // align to 8 bytes
+    pub transform_index: u32,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub color: Hsla,
@@ -930,7 +1253,7 @@ impl From<MonochromeSprite> for Primitive {
 #[repr(C)]
 pub(crate) struct SubpixelSprite {
     pub order: DrawOrder,
-    pub pad: u32, // align to 8 bytes
+    pub transform_index: u32,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub color: Hsla,
@@ -948,7 +1271,7 @@ impl From<SubpixelSprite> for Primitive {
 #[repr(C)]
 pub(crate) struct PolychromeSprite {
     pub order: DrawOrder,
-    pub pad: u32, // align to 8 bytes
+    pub transform_index: u32,
     pub grayscale: bool,
     pub opacity: f32,
     pub bounds: Bounds<ScaledPixels>,
@@ -966,6 +1289,7 @@ impl From<(PolychromeSprite, TransformationMatrix)> for Primitive {
 #[derive(Clone, Debug)]
 pub(crate) struct PaintSurface {
     pub order: DrawOrder,
+    pub transform_index: u32,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     #[cfg(target_os = "macos")]
@@ -986,6 +1310,7 @@ pub(crate) struct PathId(pub(crate) usize);
 pub struct Path<P: Clone + Debug + Default + PartialEq> {
     pub(crate) id: PathId,
     pub(crate) order: DrawOrder,
+    pub(crate) transform_index: u32,
     pub(crate) bounds: Bounds<P>,
     pub(crate) content_mask: ContentMask<P>,
     pub(crate) vertices: Vec<PathVertex<P>>,
@@ -1001,6 +1326,7 @@ impl Path<Pixels> {
         Self {
             id: PathId(0),
             order: DrawOrder::default(),
+            transform_index: 0,
             vertices: Vec::new(),
             start,
             current: start,
@@ -1019,6 +1345,7 @@ impl Path<Pixels> {
         Path {
             id: self.id,
             order: self.order,
+            transform_index: self.transform_index,
             bounds: self.bounds.scale(factor),
             content_mask: self.content_mask.scale(factor),
             vertices: self
@@ -1114,7 +1441,7 @@ where
 {
     #[allow(unused)]
     pub(crate) fn clipped_bounds(&self) -> Bounds<T> {
-        self.bounds.intersect(&self.content_mask.bounds)
+        self.bounds.clone()
     }
 }
 
@@ -1139,5 +1466,113 @@ impl PathVertex<Pixels> {
             st_position: self.st_position,
             content_mask: self.content_mask.scale(factor),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scene_segment_pool_alloc_returns_unique_ids() {
+        let mut pool = SceneSegmentPool::default();
+
+        let id1 = pool.alloc_segment();
+        let id2 = pool.alloc_segment();
+        let id3 = pool.alloc_segment();
+
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
+        assert_ne!(id1, id3);
+    }
+
+    #[test]
+    fn scene_segment_pool_remove_and_realloc() {
+        let mut pool = SceneSegmentPool::default();
+
+        let id1 = pool.alloc_segment();
+        let id2 = pool.alloc_segment();
+
+        // Remove first segment
+        pool.remove_segment(id1);
+
+        // Allocate again - should not reuse the removed key (generation increments)
+        let id3 = pool.alloc_segment();
+        assert_ne!(id3, id1, "Removed segment key should not be reused");
+
+        // id2 should still be valid
+        assert!(pool.segment(id2).is_some());
+        assert!(pool.segment(id3).is_some());
+    }
+
+    #[test]
+    fn scene_segment_pool_reset_segment_clears_content() {
+        let mut pool = SceneSegmentPool::default();
+        let id = pool.alloc_segment();
+
+        // Get the segment and verify it exists
+        let segment = pool.segment_mut(id);
+        assert!(segment.is_some());
+
+        // Reset the segment
+        pool.reset_segment(id, 42);
+
+        // Verify the mutation_epoch was updated
+        let segment = pool.segment(id);
+        assert!(segment.is_some());
+        assert_eq!(segment.unwrap().mutated_epoch, 42);
+    }
+
+    #[test]
+    fn scene_segment_pool_reset_all_clears_all_segments() {
+        let mut pool = SceneSegmentPool::default();
+
+        // Allocate multiple segments
+        let id1 = pool.alloc_segment();
+        let id2 = pool.alloc_segment();
+        let id3 = pool.alloc_segment();
+
+        // Reset all with a specific epoch
+        pool.reset_all(100);
+
+        // Verify all segments were reset
+        assert_eq!(pool.segment(id1).unwrap().mutated_epoch, 100);
+        assert_eq!(pool.segment(id2).unwrap().mutated_epoch, 100);
+        assert_eq!(pool.segment(id3).unwrap().mutated_epoch, 100);
+    }
+
+    #[test]
+    fn scene_segment_pool_reset_all_preserves_removed_segments() {
+        let mut pool = SceneSegmentPool::default();
+
+        let id1 = pool.alloc_segment();
+        let id2 = pool.alloc_segment();
+
+        // Remove one segment
+        pool.remove_segment(id1);
+
+        // Reset all
+        pool.reset_all(50);
+
+        // id1 should still be removed (None)
+        assert!(pool.segment(id1).is_none());
+
+        // id2 should be reset
+        assert_eq!(pool.segment(id2).unwrap().mutated_epoch, 50);
+    }
+
+    #[test]
+    fn scene_mutation_epoch_starts_at_zero() {
+        let scene = Scene::default();
+        assert_eq!(scene.mutation_epoch(), 0);
+    }
+
+    #[test]
+    fn scene_segment_id_equality() {
+        let mut pool = SceneSegmentPool::default();
+        let id1 = pool.alloc_segment();
+        let id2 = pool.alloc_segment();
+        assert_ne!(id1, id2);
+        assert_eq!(id1, id1);
     }
 }

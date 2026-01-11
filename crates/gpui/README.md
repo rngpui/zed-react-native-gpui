@@ -1,7 +1,6 @@
 # Welcome to GPUI!
 
-GPUI is a hybrid immediate and retained mode, GPU accelerated, UI framework
-for Rust, designed to support a wide variety of applications.
+GPUI is a GPU accelerated UI framework for Rust with React-inspired incremental rendering, designed to support a wide variety of applications.
 
 ## Getting Started
 
@@ -45,9 +44,9 @@ GPUI offers three different [registers](<https://en.wikipedia.org/wiki/Register_
 
 - State management and communication with `Entity`'s. Whenever you need to store application state that communicates between different parts of your application, you'll want to use GPUI's entities. Entities are owned by GPUI and are only accessible through an owned smart pointer similar to an `Rc`. See the `app::context` module for more information.
 
-- High level, declarative UI with views. All UI in GPUI starts with a view. A view is simply an `Entity` that can be rendered, by implementing the `Render` trait. At the start of each frame, GPUI will call this render method on the root view of a given window. Views build a tree of `elements`, lay them out and style them with a tailwind-style API, and then give them to GPUI to turn into pixels. See the `div` element for an all purpose swiss-army knife of rendering.
+- High level, declarative UI with views. All UI in GPUI starts with a view. A view is simply an `Entity` that can be rendered, by implementing the `Render` trait. When a view's state changes, GPUI calls this render method and reconciles the returned elements into a persistent fiber tree, re-rendering only what changed. Views build a tree of `elements`, lay them out and style them with a tailwind-style API, and then give them to GPUI to turn into pixels. See the `div` element for an all purpose swiss-army knife of rendering.
 
-- Low level, imperative UI with Elements. Elements are the building blocks of UI in GPUI, and they provide a nice wrapper around an imperative API that provides as much flexibility and control as you need. Elements have total control over how they and their child elements are rendered and can be used for making efficient views into large lists, implement custom layouting for a code editor, and anything else you can think of. See the `element` module for more information.
+- Low level, imperative UI with Elements. Elements are the building blocks of UI in GPUI, reconciled into a persistent tree with cached layout and rendering. They provide full flexibility and control when you need to go beyond the standard components. Elements have total control over how they and their child elements are rendered and can be used for making efficient views into large lists, implement custom layouting for a code editor, and anything else you can think of. See the `element` module for more information.
 
 Each of these registers has one or more corresponding contexts that can be accessed from all GPUI services. This context is your main interface to GPUI, and is used extensively throughout the framework.
 

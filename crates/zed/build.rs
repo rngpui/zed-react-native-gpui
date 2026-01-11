@@ -1,6 +1,4 @@
 #![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
-use std::env;
-use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
@@ -206,6 +204,8 @@ fn main() {
 #[cfg(feature = "rn-chat-demo")]
 fn link_rngpui_for_rn_chat_demo() {
     use rngpui_build::{BuildConfig, build, emit_link_directives, existing_build_output};
+    use std::env;
+    use std::path::PathBuf;
 
     // crates/zed -> crates -> zed -> rngpui -> react-native-gpui
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
@@ -319,6 +319,9 @@ fn link_rngpui_for_rn_chat_demo() {
 /// The staticlib provides Rust implementations called from C++ via CXX bridge.
 #[cfg(feature = "rn-chat-demo")]
 fn link_craby_modules() {
+    use std::env;
+    use std::path::PathBuf;
+
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
     let out_path = PathBuf::from(&out_dir);
 
@@ -480,10 +483,12 @@ fn link_rngpui_for_rn_chat_demo() {
 
 #[cfg(feature = "rn-chat-demo")]
 fn newest_matching_file(
-    dir: &PathBuf,
+    dir: &std::path::PathBuf,
     prefix: &str,
     suffix_components: &[&str],
-) -> Option<PathBuf> {
+) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+
     let entries = std::fs::read_dir(dir).ok()?;
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
 

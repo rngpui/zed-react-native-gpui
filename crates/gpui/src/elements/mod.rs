@@ -10,6 +10,7 @@ mod surface;
 mod svg;
 mod text;
 mod uniform_list;
+mod virtualized_list;
 
 pub use anchored::*;
 pub use animation::*;

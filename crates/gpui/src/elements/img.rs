@@ -1,11 +1,13 @@
 use crate::{
-    AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
-    Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
-    Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
-    SharedString, SharedUri, StyleRefinement, Styled, Task, Window, px,
+    AnyElement, AnyImageCache, App, Asset, AssetLogger, AvailableSpace, Bounds, DefiniteLength,
+    Element, ElementId, Entity, GlobalElementId, Image, ImageCache,
+    InspectorElementId, InteractiveElement, Interactivity, IntoElement, LayoutId, Length,
+    ObjectFit, Pixels, RenderImage, Resource, SharedString, SharedUri, Size, Style,
+    StyleRefinement, Styled, Task, UpdateResult, VKey, Window, px, taffy::ToTaffy,
 };
 use anyhow::{Context as _, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use refineable::Refineable;
 
 use futures::{AsyncReadExt, Future};
 use image::{
@@ -16,6 +18,7 @@ use smallvec::SmallVec;
 use std::{
     fs,
     io::{self, Cursor},
+    hash::{Hash, Hasher},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     str::FromStr,
@@ -24,8 +27,9 @@ use std::{
 };
 use thiserror::Error;
 use util::ResultExt;
+use collections::FxHasher;
 
-use super::{Stateful, StatefulInteractiveElement};
+use super::{Stateful, StatefulInteractiveElement, div::StatefulInner};
 
 /// The delay before showing the loading state.
 pub const LOADING_DELAY: Duration = Duration::from_millis(200);
@@ -183,7 +187,8 @@ impl StyledImage for Img {
 
 impl StyledImage for Stateful<Img> {
     fn image_style(&mut self) -> &mut ImageStyle {
-        &mut self.element.style
+        let StatefulInner::Element(element) = &mut self.inner;
+        &mut element.style
     }
 }
 
@@ -232,38 +237,31 @@ impl Img {
             ..self
         }
     }
+
+    pub(crate) fn take_interactivity(&mut self) -> Interactivity {
+        std::mem::take(&mut self.interactivity)
+    }
 }
 
 impl Deref for Stateful<Img> {
     type Target = Img;
 
     fn deref(&self) -> &Self::Target {
-        &self.element
+        let StatefulInner::Element(element) = &self.inner;
+        element
     }
 }
 
 impl DerefMut for Stateful<Img> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.element
+        let StatefulInner::Element(element) = &mut self.inner;
+        element
     }
 }
 
-/// The image state between frames
-struct ImgState {
-    frame_index: usize,
-    last_frame_time: Option<Instant>,
-    started_loading: Option<(Instant, Task<()>)>,
-}
-
-/// The image layout state between frames
-pub struct ImgLayoutState {
-    frame_index: usize,
-    replacement: Option<AnyElement>,
-}
-
 impl Element for Img {
-    type RequestLayoutState = ImgLayoutState;
-    type PrepaintState = Option<Hitbox>;
+    type RequestLayoutState = ();
+    type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
         self.interactivity.element_id.clone()
@@ -275,219 +273,115 @@ impl Element for Img {
 
     fn request_layout(
         &mut self,
-        global_id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
+        _global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _window: &mut Window,
+        _cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut layout_state = ImgLayoutState {
-            frame_index: 0,
-            replacement: None,
-        };
-
-        window.with_optional_element_state(global_id, |state, window| {
-            let mut state = state.map(|state| {
-                state.unwrap_or(ImgState {
-                    frame_index: 0,
-                    last_frame_time: None,
-                    started_loading: None,
-                })
-            });
-
-            let frame_index = state.as_ref().map(|state| state.frame_index).unwrap_or(0);
-
-            let layout_id = self.interactivity.request_layout(
-                global_id,
-                inspector_id,
-                window,
-                cx,
-                |mut style, window, cx| {
-                    let mut replacement_id = None;
-
-                    match self.source.use_data(
-                        self.image_cache
-                            .clone()
-                            .or_else(|| window.image_cache_stack.last().cloned()),
-                        window,
-                        cx,
-                    ) {
-                        Some(Ok(data)) => {
-                            if let Some(state) = &mut state {
-                                let frame_count = data.frame_count();
-                                if frame_count > 1 {
-                                    let current_time = Instant::now();
-                                    if let Some(last_frame_time) = state.last_frame_time {
-                                        let elapsed = current_time - last_frame_time;
-                                        let frame_duration =
-                                            Duration::from(data.delay(state.frame_index));
-
-                                        if elapsed >= frame_duration {
-                                            state.frame_index =
-                                                (state.frame_index + 1) % frame_count;
-                                            state.last_frame_time =
-                                                Some(current_time - (elapsed - frame_duration));
-                                        }
-                                    } else {
-                                        state.last_frame_time = Some(current_time);
-                                    }
-                                }
-                                state.started_loading = None;
-                            }
-
-                            let image_size = data.render_size(frame_index);
-                            style.aspect_ratio = Some(image_size.width / image_size.height);
-
-                            if let Length::Auto = style.size.width {
-                                style.size.width = match style.size.height {
-                                    Length::Definite(DefiniteLength::Absolute(abs_length)) => {
-                                        let height_px = abs_length.to_pixels(window.rem_size());
-                                        Length::Definite(
-                                            px(image_size.width.0 * height_px.0
-                                                / image_size.height.0)
-                                            .into(),
-                                        )
-                                    }
-                                    _ => Length::Definite(image_size.width.into()),
-                                };
-                            }
-
-                            if let Length::Auto = style.size.height {
-                                style.size.height = match style.size.width {
-                                    Length::Definite(DefiniteLength::Absolute(abs_length)) => {
-                                        let width_px = abs_length.to_pixels(window.rem_size());
-                                        Length::Definite(
-                                            px(image_size.height.0 * width_px.0
-                                                / image_size.width.0)
-                                            .into(),
-                                        )
-                                    }
-                                    _ => Length::Definite(image_size.height.into()),
-                                };
-                            }
-
-                            if global_id.is_some() && data.frame_count() > 1 {
-                                window.request_animation_frame();
-                            }
-                        }
-                        Some(_err) => {
-                            if let Some(fallback) = self.style.fallback.as_ref() {
-                                let mut element = fallback();
-                                replacement_id = Some(element.request_layout(window, cx));
-                                layout_state.replacement = Some(element);
-                            }
-                            if let Some(state) = &mut state {
-                                state.started_loading = None;
-                            }
-                        }
-                        None => {
-                            if let Some(state) = &mut state {
-                                if let Some((started_loading, _)) = state.started_loading {
-                                    if started_loading.elapsed() > LOADING_DELAY
-                                        && let Some(loading) = self.style.loading.as_ref()
-                                    {
-                                        let mut element = loading();
-                                        replacement_id = Some(element.request_layout(window, cx));
-                                        layout_state.replacement = Some(element);
-                                    }
-                                } else {
-                                    let current_view = window.current_view();
-                                    let task = window.spawn(cx, async move |cx| {
-                                        cx.background_executor().timer(LOADING_DELAY).await;
-                                        cx.update(move |_, cx| {
-                                            cx.notify(current_view);
-                                        })
-                                        .ok();
-                                    });
-                                    state.started_loading = Some((Instant::now(), task));
-                                }
-                            }
-                        }
-                    }
-
-                    window.request_layout(style, replacement_id, cx)
-                },
-            );
-
-            layout_state.frame_index = frame_index;
-
-            ((layout_id, layout_state), state)
-        })
+        unreachable!("Img uses retained node path")
     }
 
     fn prepaint(
         &mut self,
-        global_id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        request_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        self.interactivity.prepaint(
-            global_id,
-            inspector_id,
-            bounds,
-            bounds.size,
-            window,
-            cx,
-            |_, _, hitbox, window, cx| {
-                if let Some(replacement) = &mut request_layout.replacement {
-                    replacement.prepaint(window, cx);
-                }
-
-                hitbox
-            },
-        )
+        _global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) {
+        unreachable!("Img uses retained node path")
     }
 
     fn paint(
         &mut self,
-        global_id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        layout_state: &mut Self::RequestLayoutState,
-        hitbox: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
+        _global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _layout_state: &mut Self::RequestLayoutState,
+        _hitbox: &mut Self::PrepaintState,
+        _window: &mut Window,
+        _cx: &mut App,
     ) {
-        let source = self.source.clone();
-        self.interactivity.paint(
-            global_id,
-            inspector_id,
-            bounds,
-            hitbox.as_ref(),
-            window,
-            cx,
-            |style, window, cx| {
-                if let Some(Ok(data)) = source.use_data(
-                    self.image_cache
-                        .clone()
-                        .or_else(|| window.image_cache_stack.last().cloned()),
-                    window,
-                    cx,
-                ) {
-                    let new_bounds = self
-                        .style
-                        .object_fit
-                        .get_bounds(bounds, data.size(layout_state.frame_index));
-                    let corner_radii = style
-                        .corner_radii
-                        .to_pixels(window.rem_size())
-                        .clamp_radii_for_quad_size(new_bounds.size);
-                    window
-                        .paint_image(
-                            new_bounds,
-                            corner_radii,
-                            data,
-                            layout_state.frame_index,
-                            self.style.grayscale,
-                        )
-                        .log_err();
-                } else if let Some(replacement) = &mut layout_state.replacement {
-                    replacement.paint(window, cx);
-                }
-            },
-        )
+        unreachable!("Img uses retained node path")
+    }
+
+    fn fiber_key(&self) -> VKey {
+        VKey::None
+    }
+
+    fn cached_style(&self) -> Option<&StyleRefinement> {
+        Some(&self.interactivity.base_style)
+    }
+
+    fn create_render_node(&mut self) -> Option<Box<dyn crate::RenderNode>> {
+        Some(Box::new(ImgNode::new(
+            self.take_interactivity(),
+            self.source.clone(),
+            self.style.grayscale,
+            self.style.object_fit,
+            self.image_cache.take(),
+            self.style.loading.take(),
+            self.style.fallback.take(),
+        )))
+    }
+
+    fn update_render_node(
+        &mut self,
+        node: &mut dyn crate::RenderNode,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<UpdateResult> {
+        if let Some(img_node) = node.as_any_mut().downcast_mut::<ImgNode>() {
+            let interactivity = self.take_interactivity();
+            let update_result = img_node.interactivity.diff_styles(&interactivity);
+
+            let source = self.source.clone();
+            let grayscale = self.style.grayscale;
+            let object_fit = self.style.object_fit;
+            let image_cache = self.image_cache.take();
+            let loading_factory = self.style.loading.take();
+            let fallback_factory = self.style.fallback.take();
+
+            let image_cache_changed = match (&img_node.image_cache, &image_cache) {
+                (Some(a), Some(b)) => !a.identity_eq(b),
+                (None, None) => false,
+                _ => true,
+            };
+
+            let content_changed = !img_node.source.identity_eq(&source)
+                || img_node.grayscale != grayscale
+                || img_node.object_fit != object_fit
+                || image_cache_changed
+                || img_node.loading_factory.is_some() != loading_factory.is_some()
+                || img_node.fallback_factory.is_some() != fallback_factory.is_some();
+
+            let mut layout_changed = update_result.layout_changed;
+            let mut paint_changed = update_result.paint_changed;
+            if content_changed {
+                layout_changed = true;
+                paint_changed = true;
+            }
+            if layout_changed {
+                paint_changed = true;
+            }
+
+            img_node.update_from(
+                interactivity,
+                source,
+                grayscale,
+                object_fit,
+                image_cache,
+                loading_factory,
+                fallback_factory,
+            );
+            Some(UpdateResult {
+                layout_changed,
+                paint_changed,
+            })
+        } else {
+            None
+        }
     }
 }
 
@@ -513,7 +407,406 @@ impl IntoElement for Img {
 
 impl StatefulInteractiveElement for Img {}
 
+/// Retained render node for Img elements.
+///
+/// This node owns all image-specific data and state, enabling fully
+/// node-handled layout, prepaint, and paint phases.
+pub(crate) struct ImgNode {
+    /// Interactivity state for this image element.
+    pub interactivity: Interactivity,
+    /// The image source.
+    pub source: ImageSource,
+    /// Whether to render in grayscale.
+    pub grayscale: bool,
+    /// How to fit the image within bounds.
+    pub object_fit: ObjectFit,
+    /// Optional image cache override.
+    pub image_cache: Option<AnyImageCache>,
+    /// Factory function to create loading indicator element.
+    pub loading_factory: Option<Box<dyn Fn() -> AnyElement>>,
+    /// Factory function to create fallback element on error.
+    pub fallback_factory: Option<Box<dyn Fn() -> AnyElement>>,
+
+    // --- Persistent state (retained across frames) ---
+    /// Current animation frame index.
+    frame_index: usize,
+    /// Timestamp of last frame change for animation.
+    last_frame_time: Option<Instant>,
+    /// Loading state: (start time, notification task).
+    started_loading: Option<(Instant, Task<()>)>,
+    /// Replacement element (loading indicator or fallback) created during layout.
+    replacement: Option<AnyElement>,
+
+    // --- Layout cache (computed in layout_begin) ---
+    /// Cached taffy style computed from interactivity.base_style.
+    cached_taffy_style: taffy::style::Style,
+    /// Cached image data result for current frame.
+    cached_image_data: Option<Result<Arc<RenderImage>, ImageCacheError>>,
+    /// Image cache to use (either explicit or inherited).
+    effective_image_cache: Option<AnyImageCache>,
+}
+
+impl ImgNode {
+    /// Create a new ImgNode from descriptor data.
+    pub fn new(
+        interactivity: Interactivity,
+        source: ImageSource,
+        grayscale: bool,
+        object_fit: ObjectFit,
+        image_cache: Option<AnyImageCache>,
+        loading_factory: Option<Box<dyn Fn() -> AnyElement>>,
+        fallback_factory: Option<Box<dyn Fn() -> AnyElement>>,
+    ) -> Self {
+        Self {
+            interactivity,
+            source,
+            grayscale,
+            object_fit,
+            image_cache,
+            loading_factory,
+            fallback_factory,
+            frame_index: 0,
+            last_frame_time: None,
+            started_loading: None,
+            replacement: None,
+            cached_taffy_style: taffy::style::Style::default(),
+            cached_image_data: None,
+            effective_image_cache: None,
+        }
+    }
+
+    /// Update this node from a descriptor.
+    pub fn update_from(
+        &mut self,
+        interactivity: Interactivity,
+        source: ImageSource,
+        grayscale: bool,
+        object_fit: ObjectFit,
+        image_cache: Option<AnyImageCache>,
+        loading_factory: Option<Box<dyn Fn() -> AnyElement>>,
+        fallback_factory: Option<Box<dyn Fn() -> AnyElement>>,
+    ) {
+        self.interactivity = interactivity;
+        self.source = source;
+        self.grayscale = grayscale;
+        self.object_fit = object_fit;
+        self.image_cache = image_cache;
+        self.loading_factory = loading_factory;
+        self.fallback_factory = fallback_factory;
+    }
+}
+
+impl crate::RenderNode for ImgNode {
+    fn needs_child_bounds(&self) -> bool {
+        false
+    }
+
+    fn layout_begin(&mut self, ctx: &mut crate::LayoutCtx) -> crate::LayoutFrame {
+        // Determine effective image cache (explicit or inherited from stack)
+        self.effective_image_cache = self
+            .image_cache
+            .clone()
+            .or_else(|| ctx.window.image_cache_stack.last().cloned());
+
+        // Fetch/update image data and handle animation state
+        let image_result =
+            self.source
+                .use_data(self.effective_image_cache.clone(), ctx.window, ctx.cx);
+
+        // Clear any previous replacement
+        self.replacement = None;
+
+        match &image_result {
+            Some(Ok(data)) => {
+                // Image loaded successfully - handle animation
+                let frame_count = data.frame_count();
+                if frame_count > 1 {
+                    let current_time = Instant::now();
+                    if let Some(last_frame_time) = self.last_frame_time {
+                        let elapsed = current_time - last_frame_time;
+                        let frame_duration = Duration::from(data.delay(self.frame_index));
+
+                        if elapsed >= frame_duration {
+                            self.frame_index = (self.frame_index + 1) % frame_count;
+                            self.last_frame_time = Some(current_time - (elapsed - frame_duration));
+                        }
+                    } else {
+                        self.last_frame_time = Some(current_time);
+                    }
+                    ctx.window.request_animation_frame();
+                }
+                self.started_loading = None;
+            }
+            Some(Err(_)) => {
+                // Error loading - create fallback element
+                if let Some(ref fallback_factory) = self.fallback_factory {
+                    let mut element = fallback_factory();
+                    element.request_layout(ctx.window, ctx.cx);
+                    self.replacement = Some(element);
+                }
+                self.started_loading = None;
+            }
+            None => {
+                // Still loading - maybe create loading indicator
+                if let Some((started_loading, _)) = self.started_loading {
+                    if started_loading.elapsed() > LOADING_DELAY {
+                        if let Some(ref loading_factory) = self.loading_factory {
+                            let mut element = loading_factory();
+                            element.request_layout(ctx.window, ctx.cx);
+                            self.replacement = Some(element);
+                        }
+                    }
+                } else {
+                    // Start the loading delay timer
+                    let current_view = ctx.window.current_view();
+                    let task = ctx.window.spawn(ctx.cx, async move |cx| {
+                        cx.background_executor().timer(LOADING_DELAY).await;
+                        cx.update(move |_, cx| {
+                            cx.notify(current_view);
+                        })
+                        .ok();
+                    });
+                    self.started_loading = Some((Instant::now(), task));
+                }
+            }
+        }
+
+        self.cached_image_data = image_result;
+
+        // Compute taffy style from interactivity.base_style
+        let mut style = Style::default();
+        style.refine(&self.interactivity.base_style);
+
+        // If image loaded, adjust style for aspect ratio and intrinsic sizing
+        if let Some(Ok(ref data)) = self.cached_image_data {
+            let image_size = data.render_size(self.frame_index);
+            style.aspect_ratio = Some(image_size.width / image_size.height);
+
+            if let Length::Auto = style.size.width {
+                style.size.width = match style.size.height {
+                    Length::Definite(DefiniteLength::Absolute(abs_length)) => {
+                        let height_px = abs_length.to_pixels(ctx.rem_size);
+                        Length::Definite(
+                            px(image_size.width.0 * height_px.0 / image_size.height.0).into(),
+                        )
+                    }
+                    _ => Length::Definite(image_size.width.into()),
+                };
+            }
+
+            if let Length::Auto = style.size.height {
+                style.size.height = match style.size.width {
+                    Length::Definite(DefiniteLength::Absolute(abs_length)) => {
+                        let width_px = abs_length.to_pixels(ctx.rem_size);
+                        Length::Definite(
+                            px(image_size.height.0 * width_px.0 / image_size.width.0).into(),
+                        )
+                    }
+                    _ => Length::Definite(image_size.height.into()),
+                };
+            }
+        }
+
+        self.cached_taffy_style = style.to_taffy(ctx.rem_size, ctx.scale_factor);
+
+        crate::LayoutFrame {
+            handled: true,
+            ..Default::default()
+        }
+    }
+
+    fn taffy_style(&self, _rem_size: crate::Pixels, _scale_factor: f32) -> taffy::style::Style {
+        // Return the pre-computed style from layout_begin
+        self.cached_taffy_style.clone()
+    }
+
+    fn compute_intrinsic_size(
+        &mut self,
+        _ctx: &mut crate::SizingCtx,
+    ) -> crate::IntrinsicSizeResult {
+        let mut hasher = FxHasher::default();
+
+        match &self.source {
+            ImageSource::Resource(resource) => {
+                0u8.hash(&mut hasher);
+                resource.hash(&mut hasher);
+            }
+            ImageSource::Render(image) => {
+                1u8.hash(&mut hasher);
+                (Arc::as_ptr(image) as usize).hash(&mut hasher);
+            }
+            ImageSource::Image(image) => {
+                2u8.hash(&mut hasher);
+                (Arc::as_ptr(image) as usize).hash(&mut hasher);
+            }
+            ImageSource::Custom(loader) => {
+                3u8.hash(&mut hasher);
+                (Arc::as_ptr(loader) as *const () as usize).hash(&mut hasher);
+            }
+        }
+
+        self.frame_index.hash(&mut hasher);
+        if let Some(Ok(ref data)) = self.cached_image_data {
+            let image_size = data.render_size(self.frame_index);
+            image_size.width.0.to_bits().hash(&mut hasher);
+            image_size.height.0.to_bits().hash(&mut hasher);
+        }
+
+        let input = crate::SizingInput::new(hasher.finish(), 0);
+
+        let size = if let Some(Ok(ref data)) = self.cached_image_data {
+            let image_size = data.render_size(self.frame_index);
+            crate::IntrinsicSize {
+                min_content: image_size,
+                max_content: image_size,
+            }
+        } else {
+            crate::IntrinsicSize::default()
+        };
+
+        crate::IntrinsicSizeResult { size, input }
+    }
+
+    fn resolve_size_query(
+        &mut self,
+        query: crate::SizeQuery,
+        cached: &crate::IntrinsicSize,
+        _ctx: &mut crate::SizingCtx,
+    ) -> Size<Pixels> {
+        match query {
+            crate::SizeQuery::MinContent => cached.min_content,
+            crate::SizeQuery::MaxContent => cached.max_content,
+            crate::SizeQuery::ForWidth(width) => Size {
+                width,
+                height: cached.max_content.height,
+            },
+            crate::SizeQuery::ForHeight(height) => Size {
+                width: cached.max_content.width,
+                height,
+            },
+            crate::SizeQuery::Definite(size) => size,
+        }
+    }
+
+    fn measure(
+        &mut self,
+        known: Size<Option<Pixels>>,
+        _available: Size<AvailableSpace>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<Size<Pixels>> {
+        // If we have image data, use its intrinsic size
+        if let Some(Ok(ref data)) = self.cached_image_data {
+            let image_size = data.render_size(self.frame_index);
+            Some(Size {
+                width: known.width.unwrap_or(image_size.width),
+                height: known.height.unwrap_or(image_size.height),
+            })
+        } else {
+            // No image data - let Taffy use style-defined size
+            None
+        }
+    }
+
+    fn prepaint_begin(&mut self, ctx: &mut crate::PrepaintCtx) -> crate::PrepaintFrame {
+        // Call interactivity.prepaint to set up hitbox and event handlers
+        let hitbox = self.interactivity.prepaint(
+            Some(&ctx.fiber_id),
+            ctx.inspector_id.as_ref(),
+            ctx.bounds,
+            ctx.bounds.size,
+            ctx.window,
+            ctx.cx,
+            |_, _, hitbox, _window, _cx| hitbox,
+        );
+
+        // Prepaint replacement element if it exists
+        if let Some(ref mut replacement) = self.replacement {
+            replacement.prepaint(ctx.window, ctx.cx);
+        }
+
+        crate::PrepaintFrame {
+            handled: true,
+            skip_children: true, // Img is always a leaf node
+            hitbox,
+            ..Default::default()
+        }
+    }
+
+    fn prepaint_end(&mut self, _ctx: &mut crate::PrepaintCtx, _frame: crate::PrepaintFrame) {
+        // Nothing to pop for Img - it doesn't push any context
+    }
+
+    fn paint_begin(&mut self, ctx: &mut crate::PaintCtx) -> crate::PaintFrame {
+        // Get hitbox from window (registered during prepaint)
+        let hitbox = ctx.window.resolve_hitbox(&ctx.fiber_id);
+
+        let has_replacement = self.replacement.is_some();
+        let frame_index = self.frame_index;
+        let grayscale = self.grayscale;
+        let object_fit = self.object_fit;
+        let bounds = ctx.bounds;
+
+        // Clone cached image data for the paint closure
+        let cached_image_data = self.cached_image_data.clone();
+
+        // Use interactivity.paint which handles style resolution, shadows, borders, etc.
+        self.interactivity.paint(
+            Some(&ctx.fiber_id),
+            ctx.inspector_id.as_ref(),
+            ctx.bounds,
+            hitbox.as_ref(),
+            ctx.window,
+            ctx.cx,
+            |style, window, _cx| {
+                if has_replacement {
+                    // Replacement will be painted after this (stored in self)
+                } else if let Some(Ok(data)) = cached_image_data {
+                    // Paint the image
+                    let new_bounds = object_fit.get_bounds(bounds, data.size(frame_index));
+                    let corner_radii = style
+                        .corner_radii
+                        .to_pixels(window.rem_size())
+                        .clamp_radii_for_quad_size(new_bounds.size);
+                    window
+                        .paint_image(new_bounds, corner_radii, data, frame_index, grayscale)
+                        .log_err();
+                }
+            },
+        );
+
+        // Paint replacement element if it exists (after interactivity.paint for proper ordering)
+        if let Some(ref mut replacement) = self.replacement {
+            replacement.paint(ctx.window, ctx.cx);
+        }
+
+        crate::PaintFrame {
+            handled: true,
+            skip_children: true, // Img is always a leaf node
+            ..Default::default()
+        }
+    }
+
+    fn paint_end(&mut self, _ctx: &mut crate::PaintCtx, _frame: crate::PaintFrame) {
+        // Nothing to pop for Img - it doesn't push any context
+    }
+
+    fn interactivity(&self) -> Option<&crate::Interactivity> {
+        Some(&self.interactivity)
+    }
+}
+
 impl ImageSource {
+    pub(crate) fn identity_eq(&self, other: &ImageSource) -> bool {
+        match (self, other) {
+            (ImageSource::Resource(a), ImageSource::Resource(b)) => a == b,
+            (ImageSource::Render(a), ImageSource::Render(b)) => Arc::ptr_eq(a, b),
+            (ImageSource::Image(a), ImageSource::Image(b)) => Arc::ptr_eq(a, b),
+            (ImageSource::Custom(a), ImageSource::Custom(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
     pub(crate) fn use_data(
         &self,
         cache: Option<AnyImageCache>,
@@ -617,23 +910,23 @@ impl Asset for ImageAssetLoader {
                             payload.as_bytes().to_vec()
                         }
                     } else {
-                    let mut response = client
-                        .get(uri.as_ref(), ().into(), true)
-                        .await
-                        .with_context(|| format!("loading image asset from {uri:?}"))?;
-                    let mut body = Vec::new();
-                    response.body_mut().read_to_end(&mut body).await?;
-                    if !response.status().is_success() {
-                        let mut body = String::from_utf8_lossy(&body).into_owned();
-                        let first_line = body.lines().next().unwrap_or("").trim_end();
-                        body.truncate(first_line.len());
-                        return Err(ImageCacheError::BadStatus {
-                            uri,
-                            status: response.status(),
-                            body,
-                        });
-                    }
-                    body
+                        let mut response = client
+                            .get(uri.as_ref(), ().into(), true)
+                            .await
+                            .with_context(|| format!("loading image asset from {uri:?}"))?;
+                        let mut body = Vec::new();
+                        response.body_mut().read_to_end(&mut body).await?;
+                        if !response.status().is_success() {
+                            let mut body = String::from_utf8_lossy(&body).into_owned();
+                            let first_line = body.lines().next().unwrap_or("").trim_end();
+                            body.truncate(first_line.len());
+                            return Err(ImageCacheError::BadStatus {
+                                uri,
+                                status: response.status(),
+                                body,
+                            });
+                        }
+                        body
                     }
                 }
                 Resource::Embedded(path) => {

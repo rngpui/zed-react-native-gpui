@@ -24,6 +24,7 @@ use crate::{
     platform::windows::directx_renderer::shader_resources::{
         RawShaderBytes, ShaderModule, ShaderTarget,
     },
+    transform::GpuTransform,
     *,
 };
 
@@ -44,6 +45,7 @@ pub(crate) struct DirectXRenderer {
     devices: Option<DirectXRendererDevices>,
     resources: Option<DirectXResources>,
     globals: DirectXGlobalElements<GlobalParams>,
+    context_transforms: AuxBuffer,
     pipelines: DirectXRenderPipelines,
     direct_composition: Option<DirectComposition>,
     font_info: &'static FontInfo,
@@ -159,6 +161,18 @@ impl DirectXRenderer {
             .context("Creating DirectX global elements")?;
         let pipelines = DirectXRenderPipelines::new(&devices.device)
             .context("Creating DirectX render pipelines")?;
+        let context_transforms = {
+            let buffer_size = 1024;
+            let element_size = std::mem::size_of::<GpuTransform>();
+            let buffer = create_buffer(&devices.device, element_size, buffer_size)?;
+            let view = create_buffer_view(&devices.device, &buffer)?;
+            AuxBuffer {
+                buffer,
+                buffer_size,
+                element_size,
+                view,
+            }
+        };
 
         let direct_composition = if disable_direct_composition {
             None
@@ -177,6 +191,7 @@ impl DirectXRenderer {
             devices: Some(devices),
             resources: Some(resources),
             globals,
+            context_transforms,
             pipelines,
             direct_composition,
             font_info: Self::get_font_info(),
@@ -220,6 +235,34 @@ impl DirectXRenderer {
             device_context.RSSetViewports(Some(slice::from_ref(&resources.viewport)));
         }
         Ok(())
+    }
+
+    fn update_context_transforms(
+        &mut self,
+        device: &ID3D11Device,
+        device_context: &ID3D11DeviceContext,
+        transforms: &[GpuTransform],
+    ) -> Result<()> {
+        debug_assert_eq!(
+            self.context_transforms.element_size,
+            std::mem::size_of::<GpuTransform>()
+        );
+
+        if self.context_transforms.buffer_size < transforms.len() {
+            let new_buffer_size = transforms.len().next_power_of_two().max(1);
+            log::info!(
+                "Updating context transforms buffer size from {} to {}",
+                self.context_transforms.buffer_size,
+                new_buffer_size
+            );
+            let buffer = create_buffer(device, self.context_transforms.element_size, new_buffer_size)?;
+            let view = create_buffer_view(device, &buffer)?;
+            self.context_transforms.buffer = buffer;
+            self.context_transforms.view = view;
+            self.context_transforms.buffer_size = new_buffer_size;
+        }
+
+        update_buffer(device_context, &self.context_transforms.buffer, transforms)
     }
 
     #[inline]
@@ -281,6 +324,18 @@ impl DirectXRenderer {
             .context("Creating DirectXGlobalElements")?;
         let pipelines = DirectXRenderPipelines::new(&devices.device)
             .context("Creating DirectXRenderPipelines")?;
+        let context_transforms = {
+            let buffer_size = 1024;
+            let element_size = std::mem::size_of::<GpuTransform>();
+            let buffer = create_buffer(&devices.device, element_size, buffer_size)?;
+            let view = create_buffer_view(&devices.device, &buffer)?;
+            AuxBuffer {
+                buffer,
+                buffer_size,
+                element_size,
+                view,
+            }
+        };
 
         let direct_composition = if disable_direct_composition {
             None
@@ -302,6 +357,7 @@ impl DirectXRenderer {
         self.devices = Some(devices);
         self.resources = Some(resources);
         self.globals = globals;
+        self.context_transforms = context_transforms;
         self.pipelines = pipelines;
         self.direct_composition = direct_composition;
         self.skip_draws = true;
@@ -311,6 +367,7 @@ impl DirectXRenderer {
     pub(crate) fn draw(
         &mut self,
         scene: &Scene,
+        segment_pool: &SceneSegmentPool,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
         if self.skip_draws {
@@ -322,7 +379,15 @@ impl DirectXRenderer {
             WindowBackgroundAppearance::Opaque => [1.0f32; 4],
             _ => [0.0f32; 4],
         })?;
-        for batch in scene.batches() {
+
+        let (device, device_context) = {
+            let devices = self.devices.as_ref().context("devices missing")?;
+            (devices.device.clone(), devices.device_context.clone())
+        };
+        let gpu_transforms = segment_pool.transforms.to_gpu_transforms();
+        self.update_context_transforms(&device, &device_context, &gpu_transforms)?;
+
+        for batch in scene.batches(segment_pool) {
             match batch {
                 PrimitiveBatch::Shadows(shadows, transforms) => self.draw_shadows(shadows, transforms),
                 PrimitiveBatch::Quads(quads, transforms) => self.draw_quads(quads, transforms),
@@ -330,8 +395,8 @@ impl DirectXRenderer {
                     self.draw_backdrop_blurs(blurs, transforms)
                 }
                 PrimitiveBatch::Paths(paths) => {
-                    self.draw_paths_to_intermediate(paths)?;
-                    self.draw_paths_from_intermediate(paths)
+                    self.draw_paths_to_intermediate(paths, &gpu_transforms)?;
+                    self.draw_paths_from_intermediate(paths, &gpu_transforms)
                 }
                 PrimitiveBatch::Underlines(underlines, transforms) => {
                     self.draw_underlines(underlines, transforms)
@@ -354,16 +419,16 @@ impl DirectXRenderer {
             .context(format!(
                 "scene too large:\
                 {} paths, {} shadows, {} quads, {} blurs, {} underlines, {} mono, {} subpixel, {} poly, {} custom, {} surfaces",
-                scene.paths.len(),
-                scene.shadows.len(),
-                scene.quads.len(),
-                scene.backdrop_blurs.len(),
-                scene.underlines.len(),
-                scene.monochrome_sprites.len(),
-                scene.subpixel_sprites.len(),
-                scene.polychrome_sprites.len(),
+                scene.paths_len(segment_pool),
+                scene.shadows_len(segment_pool),
+                scene.quads_len(segment_pool),
+                scene.backdrop_blurs_len(segment_pool),
+                scene.underlines_len(segment_pool),
+                scene.monochrome_sprites_len(segment_pool),
+                scene.subpixel_sprites_len(segment_pool),
+                scene.polychrome_sprites_len(segment_pool),
                 scene.shaders.len(),
-                scene.surfaces.len(),
+                scene.surfaces_len(segment_pool),
             ))?;
         }
         self.present()
@@ -443,13 +508,18 @@ impl DirectXRenderer {
                     .viewport,
             ),
             slice::from_ref(&self.globals.global_params_buffer),
+            &self.context_transforms.view,
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             4,
             shadows.len() as u32,
         )
     }
 
-    fn draw_quads(&mut self, quads: &[Quad], quad_transforms: &[TransformationMatrix]) -> Result<()> {
+    fn draw_quads(
+        &mut self,
+        quads: &[Quad],
+        quad_transforms: &[TransformationMatrix],
+    ) -> Result<()> {
         if quads.is_empty() {
             return Ok(());
         }
@@ -475,6 +545,7 @@ impl DirectXRenderer {
                     .viewport,
             ),
             slice::from_ref(&self.globals.global_params_buffer),
+            &self.context_transforms.view,
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             4,
             quads.len() as u32,
@@ -521,11 +592,16 @@ impl DirectXRenderer {
             slice::from_ref(&resources.viewport),
             slice::from_ref(&self.globals.global_params_buffer),
             slice::from_ref(&self.globals.sampler),
+            &self.context_transforms.view,
             blurs.len() as u32,
         )
     }
 
-    fn draw_paths_to_intermediate(&mut self, paths: &[Path<ScaledPixels>]) -> Result<()> {
+    fn draw_paths_to_intermediate(
+        &mut self,
+        paths: &[Path<ScaledPixels>],
+        gpu_transforms: &[GpuTransform],
+    ) -> Result<()> {
         if paths.is_empty() {
             return Ok(());
         }
@@ -549,11 +625,18 @@ impl DirectXRenderer {
         let mut vertices = Vec::new();
 
         for path in paths {
+            let t = resolve_world_transform(path.transform_index, gpu_transforms);
+            let world_bounds = transform_bounds(path.bounds, t);
+            let clipped_bounds = world_bounds.intersect(&path.content_mask.bounds);
+            if clipped_bounds.is_empty() {
+                continue;
+            }
             vertices.extend(path.vertices.iter().map(|v| PathRasterizationSprite {
                 xy_position: v.xy_position,
                 st_position: v.st_position,
                 color: path.color,
-                bounds: path.clipped_bounds(),
+                bounds: clipped_bounds,
+                transform_index: path.transform_index,
             }));
         }
 
@@ -567,6 +650,7 @@ impl DirectXRenderer {
             &devices.device_context,
             slice::from_ref(&resources.viewport),
             slice::from_ref(&self.globals.global_params_buffer),
+            &self.context_transforms.view,
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
             vertices.len() as u32,
             1,
@@ -590,7 +674,11 @@ impl DirectXRenderer {
         Ok(())
     }
 
-    fn draw_paths_from_intermediate(&mut self, paths: &[Path<ScaledPixels>]) -> Result<()> {
+    fn draw_paths_from_intermediate(
+        &mut self,
+        paths: &[Path<ScaledPixels>],
+        gpu_transforms: &[GpuTransform],
+    ) -> Result<()> {
         let Some(first_path) = paths.first() else {
             return Ok(());
         };
@@ -605,17 +693,36 @@ impl DirectXRenderer {
         let sprites = if paths.last().unwrap().order == first_path.order {
             paths
                 .iter()
-                .map(|path| PathSprite {
-                    bounds: path.clipped_bounds(),
+                .filter_map(|path| {
+                    let t = resolve_world_transform(path.transform_index, gpu_transforms);
+                    let world_bounds =
+                        transform_bounds(path.clipped_bounds(), t).intersect(&path.content_mask.bounds);
+                    if world_bounds.is_empty() {
+                        None
+                    } else {
+                        Some(PathSprite { bounds: world_bounds })
+                    }
                 })
                 .collect::<Vec<_>>()
         } else {
-            let mut bounds = first_path.clipped_bounds();
-            for path in paths.iter().skip(1) {
-                bounds = bounds.union(&path.clipped_bounds());
+            let mut bounds: Option<Bounds<ScaledPixels>> = None;
+            for path in paths {
+                let t = resolve_world_transform(path.transform_index, gpu_transforms);
+                let world_bounds =
+                    transform_bounds(path.clipped_bounds(), t).intersect(&path.content_mask.bounds);
+                if world_bounds.is_empty() {
+                    continue;
+                }
+                bounds = Some(match bounds {
+                    Some(existing) => existing.union(&world_bounds),
+                    None => world_bounds,
+                });
             }
-            vec![PathSprite { bounds }]
+            bounds.map(|bounds| vec![PathSprite { bounds }]).unwrap_or_default()
         };
+        if sprites.is_empty() {
+            return Ok(());
+        }
 
         let devices = self.devices.as_ref().context("devices missing")?;
         let resources = self.resources.as_ref().context("resources missing")?;
@@ -632,6 +739,7 @@ impl DirectXRenderer {
             slice::from_ref(&resources.viewport),
             slice::from_ref(&self.globals.global_params_buffer),
             slice::from_ref(&self.globals.sampler),
+            &self.context_transforms.view,
             sprites.len() as u32,
         )
     }
@@ -661,6 +769,7 @@ impl DirectXRenderer {
             &devices.device_context,
             slice::from_ref(&resources.viewport),
             slice::from_ref(&self.globals.global_params_buffer),
+            &self.context_transforms.view,
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             4,
             underlines.len() as u32,
@@ -690,6 +799,7 @@ impl DirectXRenderer {
             slice::from_ref(&resources.viewport),
             slice::from_ref(&self.globals.global_params_buffer),
             slice::from_ref(&self.globals.sampler),
+            &self.context_transforms.view,
             sprites.len() as u32,
         )
     }
@@ -717,6 +827,7 @@ impl DirectXRenderer {
             slice::from_ref(&resources.viewport),
             slice::from_ref(&self.globals.global_params_buffer),
             slice::from_ref(&self.globals.sampler),
+            &self.context_transforms.view,
             sprites.len() as u32,
         )
     }
@@ -751,6 +862,7 @@ impl DirectXRenderer {
             slice::from_ref(&resources.viewport),
             slice::from_ref(&self.globals.global_params_buffer),
             slice::from_ref(&self.globals.sampler),
+            &self.context_transforms.view,
             sprites.len() as u32,
         )
     }
@@ -1203,6 +1315,7 @@ impl<T> PipelineState<T> {
         device_context: &ID3D11DeviceContext,
         viewport: &[D3D11_VIEWPORT],
         global_params: &[Option<ID3D11Buffer>],
+        context_transforms: &Option<ID3D11ShaderResourceView>,
         topology: D3D_PRIMITIVE_TOPOLOGY,
         vertex_count: u32,
         instance_count: u32,
@@ -1210,11 +1323,11 @@ impl<T> PipelineState<T> {
         let views = [
             self.view.clone(),
             self.aux.as_ref().and_then(|aux| aux.view.clone()),
+            context_transforms.clone(),
         ];
-        let view_slice = if self.aux.is_some() { &views[..2] } else { &views[..1] };
         set_pipeline_state(
             device_context,
-            view_slice,
+            &views,
             topology,
             viewport,
             &self.vertex,
@@ -1235,16 +1348,17 @@ impl<T> PipelineState<T> {
         viewport: &[D3D11_VIEWPORT],
         global_params: &[Option<ID3D11Buffer>],
         sampler: &[Option<ID3D11SamplerState>],
+        context_transforms: &Option<ID3D11ShaderResourceView>,
         instance_count: u32,
     ) -> Result<()> {
         let views = [
             self.view.clone(),
             self.aux.as_ref().and_then(|aux| aux.view.clone()),
+            context_transforms.clone(),
         ];
-        let view_slice = if self.aux.is_some() { &views[..2] } else { &views[..1] };
         set_pipeline_state(
             device_context,
-            view_slice,
+            &views,
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             viewport,
             &self.vertex,
@@ -1270,12 +1384,45 @@ struct PathRasterizationSprite {
     st_position: Point<f32>,
     color: Background,
     bounds: Bounds<ScaledPixels>,
+    transform_index: u32,
 }
 
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct PathSprite {
     bounds: Bounds<ScaledPixels>,
+}
+
+fn resolve_world_transform(transform_index: u32, transforms: &[GpuTransform]) -> GpuTransform {
+    let mut resolved = GpuTransform::identity();
+    let mut current = transform_index;
+    for _ in 0..16 {
+        if current == 0 {
+            break;
+        }
+        let t = transforms
+            .get(current as usize)
+            .copied()
+            .unwrap_or_else(GpuTransform::identity);
+        resolved.offset[0] = resolved.offset[0] * t.scale + t.offset[0];
+        resolved.offset[1] = resolved.offset[1] * t.scale + t.offset[1];
+        resolved.scale *= t.scale;
+        current = t.parent_index;
+    }
+    resolved
+}
+
+fn transform_bounds(bounds: Bounds<ScaledPixels>, t: GpuTransform) -> Bounds<ScaledPixels> {
+    Bounds {
+        origin: Point::new(
+            ScaledPixels(bounds.origin.x.0 * t.scale + t.offset[0]),
+            ScaledPixels(bounds.origin.y.0 * t.scale + t.offset[1]),
+        ),
+        size: Size {
+            width: ScaledPixels(bounds.size.width.0 * t.scale),
+            height: ScaledPixels(bounds.size.height.0 * t.scale),
+        },
+    }
 }
 
 impl Drop for DirectXRenderer {

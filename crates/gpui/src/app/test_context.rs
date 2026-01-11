@@ -1,9 +1,9 @@
 use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AsyncApp, AvailableSpace,
     BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, DrawPhase, Drawable,
-    Element, Empty, EventEmitter, ForegroundExecutor, Global, InputEvent, Keystroke, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Platform, Point, Render, Result, Size, Task, TestDispatcher, TestPlatform,
+    Element, Empty, EventEmitter, ForegroundExecutor, Global, InputEvent, IntoElement, Keystroke,
+    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Platform, Point, Render, Result, Size, Task, TestDispatcher, TestPlatform,
     TestScreenCaptureSource, TestWindow, TextSystem, VisualContext, Window, WindowBounds,
     WindowHandle, WindowOptions, app::GpuiMode,
 };
@@ -829,8 +829,36 @@ impl VisualTestContext {
         self.update(|window, _| window.rendered_frame.debug_bounds.get(selector).copied())
     }
 
-    /// Draw an element to the window. Useful for simulating events or actions
+    /// Draw an element to the window using the fiber-backed rendering pipeline.
+    ///
+    /// This is the preferred method for drawing elements in tests. It uses the retained
+    /// node path which supports all element types including those that have migrated
+    /// to `RenderNode` (List, UniformList, Div, etc.).
+    ///
+    /// Returns the computed bounds of the rendered element.
     pub fn draw<E>(
+        &mut self,
+        origin: Point<Pixels>,
+        space: impl Into<Size<AvailableSpace>>,
+        f: impl FnOnce(&mut Window, &mut App) -> E,
+    ) -> Bounds<Pixels>
+    where
+        E: IntoElement,
+    {
+        self.update(|window, cx| {
+            let mut element = f(window, cx).into_any_element();
+            window.draw_element_via_fibers(&mut element, origin, space.into(), cx)
+        })
+    }
+
+    /// Draw an element to the window using the legacy element pipeline.
+    ///
+    /// This method uses the traditional `request_layout` -> `prepaint` -> `paint` path.
+    /// Use this only for elements that specifically need the legacy return types
+    /// (RequestLayoutState, PrepaintState) or haven't migrated to RenderNode yet.
+    ///
+    /// For most cases, prefer `draw` which uses the fiber-backed pipeline.
+    pub fn draw_legacy<E>(
         &mut self,
         origin: Point<Pixels>,
         space: impl Into<Size<AvailableSpace>>,
@@ -843,10 +871,15 @@ impl VisualTestContext {
             window.invalidator.set_phase(DrawPhase::Prepaint);
             let mut element = Drawable::new(f(window, cx));
             element.layout_as_root(space.into(), window, cx);
-            window.with_absolute_element_offset(origin, |window| element.prepaint(window, cx));
+            {
+                let mut prepaint_cx = crate::window::context::PrepaintCx::new(window);
+                prepaint_cx
+                    .with_absolute_element_offset(origin, |window| element.prepaint(window, cx));
+            }
 
             window.invalidator.set_phase(DrawPhase::Paint);
             let (request_layout_state, prepaint_state) = element.paint(window, cx);
+            window.snapshot_hitboxes_into_rendered_frame();
 
             window.invalidator.set_phase(DrawPhase::None);
             window.refresh();

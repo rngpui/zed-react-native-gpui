@@ -4,19 +4,19 @@
 use super::{BladeAtlas, BladeContext};
 use crate::{
     BackdropBlur, Background, Bounds, DevicePixels, GpuSpecs, MonochromeSprite, Path, Point,
-    PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, TransformationMatrix,
+    PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, SceneSegmentPool, Shadow, Size,
     Underline, get_gamma_correction_ratios,
 };
+use crate::transform::GpuTransform;
 #[cfg(any(test, feature = "test-support"))]
 use anyhow::Result;
-use blade_graphics::{self as gpu, ShaderData};
+use blade_graphics as gpu;
 use blade_util::{BufferBelt, BufferBeltDescriptor};
 use bytemuck::{Pod, Zeroable};
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
 #[cfg(target_os = "macos")]
 use media::core_video::CVMetalTextureCache;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 const MAX_FRAME_TIME_MS: u32 = 10000;
@@ -52,6 +52,8 @@ impl From<Bounds<ScaledPixels>> for PodBounds {
 struct SurfaceParams {
     bounds: PodBounds,
     content_mask: PodBounds,
+    transform_index: u32,
+    pad: u32,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -59,6 +61,7 @@ struct ShaderQuadsData {
     globals: GlobalParams,
     b_quads: gpu::BufferPiece,
     b_quad_transforms: gpu::BufferPiece,
+    b_context_transforms: gpu::BufferPiece,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -66,6 +69,7 @@ struct ShaderShadowsData {
     globals: GlobalParams,
     b_shadows: gpu::BufferPiece,
     b_shadow_transforms: gpu::BufferPiece,
+    b_context_transforms: gpu::BufferPiece,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -75,12 +79,14 @@ struct ShaderBackdropBlursData {
     s_sprite: gpu::Sampler,
     b_backdrop_blurs: gpu::BufferPiece,
     b_backdrop_blur_transforms: gpu::BufferPiece,
+    b_context_transforms: gpu::BufferPiece,
 }
 
 #[derive(blade_macros::ShaderData)]
 struct ShaderPathRasterizationData {
     globals: GlobalParams,
     b_path_vertices: gpu::BufferPiece,
+    b_context_transforms: gpu::BufferPiece,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -89,6 +95,7 @@ struct ShaderPathsData {
     t_sprite: gpu::TextureView,
     s_sprite: gpu::Sampler,
     b_path_sprites: gpu::BufferPiece,
+    b_context_transforms: gpu::BufferPiece,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -96,6 +103,7 @@ struct ShaderUnderlinesData {
     globals: GlobalParams,
     b_underlines: gpu::BufferPiece,
     b_underline_transforms: gpu::BufferPiece,
+    b_context_transforms: gpu::BufferPiece,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -106,6 +114,7 @@ struct ShaderMonoSpritesData {
     t_sprite: gpu::TextureView,
     s_sprite: gpu::Sampler,
     b_mono_sprites: gpu::BufferPiece,
+    b_context_transforms: gpu::BufferPiece,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -116,6 +125,7 @@ struct ShaderSubpixelSpritesData {
     t_sprite: gpu::TextureView,
     s_sprite: gpu::Sampler,
     b_subpixel_sprites: gpu::BufferPiece,
+    b_context_transforms: gpu::BufferPiece,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -125,6 +135,7 @@ struct ShaderPolySpritesData {
     s_sprite: gpu::Sampler,
     b_poly_sprites: gpu::BufferPiece,
     b_poly_sprite_transforms: gpu::BufferPiece,
+    b_context_transforms: gpu::BufferPiece,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -134,6 +145,7 @@ struct ShaderSurfacesData {
     t_y: gpu::TextureView,
     t_cb_cr: gpu::TextureView,
     s_surface: gpu::Sampler,
+    b_context_transforms: gpu::BufferPiece,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -149,6 +161,7 @@ struct PathRasterizationVertex {
     st_position: Point<f32>,
     color: Background,
     bounds: Bounds<ScaledPixels>,
+    transform_index: u32,
 }
 
 struct BladePipelines {
@@ -176,6 +189,7 @@ impl BladePipelines {
             source: include_str!("shaders.wgsl"),
         });
         shader.check_struct_size::<GlobalParams>();
+        shader.check_struct_size::<GpuTransform>();
         shader.check_struct_size::<SurfaceParams>();
         shader.check_struct_size::<Quad>();
         shader.check_struct_size::<Shadow>();
@@ -660,6 +674,8 @@ impl BladeRenderer {
         paths: &[Path<ScaledPixels>],
         width: f32,
         height: f32,
+        context_transforms: gpu::BufferPiece,
+        gpu_transforms: &[GpuTransform],
     ) {
         self.command_encoder
             .init_texture(self.path_intermediate_texture);
@@ -696,12 +712,22 @@ impl BladeRenderer {
 
             let mut vertices = Vec::new();
             for path in paths {
+                let t = resolve_world_transform(path.transform_index, gpu_transforms);
+                let world_bounds = transform_bounds(path.bounds, t);
+                let clipped_bounds = world_bounds.intersect(&path.content_mask.bounds);
+                if clipped_bounds.is_empty() {
+                    continue;
+                }
                 vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
                     xy_position: v.xy_position,
                     st_position: v.st_position,
                     color: path.color,
-                    bounds: path.clipped_bounds(),
+                    bounds: clipped_bounds,
+                    transform_index: path.transform_index,
                 }));
+            }
+            if vertices.is_empty() {
+                return;
             }
             let vertex_buf = unsafe { self.instance_belt.alloc_typed(&vertices, &self.gpu) };
             encoder.bind(
@@ -709,6 +735,7 @@ impl BladeRenderer {
                 &ShaderPathRasterizationData {
                     globals,
                     b_path_vertices: vertex_buf,
+                    b_context_transforms: context_transforms,
                 },
             );
             encoder.draw(0, vertices.len() as u32, 0, 1);
@@ -736,9 +763,21 @@ impl BladeRenderer {
         }
     }
 
-    pub fn draw(&mut self, scene: &Scene) {
+    pub fn draw(&mut self, scene: &Scene, segment_pool: &SceneSegmentPool) {
         self.command_encoder.start();
         self.atlas.before_frame(&mut self.command_encoder);
+        // Keep scene count helpers exercised for diagnostics parity across renderers.
+        let _scene_counts = (
+            scene.paths_len(segment_pool),
+            scene.shadows_len(segment_pool),
+            scene.quads_len(segment_pool),
+            scene.backdrop_blurs_len(segment_pool),
+            scene.underlines_len(segment_pool),
+            scene.monochrome_sprites_len(segment_pool),
+            scene.subpixel_sprites_len(segment_pool),
+            scene.polychrome_sprites_len(segment_pool),
+            scene.surfaces_len(segment_pool),
+        );
 
         let frame = {
             profiling::scope!("acquire frame");
@@ -758,6 +797,9 @@ impl BladeRenderer {
             pad: 0,
         };
 
+        let gpu_transforms = segment_pool.transforms.to_gpu_transforms();
+        let context_transforms = unsafe { self.instance_belt.alloc_typed(&gpu_transforms, &self.gpu) };
+
         let mut pass = self.command_encoder.render(
             "main",
             gpu::RenderTargetSet {
@@ -775,7 +817,7 @@ impl BladeRenderer {
         );
 
         profiling::scope!("render pass");
-        for batch in scene.batches() {
+        for batch in scene.batches(segment_pool) {
             match batch {
                 PrimitiveBatch::Quads(quads, transforms) => {
                     let instance_buf = unsafe { self.instance_belt.alloc_typed(quads, &self.gpu) };
@@ -788,6 +830,7 @@ impl BladeRenderer {
                             globals,
                             b_quads: instance_buf,
                             b_quad_transforms: transform_buf,
+                            b_context_transforms: context_transforms,
                         },
                     );
                     encoder.draw(0, 4, 0, quads.len() as u32);
@@ -804,6 +847,7 @@ impl BladeRenderer {
                             globals,
                             b_shadows: instance_buf,
                             b_shadow_transforms: transform_buf,
+                            b_context_transforms: context_transforms,
                         },
                     );
                     encoder.draw(0, 4, 0, shadows.len() as u32);
@@ -859,6 +903,7 @@ impl BladeRenderer {
                             s_sprite: self.atlas_sampler,
                             b_backdrop_blurs: instance_buf,
                             b_backdrop_blur_transforms: transform_buf,
+                            b_context_transforms: context_transforms,
                         },
                     );
                     encoder.draw(0, 4, 0, blurs.len() as u32);
@@ -872,6 +917,8 @@ impl BladeRenderer {
                         paths,
                         self.surface_config.size.width as f32,
                         self.surface_config.size.height as f32,
+                        context_transforms,
+                        &gpu_transforms,
                     );
                     pass = self.command_encoder.render(
                         "main",
@@ -895,17 +942,36 @@ impl BladeRenderer {
                     let sprites = if paths.last().unwrap().order == first_path.order {
                         paths
                             .iter()
-                            .map(|path| PathSprite {
-                                bounds: path.clipped_bounds(),
+                            .filter_map(|path| {
+                                let t = resolve_world_transform(path.transform_index, &gpu_transforms);
+                                let world_bounds =
+                                    transform_bounds(path.clipped_bounds(), t).intersect(&path.content_mask.bounds);
+                                if world_bounds.is_empty() {
+                                    None
+                                } else {
+                                    Some(PathSprite { bounds: world_bounds })
+                                }
                             })
                             .collect()
                     } else {
-                        let mut bounds = first_path.clipped_bounds();
-                        for path in paths.iter().skip(1) {
-                            bounds = bounds.union(&path.clipped_bounds());
+                        let mut bounds: Option<Bounds<ScaledPixels>> = None;
+                        for path in paths {
+                            let t = resolve_world_transform(path.transform_index, &gpu_transforms);
+                            let world_bounds =
+                                transform_bounds(path.clipped_bounds(), t).intersect(&path.content_mask.bounds);
+                            if world_bounds.is_empty() {
+                                continue;
+                            }
+                            bounds = Some(match bounds {
+                                Some(existing) => existing.union(&world_bounds),
+                                None => world_bounds,
+                            });
                         }
-                        vec![PathSprite { bounds }]
+                        bounds.map(|bounds| vec![PathSprite { bounds }]).unwrap_or_default()
                     };
+                    if sprites.is_empty() {
+                        continue;
+                    }
                     let instance_buf =
                         unsafe { self.instance_belt.alloc_typed(&sprites, &self.gpu) };
                     encoder.bind(
@@ -915,6 +981,7 @@ impl BladeRenderer {
                             t_sprite: self.path_intermediate_texture_view,
                             s_sprite: self.atlas_sampler,
                             b_path_sprites: instance_buf,
+                            b_context_transforms: context_transforms,
                         },
                     );
                     encoder.draw(0, 4, 0, sprites.len() as u32);
@@ -931,6 +998,7 @@ impl BladeRenderer {
                             globals,
                             b_underlines: instance_buf,
                             b_underline_transforms: transform_buf,
+                            b_context_transforms: context_transforms,
                         },
                     );
                     encoder.draw(0, 4, 0, underlines.len() as u32);
@@ -954,6 +1022,7 @@ impl BladeRenderer {
                             t_sprite: tex_info.raw_view,
                             s_sprite: self.atlas_sampler,
                             b_mono_sprites: instance_buf,
+                            b_context_transforms: context_transforms,
                         },
                     );
                     encoder.draw(0, 4, 0, sprites.len() as u32);
@@ -977,6 +1046,7 @@ impl BladeRenderer {
                             s_sprite: self.atlas_sampler,
                             b_poly_sprites: instance_buf,
                             b_poly_sprite_transforms: transform_buf,
+                            b_context_transforms: context_transforms,
                         },
                     );
                     encoder.draw(0, 4, 0, sprites.len() as u32);
@@ -1000,6 +1070,7 @@ impl BladeRenderer {
                             t_sprite: tex_info.raw_view,
                             s_sprite: self.atlas_sampler,
                             b_subpixel_sprites: instance_buf,
+                            b_context_transforms: context_transforms,
                         },
                     );
                     encoder.draw(0, 4, 0, sprites.len() as u32);
@@ -1082,10 +1153,13 @@ impl BladeRenderer {
                                     surface_locals: SurfaceParams {
                                         bounds: surface.bounds.into(),
                                         content_mask: surface.content_mask.bounds.into(),
+                                        transform_index: surface.transform_index,
+                                        pad: 0,
                                     },
                                     t_y,
                                     t_cb_cr,
                                     s_surface: self.atlas_sampler,
+                                    b_context_transforms: context_transforms,
                                 },
                             );
 
@@ -1112,8 +1186,44 @@ impl BladeRenderer {
     /// This is not yet implemented for BladeRenderer.
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
-    pub fn render_to_image(&mut self, _scene: &Scene) -> Result<RgbaImage> {
+    pub fn render_to_image(
+        &mut self,
+        _scene: &Scene,
+        _segment_pool: &SceneSegmentPool,
+    ) -> Result<RgbaImage> {
         anyhow::bail!("render_to_image is not yet implemented for BladeRenderer")
+    }
+}
+
+fn resolve_world_transform(transform_index: u32, transforms: &[GpuTransform]) -> GpuTransform {
+    let mut resolved = GpuTransform::identity();
+    let mut current = transform_index;
+    for _ in 0..16 {
+        if current == 0 {
+            break;
+        }
+        let t = transforms
+            .get(current as usize)
+            .copied()
+            .unwrap_or_else(GpuTransform::identity);
+        resolved.offset[0] = resolved.offset[0] * t.scale + t.offset[0];
+        resolved.offset[1] = resolved.offset[1] * t.scale + t.offset[1];
+        resolved.scale *= t.scale;
+        current = t.parent_index;
+    }
+    resolved
+}
+
+fn transform_bounds(bounds: Bounds<ScaledPixels>, t: GpuTransform) -> Bounds<ScaledPixels> {
+    Bounds {
+        origin: Point::new(
+            ScaledPixels(bounds.origin.x.0 * t.scale + t.offset[0]),
+            ScaledPixels(bounds.origin.y.0 * t.scale + t.offset[1]),
+        ),
+        size: Size {
+            width: ScaledPixels(bounds.size.width.0 * t.scale),
+            height: ScaledPixels(bounds.size.height.0 * t.scale),
+        },
     }
 }
 
