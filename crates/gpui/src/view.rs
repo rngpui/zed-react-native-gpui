@@ -44,10 +44,12 @@ impl<V: Render> Element for Entity<V> {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        let entity_id = self.entity_id();
         let mut element = self.update(cx, |view, cx| view.render(window, cx).into_any_element());
-        let layout_id = window.with_rendered_view(self.entity_id(), |window| {
+        let layout_id = window.with_rendered_view(entity_id, |window| {
             element.request_layout(window, cx)
         });
+        window.register_view_layout(entity_id, layout_id);
         (layout_id, element)
     }
 
@@ -164,7 +166,8 @@ impl Element for AnyView {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        window.with_rendered_view(self.entity_id(), |window| {
+        let entity_id = self.entity_id();
+        let result = window.with_rendered_view(entity_id, |window| {
             // Disable caching when inspecting so that mouse_hit_test has all hitboxes.
             let caching_disabled = window.is_inspector_picking(cx);
 
@@ -180,7 +183,6 @@ impl Element for AnyView {
 
             // Automatic view caching: if view is clean and we have a cached size,
             // skip render() and use fixed-size layout.
-            let entity_id = self.entity_id();
             let can_use_cache = !caching_disabled
                 && !window.refreshing
                 && !window.dirty_views.contains(&entity_id);
@@ -203,7 +205,9 @@ impl Element for AnyView {
             let mut element = (self.render)(self, window, cx);
             let layout_id = element.request_layout(window, cx);
             (layout_id, Some(element))
-        })
+        });
+        window.register_view_layout(entity_id, result.0);
+        result
     }
 
     fn prepaint(

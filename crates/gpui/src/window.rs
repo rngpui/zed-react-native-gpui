@@ -1155,6 +1155,9 @@ pub struct Window {
     /// Cache of view sizes for automatic view caching.
     /// Allows skipping render() in request_layout when views are clean.
     pub(crate) view_cache_sizes: FxHashMap<EntityId, Size<Pixels>>,
+    /// Mapping from view EntityId to its root LayoutId in the layout tree.
+    /// Used by Phase 2 dirty flag propagation to mark layout nodes when views call notify().
+    view_to_layout: FxHashMap<EntityId, LayoutId>,
     /// View rendering statistics (Phase 5: Instrumentation).
     view_stats: ViewStats,
     /// Previous frame's statistics for reporting (Phase 5: Instrumentation).
@@ -1690,6 +1693,7 @@ impl Window {
             next_render_layer_seq: 0,
             dirty_views: FxHashSet::default(),
             view_cache_sizes: FxHashMap::default(),
+            view_to_layout: FxHashMap::default(),
             view_stats: ViewStats::default(),
             previous_frame_stats: FrameStats::default(),
             focus_listeners: SubscriberSet::new(),
@@ -2640,6 +2644,8 @@ impl Window {
     pub fn draw(&mut self, cx: &mut App) {
         self.invalidate_entities();
         self.layout_engine.as_mut().unwrap().begin_frame();
+        // Phase 2: Mark dirty views in the layout engine for incremental updates
+        self.mark_dirty_views_in_layout_engine();
         // Phase 20: Swap display lists in layers for per-element caching
         self.layer_tree.begin_frame();
         // P5.2: Clear entity-to-layer paint mapping for new frame
@@ -5568,6 +5574,17 @@ impl Window {
         Ok(())
     }
 
+    /// Mark views in `dirty_views` with NEEDS_RENDER in the layout engine.
+    /// This enables incremental layout and paint in later phases.
+    fn mark_dirty_views_in_layout_engine(&mut self) {
+        let layout_engine = self.layout_engine.as_mut().unwrap();
+        for &view_id in &self.dirty_views {
+            if let Some(&layout_id) = self.view_to_layout.get(&view_id) {
+                layout_engine.mark_dirty_with_flags(layout_id, crate::DirtyFlags::NEEDS_RENDER);
+            }
+        }
+    }
+
     /// Add a node to the layout tree for the current frame. Takes the `Style` of the element for which
     /// layout is being requested, along with the layout ids of any children. This method is called during
     /// calls to the [`Element::request_layout`] trait method and enables any element to participate in layout.
@@ -5954,6 +5971,17 @@ impl Window {
         let result = f(self);
         self.rendered_entity_stack.pop();
         result
+    }
+
+    /// Register the LayoutId for a view's root element.
+    /// Used by Phase 2 dirty flag propagation to mark layout nodes when views call notify().
+    pub fn register_view_layout(&mut self, view_id: EntityId, layout_id: LayoutId) {
+        self.view_to_layout.insert(view_id, layout_id);
+    }
+
+    /// Get the LayoutId for a view, if it has been registered.
+    pub fn get_view_layout(&self, view_id: EntityId) -> Option<LayoutId> {
+        self.view_to_layout.get(&view_id).copied()
     }
 
     /// Executes the provided function with the specified image cache.
