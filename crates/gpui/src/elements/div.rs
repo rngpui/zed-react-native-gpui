@@ -1368,23 +1368,6 @@ impl Div {
             && self.interactivity.group_hover_style.is_none()
             && self.interactivity.active_style.is_none()
             && self.interactivity.group_active_style.is_none()
-            // Can't cache if we have any event handlers. These often depend on external state
-            // (e.g., scroll handles) and must be re-evaluated each frame for correctness.
-            && self.interactivity.action_listeners.is_empty()
-            && self.interactivity.key_down_listeners.is_empty()
-            && self.interactivity.key_up_listeners.is_empty()
-            && self.interactivity.modifiers_changed_listeners.is_empty()
-            && self.interactivity.mouse_down_listeners.is_empty()
-            && self.interactivity.mouse_up_listeners.is_empty()
-            && self.interactivity.mouse_move_listeners.is_empty()
-            && self.interactivity.mouse_pressure_listeners.is_empty()
-            && self.interactivity.scroll_wheel_listeners.is_empty()
-            && self.interactivity.drop_listeners.is_empty()
-            && self.interactivity.can_drop_predicate.is_none()
-            && self.interactivity.click_listeners.is_empty()
-            && self.interactivity.drag_listener.is_none()
-            && self.interactivity.hover_listener.is_none()
-            && self.interactivity.tooltip_builder.is_none()
     }
 
     /// Determine if this Div's subtree should be rendered to a texture for caching.
