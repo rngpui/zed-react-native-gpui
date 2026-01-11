@@ -103,6 +103,59 @@ impl TaffyLayoutEngine {
             .into()
     }
 
+    /// Update an existing node's style
+    pub fn set_style(
+        &mut self,
+        id: LayoutId,
+        style: Style,
+        rem_size: Pixels,
+        scale_factor: f32,
+    ) {
+        let taffy_style = style.to_taffy(rem_size, scale_factor);
+        self.taffy
+            .set_style(id.into(), taffy_style)
+            .expect(EXPECT_MESSAGE);
+        self.invalidate_layout_bounds(id);
+    }
+
+    /// Update an existing node's children
+    pub fn set_children(&mut self, id: LayoutId, children: &[LayoutId]) {
+        self.taffy
+            .set_children(id.into(), LayoutId::to_taffy_slice(children))
+            .expect(EXPECT_MESSAGE);
+        self.invalidate_layout_bounds(id);
+    }
+
+    /// Mark a node as dirty, which will propagate to ancestors.
+    /// This clears the node's cache and forces relayout on next compute.
+    pub fn mark_dirty(&mut self, id: LayoutId) {
+        self.taffy.mark_dirty(id.into()).expect(EXPECT_MESSAGE);
+        self.invalidate_layout_bounds(id);
+    }
+
+    /// Check if a node is dirty (needs relayout)
+    pub fn is_dirty(&self, id: LayoutId) -> bool {
+        self.taffy.dirty(id.into()).unwrap_or(true)
+    }
+
+    /// Remove a node from the tree
+    pub fn remove(&mut self, id: LayoutId) {
+        self.taffy.remove(id.into()).ok();
+        self.absolute_layout_bounds.remove(&id);
+        self.computed_layouts.remove(&id);
+    }
+
+    /// Invalidate cached layout bounds for a node and its descendants
+    fn invalidate_layout_bounds(&mut self, id: LayoutId) {
+        let mut stack = vec![id];
+        while let Some(id) = stack.pop() {
+            self.absolute_layout_bounds.remove(&id);
+            if let Ok(children) = self.taffy.children(id.into()) {
+                stack.extend(children.into_iter().map(LayoutId::from));
+            }
+        }
+    }
+
     // Used to understand performance
     #[allow(dead_code)]
     fn count_all_children(&self, parent: LayoutId) -> anyhow::Result<u32> {

@@ -119,7 +119,13 @@ impl Element for ImageCacheElement {
             let child_layout_ids = self
                 .children
                 .iter_mut()
-                .map(|child| child.request_layout(window, cx))
+                .enumerate()
+                .map(|(i, child)| {
+                    window.push_layout_child(i as u32);
+                    let layout_id = child.request_layout(window, cx);
+                    window.pop_layout_child();
+                    layout_id
+                })
                 .collect::<SmallVec<_>>();
             let mut style = Style::default();
             style.refine(&self.style);

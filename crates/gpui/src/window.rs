@@ -5,19 +5,19 @@ use crate::{
     AsyncWindowContext, AvailableSpace, Background, BackdropBlur, BorderStyle, Bounds, BoxShadow,
     Capslock, Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
     DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
-    FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
-    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
-    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent,
-    MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority, PromptButton,
-    PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
-    Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
-    ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
-    SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap,
-    TaffyLayoutEngine, Task, TextRenderingMode, TextStyle, TextStyleRefinement,
-    TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
-    point, prelude::*, px, rems, size, transparent_black,
+    FiberTree, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla,
+    InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
+    KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite,
+    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas,
+    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
+    Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage,
+    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
+    StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
+    SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
+    TextStyleRefinement, TransformationMatrix, Underline, UnderlineStyle, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
+    WindowParams, WindowTextSystem, point, prelude::*, px, rems, size, transparent_black,
 };
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
@@ -829,6 +829,18 @@ enum InputModality {
     Keyboard,
 }
 
+/// Cached layout information for a node at a specific position in the element tree.
+/// Used to skip redundant set_style/set_children calls when nothing has changed.
+struct CachedLayoutNode {
+    /// The taffy layout node ID.
+    layout_id: LayoutId,
+    /// Hash of the style used to create this layout node.
+    style_hash: u64,
+    /// The child layout IDs from the previous frame.
+    /// Used to detect when children have changed.
+    children: SmallVec<[LayoutId; 8]>,
+}
+
 /// Holds the state for a specific window.
 pub struct Window {
     pub(crate) handle: AnyWindowHandle,
@@ -847,6 +859,14 @@ pub struct Window {
     rem_size_override_stack: SmallVec<[Pixels; 8]>,
     pub(crate) viewport_size: Size<Pixels>,
     layout_engine: Option<TaffyLayoutEngine>,
+    pub(crate) fiber_tree: FiberTree,
+    /// Current position in the element tree, as a path of child indices.
+    /// Used for position-based fiber matching.
+    layout_path: SmallVec<[u32; 16]>,
+    /// Maps layout paths to cached layout nodes for reuse across frames.
+    layout_path_cache: FxHashMap<SmallVec<[u32; 16]>, CachedLayoutNode>,
+    /// Tracks which paths were used this frame for cleanup.
+    used_layout_paths: FxHashSet<SmallVec<[u32; 16]>>,
     pub(crate) root: Option<AnyView>,
     pub(crate) element_id_stack: SmallVec<[ElementId; 32]>,
     pub(crate) text_style_stack: Vec<TextStyleRefinement>,
@@ -1329,6 +1349,10 @@ impl Window {
             rem_size_override_stack: SmallVec::new(),
             viewport_size: content_size,
             layout_engine: Some(TaffyLayoutEngine::new()),
+            fiber_tree: FiberTree::new(),
+            layout_path: SmallVec::new(),
+            layout_path_cache: FxHashMap::default(),
+            used_layout_paths: FxHashSet::default(),
             root: None,
             element_id_stack: SmallVec::default(),
             text_style_stack: Vec::new(),
@@ -2161,7 +2185,20 @@ impl Window {
                 .set_input_handler(input_handler.unwrap());
         }
 
-        self.layout_engine.as_mut().unwrap().clear();
+        // Clean up unused layout nodes from previous frame.
+        // Keep nodes that were used this frame for position-based caching.
+        self.layout_path_cache.retain(|path, cached| {
+            if self.used_layout_paths.contains(path) {
+                true
+            } else {
+                // Remove the unused node from taffy
+                self.layout_engine.as_mut().unwrap().remove(cached.layout_id);
+                false
+            }
+        });
+        self.used_layout_paths.clear();
+        self.layout_path.clear();
+
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
 
@@ -3755,9 +3792,25 @@ impl Window {
         Ok(())
     }
 
+    /// Push a child index onto the layout path. Call this before processing each child
+    /// in a container element to enable position-based layout caching.
+    pub fn push_layout_child(&mut self, child_index: u32) {
+        self.layout_path.push(child_index);
+    }
+
+    /// Pop the current child index from the layout path. Call this after processing
+    /// each child in a container element.
+    pub fn pop_layout_child(&mut self) {
+        self.layout_path.pop();
+    }
+
     /// Add a node to the layout tree for the current frame. Takes the `Style` of the element for which
     /// layout is being requested, along with the layout ids of any children. This method is called during
     /// calls to the [`Element::request_layout`] trait method and enables any element to participate in layout.
+    ///
+    /// Uses position-based caching: if a layout node exists at the current path from a previous frame,
+    /// it is reused and updated rather than creating a new node. This enables taffy's internal caching
+    /// to skip layout computation for unchanged subtrees.
     ///
     /// This method should only be called as part of the request_layout or prepaint phase of element drawing.
     #[must_use]
@@ -3773,13 +3826,48 @@ impl Window {
         cx.layout_id_buffer.extend(children);
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
+        let path = self.layout_path.clone();
+        let style_hash = style.layout_hash();
 
-        self.layout_engine.as_mut().unwrap().request_layout(
-            style,
-            rem_size,
-            scale_factor,
-            &cx.layout_id_buffer,
-        )
+        let layout_id = if let Some(cached) = self.layout_path_cache.get_mut(&path) {
+            // Reuse existing taffy node
+            let layout_engine = self.layout_engine.as_mut().unwrap();
+
+            // Update style only when it has changed.
+            if cached.style_hash != style_hash {
+                layout_engine.set_style(cached.layout_id, style, rem_size, scale_factor);
+                cached.style_hash = style_hash;
+            }
+
+            // Only update children if they've changed
+            if cached.children.as_slice() != cx.layout_id_buffer.as_slice() {
+                layout_engine.set_children(cached.layout_id, &cx.layout_id_buffer);
+                cached.children.clear();
+                cached.children.extend(cx.layout_id_buffer.iter().copied());
+            }
+
+            cached.layout_id
+        } else {
+            // Create new taffy node
+            let layout_id = self.layout_engine.as_mut().unwrap().request_layout(
+                style,
+                rem_size,
+                scale_factor,
+                &cx.layout_id_buffer,
+            );
+            self.layout_path_cache.insert(
+                path.clone(),
+                CachedLayoutNode {
+                    layout_id,
+                    style_hash,
+                    children: cx.layout_id_buffer.iter().copied().collect(),
+                },
+            );
+            layout_id
+        };
+
+        self.used_layout_paths.insert(path);
+        layout_id
     }
 
     /// Add a node to the layout tree for the current frame. Instead of taking a `Style` and children,
