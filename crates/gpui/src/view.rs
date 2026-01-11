@@ -2,6 +2,7 @@ use crate::{
     AnyElement, AnyEntity, AnyWeakEntity, App, Bounds, ContentMask, Context, Element, ElementId,
     Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintIndex,
     Pixels, PrepaintStateIndex, Render, Style, StyleRefinement, TextStyle, WeakEntity,
+    retained::RetainedElementId,
 };
 use crate::{Empty, Window};
 use anyhow::Result;
@@ -27,10 +28,7 @@ struct ViewCacheKey {
 
 /// State indicating whether we need to call render() or can use retained element.
 pub struct EntityLayoutState {
-    /// The element to use - either freshly rendered or taken from retained storage.
-    element: Option<AnyElement>,
-    /// Whether we used a retained element (for returning it after paint).
-    used_retained: bool,
+    root_id: RetainedElementId,
 }
 
 impl<V: Render> Element for Entity<V> {
@@ -53,66 +51,75 @@ impl<V: Render> Element for Entity<V> {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let entity_id = self.entity_id();
-
-        // Check if we can use retained element (view not dirty, has retained element)
         let is_dirty = window.is_view_dirty(entity_id);
 
-        if !is_dirty {
-            // Try to use retained element
-            if let Some(retained) = window.get_retained_view_mut(entity_id) {
-                if let Some(mut element) = retained.take_element() {
-                    // Reuse retained element - skip render()!
-                    let layout_id = window.with_rendered_view(entity_id, |window| {
-                        element.request_layout(window, cx)
-                    });
-                    window.register_view_layout(entity_id, layout_id);
-                    window.record_view_skipped();
-                    return (
-                        layout_id,
-                        EntityLayoutState {
-                            element: Some(element),
-                            used_retained: true,
-                        },
-                    );
-                }
-            }
+        // Check if we need to render (before borrowing retained view)
+        let needs_render = is_dirty || !window.has_retained_view_root(entity_id);
+        let mut reconciling = false;
+
+        if needs_render {
+            let mut element = self.update(cx, |view, cx| view.render(window, cx).into_any_element());
+            let root_id = window.retained_tree.reconcile_root(
+                entity_id,
+                element.element_type_id(),
+                element.element_key(),
+                element.style_hash(),
+            );
+            element.set_retained_id(root_id);
+
+            let retained = window.get_or_create_retained_view::<V>(entity_id);
+            retained.root = Some(element);
+            retained.root_id = Some(root_id);
+
+            window.record_view_rendered();
+            reconciling = true;
+        } else {
+            window.record_view_skipped();
         }
 
-        // Need to call render() - either view is dirty or no retained element
-        let mut element = self.update(cx, |view, cx| view.render(window, cx).into_any_element());
-        let layout_id = window.with_rendered_view(entity_id, |window| {
-            element.request_layout(window, cx)
-        });
-        window.register_view_layout(entity_id, layout_id);
-        window.record_view_rendered();
+        // Get root_id before borrowing retained for layout
+        let root_id = window
+            .get_retained_view(entity_id)
+            .and_then(|r| r.root_id)
+            .expect("retained view root missing");
 
-        (
-            layout_id,
-            EntityLayoutState {
-                element: Some(element),
-                used_retained: false,
-            },
-        )
+        // Take the root element to avoid borrow conflicts
+        let mut root = window.take_retained_root(entity_id).expect("retained root missing");
+
+        let layout_id = window.with_retained_context(entity_id, root_id, reconciling, |window| {
+            window.with_rendered_view(entity_id, |window| root.request_layout(window, cx))
+        });
+
+        // Return the root element
+        window.return_retained_root(entity_id, root);
+        window.register_view_layout(entity_id, layout_id);
+
+        (layout_id, EntityLayoutState { root_id })
     }
 
     fn prepaint(
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
+        _bounds: Bounds<Pixels>,
         state: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) {
         let entity_id = self.entity_id();
         window.set_view_id(entity_id);
-        if let Some(element) = &mut state.element {
-            window.with_rendered_view(entity_id, |window| element.prepaint(window, cx));
-        }
 
-        // Store bounds in retained view for cache hit detection
-        let retained = window.get_or_create_retained_view::<V>(entity_id);
-        retained.bounds = Some(bounds);
+        // Take the root element to avoid borrow conflicts
+        let mut root = window
+            .take_retained_root(entity_id)
+            .expect("retained root missing in prepaint");
+
+        window.with_retained_context(entity_id, state.root_id, false, |window| {
+            window.with_rendered_view(entity_id, |window| root.prepaint(window, cx));
+        });
+
+        // Return the root element
+        window.return_retained_root(entity_id, root);
     }
 
     fn paint(
@@ -126,15 +133,18 @@ impl<V: Render> Element for Entity<V> {
         cx: &mut App,
     ) {
         let entity_id = self.entity_id();
-        if let Some(element) = &mut state.element {
-            window.with_rendered_view(entity_id, |window| element.paint(window, cx));
-        }
 
-        // Store the element back in retained view for next frame
-        if let Some(element) = state.element.take() {
-            let retained = window.get_or_create_retained_view::<V>(entity_id);
-            retained.store_element(element);
-        }
+        // Take the root element to avoid borrow conflicts
+        let mut root = window
+            .take_retained_root(entity_id)
+            .expect("retained root missing in paint");
+
+        window.with_retained_context(entity_id, state.root_id, false, |window| {
+            window.with_rendered_view(entity_id, |window| root.paint(window, cx));
+        });
+
+        // Return the root element
+        window.return_retained_root(entity_id, root);
     }
 }
 

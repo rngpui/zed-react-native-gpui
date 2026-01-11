@@ -208,7 +208,7 @@ impl TaffyLayoutEngine {
                 // to prevent them from being pruned at end_frame
                 let generation = self.generation;
                 for &child_id in &cached {
-                    self.mark_subtree_accessed(child_id, generation);
+                    self.mark_subtree_accessed_inner(child_id, generation);
                 }
                 return Some(cached);
             }
@@ -219,7 +219,7 @@ impl TaffyLayoutEngine {
 
     /// Recursively mark a node and all its descendants as accessed this frame.
     /// This prevents nodes from being pruned at end_frame when their parent gets a cache hit.
-    fn mark_subtree_accessed(&mut self, node_id: LayoutId, generation: u64) {
+    fn mark_subtree_accessed_inner(&mut self, node_id: LayoutId, generation: u64) {
         if let Some(context) = self.taffy.get_node_context_mut(node_id.0) {
             context.last_access = generation;
 
@@ -227,10 +227,16 @@ impl TaffyLayoutEngine {
             if let Some(ref cached_children) = context.cached_children {
                 let children = cached_children.clone();
                 for &child_id in &children {
-                    self.mark_subtree_accessed(child_id, generation);
+                    self.mark_subtree_accessed_inner(child_id, generation);
                 }
             }
         }
+    }
+
+    /// Mark a subtree as accessed in the current frame to prevent pruning.
+    pub fn mark_subtree_accessed(&mut self, node_id: LayoutId) {
+        let generation = self.generation;
+        self.mark_subtree_accessed_inner(node_id, generation);
     }
 
     /// Request layout for an element with a known identity.

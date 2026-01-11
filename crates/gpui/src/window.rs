@@ -1178,9 +1178,13 @@ pub struct Window {
     /// Cache of view sizes for automatic view caching.
     /// Allows skipping render() in request_layout when views are clean.
     pub(crate) view_cache_sizes: FxHashMap<EntityId, Size<Pixels>>,
+    /// Retained element metadata tree for incremental layout/prepaint/paint.
+    pub(crate) retained_tree: crate::retained::RetainedTree,
     /// Retained element trees for views. Enables O(changed) frame work by
     /// storing element trees persistently and only calling render() for dirty views.
     pub(crate) retained_views: FxHashMap<EntityId, crate::retained::RetainedView>,
+    /// Retained traversal contexts (one per rendered view stack).
+    retained_context_stack: Vec<RetainedContext>,
     /// Mapping from view EntityId to its root LayoutId in the layout tree.
     /// Used by Phase 2 dirty flag propagation to mark layout nodes when views call notify().
     view_to_layout: FxHashMap<EntityId, LayoutId>,
@@ -1239,6 +1243,16 @@ struct RenderLayerRegistration {
     order: i32,
     seq: usize,
     build: RenderLayerBuilder,
+}
+
+pub(crate) struct RetainedContext {
+    pub view_id: EntityId,
+    pub root_id: crate::retained::RetainedElementId,
+    pub reconciling: bool,
+    pub node_stack: Vec<crate::retained::RetainedElementId>,
+    pub child_indices: Vec<usize>,
+    pub force_layout_stack: Vec<bool>,
+    pub force_prepaint_stack: Vec<bool>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1731,7 +1745,9 @@ impl Window {
             next_render_layer_seq: 0,
             dirty_views: FxHashSet::default(),
             view_cache_sizes: FxHashMap::default(),
+            retained_tree: crate::retained::RetainedTree::new(),
             retained_views: FxHashMap::default(),
+            retained_context_stack: Vec::new(),
             view_to_layout: FxHashMap::default(),
             view_stats: ViewStats::default(),
             subtree_cache_stats: SubtreeCacheStats::default(),
@@ -1821,6 +1837,11 @@ impl Window {
             if !self.dirty_views.insert(view_id) {
                 break;
             }
+
+            if let Some(root_id) = self.retained_tree.get_view_root(view_id) {
+                self.retained_tree
+                    .mark_dirty(root_id, crate::retained::DirtyFlags::ALL);
+            }
         }
     }
 
@@ -1839,6 +1860,27 @@ impl Window {
     /// Get mutable reference to the retained view for an entity.
     pub(crate) fn get_retained_view_mut(&mut self, entity_id: EntityId) -> Option<&mut crate::retained::RetainedView> {
         self.retained_views.get_mut(&entity_id)
+    }
+
+    /// Check if a retained view exists and has a root element.
+    pub(crate) fn has_retained_view_root(&self, entity_id: EntityId) -> bool {
+        self.retained_views
+            .get(&entity_id)
+            .is_some_and(|r| r.root.is_some())
+    }
+
+    /// Take the root element from a retained view for processing.
+    pub(crate) fn take_retained_root(&mut self, entity_id: EntityId) -> Option<AnyElement> {
+        self.retained_views
+            .get_mut(&entity_id)
+            .and_then(|r| r.root.take())
+    }
+
+    /// Return the root element to a retained view after processing.
+    pub(crate) fn return_retained_root(&mut self, entity_id: EntityId, element: AnyElement) {
+        if let Some(retained) = self.retained_views.get_mut(&entity_id) {
+            retained.root = Some(element);
+        }
     }
 
     /// Check if a view is dirty and needs to call render().
@@ -2723,10 +2765,7 @@ impl Window {
         // Phase 5: Reset frame stats
         self.view_stats.reset();
         self.subtree_cache_stats.reset();
-        // Retained views: reset per-frame state
-        for retained in self.retained_views.values_mut() {
-            retained.begin_frame();
-        }
+        self.retained_tree.begin_frame();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
         self.invalidator.set_dirty(false);
@@ -5864,6 +5903,12 @@ impl Window {
             .was_cached_this_frame(layout_id)
     }
 
+    pub(crate) fn mark_layout_subtree_accessed(&mut self, layout_id: LayoutId) {
+        if let Some(layout_engine) = self.layout_engine.as_mut() {
+            layout_engine.mark_subtree_accessed(layout_id);
+        }
+    }
+
     pub(crate) fn cached_prepaint_range(
         &self,
         layout_id: LayoutId,
@@ -6174,6 +6219,31 @@ impl Window {
         let result = f(self);
         self.rendered_entity_stack.pop();
         result
+    }
+
+    pub(crate) fn with_retained_context<R>(
+        &mut self,
+        view_id: EntityId,
+        root_id: crate::retained::RetainedElementId,
+        reconciling: bool,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.retained_context_stack.push(RetainedContext {
+            view_id,
+            root_id,
+            reconciling,
+            node_stack: Vec::new(),
+            child_indices: Vec::new(),
+            force_layout_stack: Vec::new(),
+            force_prepaint_stack: Vec::new(),
+        });
+        let result = f(self);
+        self.retained_context_stack.pop();
+        result
+    }
+
+    pub(crate) fn retained_context_mut(&mut self) -> Option<&mut RetainedContext> {
+        self.retained_context_stack.last_mut()
     }
 
     /// Register the LayoutId for a view's root element.

@@ -1953,6 +1953,12 @@ impl Element for Div {
             || self.interactivity.group_active_style.is_some()
     }
 
+    fn reset_children_for_reuse(&mut self) {
+        for child in &mut self.children {
+            child.reset_for_reuse();
+        }
+    }
+
     fn element_hash(&self) -> u64 {
         if self.interactivity.hover_style.is_some()
             || self.interactivity.group_hover_style.is_some()
@@ -1967,9 +1973,11 @@ impl Element for Div {
             return 0;
         }
 
+        // Hash style properties only - NOT children.len() which is mutable state.
+        // This is critical for the retained tree architecture where element structure
+        // can change during processing but style identity should remain stable.
         let mut hasher = ContentHasher::default();
         hasher.write_u64(style_refinement_element_hash(&self.interactivity.base_style));
-        hasher.write_u64(self.children.len().content_hash());
         hasher.finish()
     }
 
@@ -2037,13 +2045,6 @@ impl Element for Div {
                 cx,
                 |global_id, style, window, cx| {
                     window.with_text_style(style.text_style().cloned(), |window| {
-                        // NOTE: Layout cache (check_element_cache) is DISABLED.
-                        // Skipping child request_layout creates uninitialized AnyElement objects,
-                        // which causes flickering when SubtreeCache doesn't give Full hit.
-                        // To enable this optimization, we need true retained elements
-                        // (not recreating AnyElements in render() every frame).
-
-                        // Iterate children normally
                         child_layout_ids = self
                             .children
                             .iter_mut()
@@ -2098,7 +2099,8 @@ impl Element for Div {
                 // Check tiled scroll container status BEFORE the lookup to avoid borrow conflicts.
                 let inside_tiled = window.is_inside_tiled_scroll_container();
 
-                match window.lookup_subtree_cache_with_offset(id, signature, bounds, &content_mask, element_offset) {
+                let cache_result = window.lookup_subtree_cache_with_offset(id, signature, bounds, &content_mask, element_offset);
+                match cache_result {
                     Some(SubtreeCacheHit::Full(cached)) => {
                         // Inside tiled scroll containers, we can't use the Full cache hit path
                         // because reuse_prepaint/reuse_paint would use invalid Scene indices

@@ -35,11 +35,12 @@ use crate::{
     App, AvailableSpace, Bounds, CachePolicy, Context, DispatchNodeId,
     ElementId, FocusHandle, InspectorElementId, LayoutId, Pixels, Point, Size,
     Style, Window,
+    retained::RetainedElementId,
     util::FluentBuilder,
 };
 use derive_more::{Deref, DerefMut};
 use std::{
-    any::{Any, type_name},
+    any::{Any, TypeId, type_name},
     fmt::{self, Debug, Display},
     hash::Hash,
     mem, panic,
@@ -121,6 +122,12 @@ pub trait Element: 'static + IntoElement {
         0
     }
 
+    /// Hash of the element's style inputs for retained tree reconciliation.
+    /// Defaults to `element_hash` for backward compatibility.
+    fn style_hash(&self) -> u64 {
+        self.element_hash()
+    }
+
     /// Optionally provide a hash of the content that affects this element's rendering.
     /// Returning `None` disables primitive caching for this element.
     fn content_hash(
@@ -169,6 +176,11 @@ pub trait Element: 'static + IntoElement {
     fn has_interactive_styles(&self) -> bool {
         false
     }
+
+    /// Reset this element's children for reuse in a new frame.
+    /// Called recursively when an element is being reused from the retained tree.
+    /// Override this if your element has children that need resetting.
+    fn reset_children_for_reuse(&mut self) {}
 
     /// Convert this element into a dynamically-typed [`AnyElement`].
     fn into_any(self) -> AnyElement {
@@ -379,6 +391,27 @@ trait ElementObject {
     ) -> Size<Pixels>;
 
     fn has_interactive_styles(&self) -> bool;
+
+    fn reset_for_reuse(&mut self);
+
+    fn reset_children_for_reuse(&mut self);
+
+    /// Get the TypeId of the concrete element type.
+    /// Used for reconciliation to match elements by type.
+    fn element_type_id(&self) -> TypeId;
+
+    /// Get the style hash of the element (excluding children count).
+    /// Used for reconciliation to detect style changes.
+    fn style_hash(&self) -> u64;
+
+    /// Get this element's local key (if any) for reconciliation.
+    fn element_key(&self) -> Option<ElementId>;
+
+    /// Get the retained ID assigned during reconciliation.
+    fn retained_id(&self) -> Option<RetainedElementId>;
+
+    /// Set the retained ID assigned during reconciliation.
+    fn set_retained_id(&mut self, id: RetainedElementId);
 }
 
 /// A wrapper around an implementer of [`Element`] that allows it to be drawn in a window.
@@ -386,6 +419,7 @@ pub struct Drawable<E: Element> {
     /// The drawn element.
     pub element: E,
     phase: ElementDrawPhase<E::RequestLayoutState, E::PrepaintState>,
+    retained_id: Option<RetainedElementId>,
 }
 
 #[derive(Default)]
@@ -434,166 +468,237 @@ impl<E: Element> Drawable<E> {
         Drawable {
             element,
             phase: ElementDrawPhase::Start,
+            retained_id: None,
         }
     }
 
     fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
-        match mem::take(&mut self.phase) {
-            ElementDrawPhase::Start => {
-                let global_id = self.element.id().map(|element_id| {
-                    window.element_id_stack.push(element_id);
-                    GlobalElementId(Arc::from(&*window.element_id_stack))
-                });
-
-                let inspector_id;
-                #[cfg(any(feature = "inspector", debug_assertions))]
-                {
-                    inspector_id = self.element.source_location().map(|source| {
-                        let path = crate::InspectorElementPath {
-                            global_id: GlobalElementId(Arc::from(&*window.element_id_stack)),
-                            source_location: source,
-                        };
-                        window.build_inspector_element_id(path)
+        fn run_request_layout<E: Element>(
+            this: &mut Drawable<E>,
+            window: &mut Window,
+            cx: &mut App,
+        ) -> LayoutId {
+            match mem::take(&mut this.phase) {
+                ElementDrawPhase::Start => {
+                    let global_id = this.element.id().map(|element_id| {
+                        window.element_id_stack.push(element_id);
+                        GlobalElementId(Arc::from(&*window.element_id_stack))
                     });
-                }
-                #[cfg(not(any(feature = "inspector", debug_assertions)))]
-                {
-                    inspector_id = None;
-                }
 
-                let (layout_id, request_layout) = self.element.request_layout(
-                    global_id.as_ref(),
-                    inspector_id.as_ref(),
-                    window,
-                    cx,
-                );
+                    let inspector_id;
+                    #[cfg(any(feature = "inspector", debug_assertions))]
+                    {
+                        inspector_id = this.element.source_location().map(|source| {
+                            let path = crate::InspectorElementPath {
+                                global_id: GlobalElementId(Arc::from(&*window.element_id_stack)),
+                                source_location: source,
+                            };
+                            window.build_inspector_element_id(path)
+                        });
+                    }
+                    #[cfg(not(any(feature = "inspector", debug_assertions)))]
+                    {
+                        inspector_id = None;
+                    }
 
-                if global_id.is_some() {
-                    window.element_id_stack.pop();
-                }
-
-                if window.is_layout_cached(layout_id) {
-                    self.phase = ElementDrawPhase::Cached {
-                        layout_id,
-                        global_id,
-                        inspector_id,
-                        request_layout,
-                    };
-                } else {
-                    self.phase = ElementDrawPhase::RequestLayout {
-                        layout_id,
-                        global_id,
-                        inspector_id,
-                        request_layout,
-                    };
-                }
-                layout_id
-            }
-            _ => panic!("must call request_layout only once"),
-        }
-    }
-
-    pub(crate) fn prepaint(&mut self, window: &mut Window, cx: &mut App) {
-        match mem::take(&mut self.phase) {
-            ElementDrawPhase::RequestLayout {
-                layout_id,
-                global_id,
-                inspector_id,
-                mut request_layout,
-            }
-            | ElementDrawPhase::LayoutComputed {
-                layout_id,
-                global_id,
-                inspector_id,
-                mut request_layout,
-                ..
-            } => {
-                if let Some(element_id) = self.element.id() {
-                    window.element_id_stack.push(element_id);
-                    debug_assert_eq!(&*global_id.as_ref().unwrap().0, &*window.element_id_stack);
-                }
-
-                // Compute stable identity during prepaint so hitboxes can derive stable keys.
-                let computed_id = window.compute_element_id::<E>(global_id.as_ref());
-                window.begin_element_prepaint_identity(computed_id);
-
-                let bounds = window.layout_bounds(layout_id);
-                let node_id = window
-                    .next_frame
-                    .dispatch_tree
-                    .push_node_with_id(computed_id);
-                let prepaint_start = window.prepaint_index();
-                let prepaint = self.element.prepaint(
-                    global_id.as_ref(),
-                    inspector_id.as_ref(),
-                    bounds,
-                    &mut request_layout,
-                    window,
-                    cx,
-                );
-                let prepaint_end = window.prepaint_index();
-                window.set_cached_prepaint_range(layout_id, prepaint_start..prepaint_end);
-                window.next_frame.dispatch_tree.pop_node();
-
-                window.end_element_prepaint_identity();
-
-                if global_id.is_some() {
-                    window.element_id_stack.pop();
-                }
-
-                self.phase = ElementDrawPhase::Prepaint {
-                    layout_id,
-                    node_id,
-                    global_id,
-                    inspector_id,
-                    bounds,
-                    request_layout,
-                    prepaint,
-                };
-            }
-            ElementDrawPhase::Cached {
-                layout_id,
-                global_id,
-                inspector_id,
-                mut request_layout,
-            } => {
-                if let Some(element_id) = self.element.id() {
-                    window.element_id_stack.push(element_id);
-                    debug_assert_eq!(&*global_id.as_ref().unwrap().0, &*window.element_id_stack);
-                }
-
-                let computed_id = window.compute_element_id::<E>(global_id.as_ref());
-                window.begin_element_prepaint_identity(computed_id);
-
-                let cached_prepaint = window.cached_prepaint_range(layout_id);
-                let cached_paint = window.cached_paint_range(layout_id);
-
-                if let (Some(prepaint_range), Some(_paint_range)) = (cached_prepaint, cached_paint)
-                {
-                    let prepaint_start = window.prepaint_index();
-                    window.reuse_prepaint(prepaint_range);
-                    let prepaint_end = window.prepaint_index();
-                    window.set_cached_prepaint_range(layout_id, prepaint_start..prepaint_end);
-
-                    window.end_element_prepaint_identity();
+                    let (layout_id, request_layout) = this.element.request_layout(
+                        global_id.as_ref(),
+                        inspector_id.as_ref(),
+                        window,
+                        cx,
+                    );
 
                     if global_id.is_some() {
                         window.element_id_stack.pop();
                     }
 
-                    self.phase = ElementDrawPhase::CachedPrepaint {
-                        layout_id,
-                        global_id,
-                        inspector_id,
-                    };
-                } else {
+                    if window.is_layout_cached(layout_id) {
+                        this.phase = ElementDrawPhase::Cached {
+                            layout_id,
+                            global_id,
+                            inspector_id,
+                            request_layout,
+                        };
+                    } else {
+                        this.phase = ElementDrawPhase::RequestLayout {
+                            layout_id,
+                            global_id,
+                            inspector_id,
+                            request_layout,
+                        };
+                    }
+                    layout_id
+                }
+                _ => panic!("must call request_layout only once"),
+            }
+        }
+
+        let mut retained_context = None;
+        if let Some(context) = window.retained_context_mut() {
+            let is_root = context.node_stack.is_empty();
+            let parent_id = context.node_stack.last().copied();
+            let child_index = if is_root {
+                0
+            } else if let Some(counter) = context.child_indices.last_mut() {
+                let idx = *counter;
+                *counter += 1;
+                idx
+            } else {
+                0
+            };
+            retained_context = Some((
+                context.reconciling,
+                is_root,
+                parent_id,
+                child_index,
+                context.root_id,
+                context.force_layout_stack.last().copied().unwrap_or(false),
+                context.force_prepaint_stack.last().copied().unwrap_or(false),
+            ));
+        }
+
+        if let Some((
+            reconciling,
+            is_root,
+            parent_id,
+            child_index,
+            root_id,
+            parent_force_layout,
+            parent_force_prepaint,
+        )) = retained_context
+        {
+            let element_type = TypeId::of::<E>();
+            let element_key = self.element.id();
+            let content_hash = self.element.style_hash();
+            let mut retained_id = self.retained_id;
+
+            if reconciling {
+                if is_root {
+                    retained_id = Some(root_id);
+                    self.set_retained_id(root_id);
+                } else if let Some(parent_id) = parent_id {
+                    let child_id = window.retained_tree.reconcile_child(
+                        parent_id,
+                        child_index,
+                        element_type,
+                        element_key.clone(),
+                        content_hash,
+                    );
+                    retained_id = Some(child_id);
+                    self.set_retained_id(child_id);
+                }
+            } else if retained_id.is_none() && is_root {
+                retained_id = Some(root_id);
+                self.set_retained_id(root_id);
+            }
+
+            if let Some(retained_id) = retained_id {
+                let (needs_layout, needs_prepaint, subtree_dirty, layout_id) = window
+                    .retained_tree
+                    .get(retained_id)
+                    .map(|retained| {
+                        (
+                            retained
+                                .dirty
+                                .contains(crate::retained::DirtyFlags::NEEDS_LAYOUT),
+                            retained
+                                .dirty
+                                .contains(crate::retained::DirtyFlags::NEEDS_PREPAINT),
+                            retained
+                                .dirty
+                                .contains(crate::retained::DirtyFlags::SUBTREE_DIRTY),
+                            retained.layout_id,
+                        )
+                    })
+                    .unwrap_or((true, true, true, None));
+
+                let force_layout =
+                    parent_force_layout || parent_force_prepaint || needs_layout;
+                let force_prepaint =
+                    parent_force_prepaint || needs_prepaint || force_layout;
+
+                if !reconciling && !force_layout && !subtree_dirty {
+                    if let Some(layout_id) = layout_id {
+                        window.mark_layout_subtree_accessed(layout_id);
+                        return layout_id;
+                    }
+                }
+
+                if force_layout && !matches!(self.phase, ElementDrawPhase::Start) {
+                    self.reset_for_reuse();
+                }
+
+                if let Some(context) = window.retained_context_mut() {
+                    context.node_stack.push(retained_id);
+                    context.child_indices.push(0);
+                    context.force_layout_stack.push(force_layout);
+                    context.force_prepaint_stack.push(force_prepaint);
+                }
+
+                let layout_id = run_request_layout(self, window, cx);
+
+                if let Some(retained) = window.retained_tree.get_mut(retained_id) {
+                    retained.layout_id = Some(layout_id);
+                    retained.clear_layout_dirty();
+                }
+
+                let mut child_count = None;
+                if let Some(context) = window.retained_context_mut() {
+                    let count = context.child_indices.pop().unwrap_or(0);
+                    context.node_stack.pop();
+                    context.force_layout_stack.pop();
+                    context.force_prepaint_stack.pop();
+                    child_count = Some(count);
+                }
+                if reconciling {
+                    if let Some(count) = child_count {
+                        window.retained_tree.truncate_children(retained_id, count);
+                    }
+                }
+
+                return layout_id;
+            }
+        }
+
+        run_request_layout(self, window, cx)
+    }
+
+    pub(crate) fn prepaint(&mut self, window: &mut Window, cx: &mut App) {
+        fn run_prepaint<E: Element>(
+            this: &mut Drawable<E>,
+            window: &mut Window,
+            cx: &mut App,
+        ) {
+            match mem::take(&mut this.phase) {
+                ElementDrawPhase::RequestLayout {
+                    layout_id,
+                    global_id,
+                    inspector_id,
+                    mut request_layout,
+                }
+                | ElementDrawPhase::LayoutComputed {
+                    layout_id,
+                    global_id,
+                    inspector_id,
+                    mut request_layout,
+                    ..
+                } => {
+                    if let Some(element_id) = this.element.id() {
+                        window.element_id_stack.push(element_id);
+                        debug_assert_eq!(&*global_id.as_ref().unwrap().0, &*window.element_id_stack);
+                    }
+
+                    // Compute stable identity during prepaint so hitboxes can derive stable keys.
+                    let computed_id = window.compute_element_id::<E>(global_id.as_ref());
+                    window.begin_element_prepaint_identity(computed_id);
+
                     let bounds = window.layout_bounds(layout_id);
                     let node_id = window
                         .next_frame
                         .dispatch_tree
                         .push_node_with_id(computed_id);
                     let prepaint_start = window.prepaint_index();
-                    let prepaint = self.element.prepaint(
+                    let prepaint = this.element.prepaint(
                         global_id.as_ref(),
                         inspector_id.as_ref(),
                         bounds,
@@ -611,7 +716,7 @@ impl<E: Element> Drawable<E> {
                         window.element_id_stack.pop();
                     }
 
-                    self.phase = ElementDrawPhase::Prepaint {
+                    this.phase = ElementDrawPhase::Prepaint {
                         layout_id,
                         node_id,
                         global_id,
@@ -621,129 +726,349 @@ impl<E: Element> Drawable<E> {
                         prepaint,
                     };
                 }
+                ElementDrawPhase::Cached {
+                    layout_id,
+                    global_id,
+                    inspector_id,
+                    mut request_layout,
+                } => {
+                    if let Some(element_id) = this.element.id() {
+                        window.element_id_stack.push(element_id);
+                        debug_assert_eq!(&*global_id.as_ref().unwrap().0, &*window.element_id_stack);
+                    }
+
+                    let computed_id = window.compute_element_id::<E>(global_id.as_ref());
+                    window.begin_element_prepaint_identity(computed_id);
+
+                    let cached_prepaint = window.cached_prepaint_range(layout_id);
+                    let cached_paint = window.cached_paint_range(layout_id);
+
+                    if let (Some(prepaint_range), Some(_paint_range)) =
+                        (cached_prepaint, cached_paint)
+                    {
+                        let prepaint_start = window.prepaint_index();
+                        window.reuse_prepaint(prepaint_range);
+                        let prepaint_end = window.prepaint_index();
+                        window.set_cached_prepaint_range(layout_id, prepaint_start..prepaint_end);
+
+                        window.end_element_prepaint_identity();
+
+                        if global_id.is_some() {
+                            window.element_id_stack.pop();
+                        }
+
+                        this.phase = ElementDrawPhase::CachedPrepaint {
+                            layout_id,
+                            global_id,
+                            inspector_id,
+                        };
+                    } else {
+                        let bounds = window.layout_bounds(layout_id);
+                        let node_id = window
+                            .next_frame
+                            .dispatch_tree
+                            .push_node_with_id(computed_id);
+                        let prepaint_start = window.prepaint_index();
+                        let prepaint = this.element.prepaint(
+                            global_id.as_ref(),
+                            inspector_id.as_ref(),
+                            bounds,
+                            &mut request_layout,
+                            window,
+                            cx,
+                        );
+                        let prepaint_end = window.prepaint_index();
+                        window.set_cached_prepaint_range(layout_id, prepaint_start..prepaint_end);
+                        window.next_frame.dispatch_tree.pop_node();
+
+                        window.end_element_prepaint_identity();
+
+                        if global_id.is_some() {
+                            window.element_id_stack.pop();
+                        }
+
+                        this.phase = ElementDrawPhase::Prepaint {
+                            layout_id,
+                            node_id,
+                            global_id,
+                            inspector_id,
+                            bounds,
+                            request_layout,
+                            prepaint,
+                        };
+                    }
+                }
+                _ => panic!("must call request_layout before prepaint"),
             }
-            _ => panic!("must call request_layout before prepaint"),
         }
+
+        let mut retained_context = None;
+        if let Some(context) = window.retained_context_mut() {
+            retained_context = Some((
+                context.reconciling,
+                context.force_prepaint_stack.last().copied().unwrap_or(false),
+            ));
+        }
+
+        if let Some((reconciling, parent_force_prepaint)) = retained_context {
+            if let Some(retained_id) = self.retained_id {
+                let (needs_layout, needs_prepaint, subtree_dirty, layout_id) = window
+                    .retained_tree
+                    .get(retained_id)
+                    .map(|retained| {
+                        (
+                            retained
+                                .dirty
+                                .contains(crate::retained::DirtyFlags::NEEDS_LAYOUT),
+                            retained
+                                .dirty
+                                .contains(crate::retained::DirtyFlags::NEEDS_PREPAINT),
+                            retained
+                                .dirty
+                                .contains(crate::retained::DirtyFlags::SUBTREE_DIRTY),
+                            retained.layout_id,
+                        )
+                    })
+                    .unwrap_or((true, true, true, None));
+
+                let force_prepaint =
+                    parent_force_prepaint || needs_prepaint || needs_layout;
+
+                if !reconciling && !force_prepaint && !subtree_dirty {
+                    if let Some(layout_id) = layout_id {
+                        if let Some(prepaint_range) = window.cached_prepaint_range(layout_id) {
+                            let prepaint_start = window.prepaint_index();
+                            window.reuse_prepaint(prepaint_range);
+                            let prepaint_end = window.prepaint_index();
+                            window.set_cached_prepaint_range(
+                                layout_id,
+                                prepaint_start..prepaint_end,
+                            );
+                            if let Some(retained) = window.retained_tree.get_mut(retained_id) {
+                                retained.clear_prepaint_dirty();
+                            }
+                            return;
+                        }
+                    }
+                }
+
+                if let Some(context) = window.retained_context_mut() {
+                    context.force_prepaint_stack.push(force_prepaint);
+                }
+
+                run_prepaint(self, window, cx);
+
+                if let Some(retained) = window.retained_tree.get_mut(retained_id) {
+                    retained.clear_prepaint_dirty();
+                }
+
+                if let Some(context) = window.retained_context_mut() {
+                    context.force_prepaint_stack.pop();
+                }
+
+                return;
+            }
+        }
+
+        run_prepaint(self, window, cx);
     }
 
     pub(crate) fn paint(&mut self, window: &mut Window, cx: &mut App) {
-        match mem::take(&mut self.phase) {
-            ElementDrawPhase::Prepaint {
-                layout_id,
-                node_id,
-                global_id,
-                inspector_id,
-                bounds,
-                mut request_layout,
-                mut prepaint,
-                ..
-            } => {
-                if let Some(element_id) = self.element.id() {
-                    window.element_id_stack.push(element_id);
-                    debug_assert_eq!(&*global_id.as_ref().unwrap().0, &*window.element_id_stack);
-                }
+        fn run_paint<E: Element>(
+            this: &mut Drawable<E>,
+            window: &mut Window,
+            cx: &mut App,
+        ) {
+            match mem::take(&mut this.phase) {
+                ElementDrawPhase::Prepaint {
+                    layout_id,
+                    node_id,
+                    global_id,
+                    inspector_id,
+                    bounds,
+                    mut request_layout,
+                    mut prepaint,
+                    ..
+                } => {
+                    if let Some(element_id) = this.element.id() {
+                        window.element_id_stack.push(element_id);
+                        debug_assert_eq!(&*global_id.as_ref().unwrap().0, &*window.element_id_stack);
+                    }
 
-                // Phase 20: Per-element caching
-                // Compute element ID and maintain path stack for ALL elements.
-                // This ensures consistent child indices for cache key stability.
-                let computed_id = window.compute_element_id::<E>(global_id.as_ref());
-                window
-                    .next_frame
-                    .dispatch_tree
-                    .clear_handlers_for(computed_id);
+                    // Phase 20: Per-element caching
+                    // Compute element ID and maintain path stack for ALL elements.
+                    // This ensures consistent child indices for cache key stability.
+                    let computed_id = window.compute_element_id::<E>(global_id.as_ref());
+                    window
+                        .next_frame
+                        .dispatch_tree
+                        .clear_handlers_for(computed_id);
 
-                // Only do caching overhead if the element supports it (non-zero hash)
-                let input_hash = self
-                    .element
-                    .content_hash(global_id.as_ref(), bounds, window, cx)
-                    .unwrap_or(0);
+                    // Only do caching overhead if the element supports it (non-zero hash)
+                    let input_hash = this
+                        .element
+                        .content_hash(global_id.as_ref(), bounds, window, cx)
+                        .unwrap_or(0);
 
-                window.next_frame.dispatch_tree.set_active_node(node_id);
+                    window.next_frame.dispatch_tree.set_active_node(node_id);
 
-                let paint_start = window.paint_index();
-                if input_hash != 0 {
-                    // Element supports caching - do full per-element tracking
-                    use crate::display_list::PaintCacheResult;
-                    let cache_result = window.begin_element_paint(computed_id, input_hash);
+                    let paint_start = window.paint_index();
+                    if input_hash != 0 {
+                        // Element supports caching - do full per-element tracking
+                        use crate::display_list::PaintCacheResult;
+                        let cache_result = window.begin_element_paint(computed_id, input_hash);
 
-                    match cache_result {
-                        PaintCacheResult::SubtreeSkip => {
-                            // Entire subtree cached AND no event handlers - skip paint() entirely.
-                            // Items already copied in begin_element_paint.
-                            window.finalize_element_subtree_skip();
+                        match cache_result {
+                            PaintCacheResult::SubtreeSkip => {
+                                // Entire subtree cached AND no event handlers - skip paint() entirely.
+                                // Items already copied in begin_element_paint.
+                                window.finalize_element_subtree_skip();
+                            }
+                            PaintCacheResult::Hit | PaintCacheResult::Miss => {
+                                // Either cache miss (repaint) or hit (own items cached but paint children).
+                                // Caching happens at primitive insertion level.
+                                this.element.paint(
+                                    global_id.as_ref(),
+                                    inspector_id.as_ref(),
+                                    bounds,
+                                    &mut request_layout,
+                                    &mut prepaint,
+                                    window,
+                                    cx,
+                                );
+                                window.finalize_element_paint(computed_id);
+                            }
                         }
-                        PaintCacheResult::Hit | PaintCacheResult::Miss => {
-                            // Either cache miss (repaint) or hit (own items cached but paint children).
-                            // Caching happens at primitive insertion level.
-                            self.element.paint(
-                                global_id.as_ref(),
-                                inspector_id.as_ref(),
-                                bounds,
-                                &mut request_layout,
-                                &mut prepaint,
-                                window,
-                                cx,
-                            );
-                            window.finalize_element_paint(computed_id);
+                    } else {
+                        // No caching - paint directly, but still maintain path stack
+                        this.element.paint(
+                            global_id.as_ref(),
+                            inspector_id.as_ref(),
+                            bounds,
+                            &mut request_layout,
+                            &mut prepaint,
+                            window,
+                            cx,
+                        );
+                        // Pop path stack to balance the push in compute_element_id
+                        window.pop_element_path();
+                    }
+
+                    let paint_end = window.paint_index();
+                    window.set_cached_paint_range(layout_id, paint_start..paint_end);
+                    window.clear_layout_dirty_flags(layout_id);
+
+                    if global_id.is_some() {
+                        window.element_id_stack.pop();
+                    }
+
+                    this.phase = ElementDrawPhase::Painted;
+                }
+                ElementDrawPhase::CachedPrepaint {
+                    layout_id,
+                    global_id,
+                    inspector_id: _,
+                } => {
+                    if let Some(element_id) = this.element.id() {
+                        window.element_id_stack.push(element_id);
+                        debug_assert_eq!(&*global_id.as_ref().unwrap().0, &*window.element_id_stack);
+                    }
+
+                    let computed_id = window.compute_element_id::<E>(global_id.as_ref());
+                    if let Some(global_id) = global_id.as_ref() {
+                        window.reuse_scene_display_list(global_id);
+                    }
+                    window.reuse_display_list_subtree(computed_id);
+                    let paint_start = window.paint_index();
+                    if let Some(paint_range) = window.cached_paint_range(layout_id) {
+                        window.reuse_paint(paint_range);
+                    }
+                    let paint_end = window.paint_index();
+                    window.set_cached_paint_range(layout_id, paint_start..paint_end);
+                    window.pop_element_path();
+                    window.clear_layout_dirty_flags(layout_id);
+
+                    if global_id.is_some() {
+                        window.element_id_stack.pop();
+                    }
+
+                    this.phase = ElementDrawPhase::Painted;
+                }
+                _ => panic!("must call prepaint before paint"),
+            }
+        }
+
+        let mut retained_context = None;
+        if let Some(context) = window.retained_context_mut() {
+            retained_context = Some((
+                context.reconciling,
+                context.force_prepaint_stack.last().copied().unwrap_or(false),
+            ));
+        }
+
+        if let Some((reconciling, parent_force_prepaint)) = retained_context {
+            if let Some(retained_id) = self.retained_id {
+                let (needs_layout, needs_prepaint, needs_paint, subtree_dirty, layout_id) = window
+                    .retained_tree
+                    .get(retained_id)
+                    .map(|retained| {
+                        (
+                            retained
+                                .dirty
+                                .contains(crate::retained::DirtyFlags::NEEDS_LAYOUT),
+                            retained
+                                .dirty
+                                .contains(crate::retained::DirtyFlags::NEEDS_PREPAINT),
+                            retained
+                                .dirty
+                                .contains(crate::retained::DirtyFlags::NEEDS_PAINT),
+                            retained
+                                .dirty
+                                .contains(crate::retained::DirtyFlags::SUBTREE_DIRTY),
+                            retained.layout_id,
+                        )
+                    })
+                    .unwrap_or((true, true, true, true, None));
+
+                let force_paint = parent_force_prepaint || needs_prepaint || needs_layout;
+
+                if !reconciling && !force_paint && !needs_paint && !subtree_dirty {
+                    if let Some(layout_id) = layout_id {
+                        if let Some(paint_range) = window.cached_paint_range(layout_id) {
+                            let paint_start = window.paint_index();
+                            window.reuse_paint(paint_range);
+                            let paint_end = window.paint_index();
+                            window.set_cached_paint_range(layout_id, paint_start..paint_end);
+                            window.clear_layout_dirty_flags(layout_id);
+                            if let Some(retained) = window.retained_tree.get_mut(retained_id) {
+                                retained.clear_paint_dirty();
+                            }
+                            window.retained_tree.clear_subtree_dirty_if_clean(retained_id);
+                            return;
                         }
                     }
-                } else {
-                    // No caching - paint directly, but still maintain path stack
-                    self.element.paint(
-                        global_id.as_ref(),
-                        inspector_id.as_ref(),
-                        bounds,
-                        &mut request_layout,
-                        &mut prepaint,
-                        window,
-                        cx,
-                    );
-                    // Pop path stack to balance the push in compute_element_id
-                    window.pop_element_path();
                 }
 
-                let paint_end = window.paint_index();
-                window.set_cached_paint_range(layout_id, paint_start..paint_end);
-                window.clear_layout_dirty_flags(layout_id);
-
-                if global_id.is_some() {
-                    window.element_id_stack.pop();
+                if let Some(context) = window.retained_context_mut() {
+                    context.force_prepaint_stack.push(force_paint);
                 }
 
-                self.phase = ElementDrawPhase::Painted;
+                run_paint(self, window, cx);
+
+                if let Some(retained) = window.retained_tree.get_mut(retained_id) {
+                    retained.clear_paint_dirty();
+                }
+                window.retained_tree.clear_subtree_dirty_if_clean(retained_id);
+
+                if let Some(context) = window.retained_context_mut() {
+                    context.force_prepaint_stack.pop();
+                }
+
+                return;
             }
-            ElementDrawPhase::CachedPrepaint {
-                layout_id,
-                global_id,
-                inspector_id: _,
-            } => {
-                if let Some(element_id) = self.element.id() {
-                    window.element_id_stack.push(element_id);
-                    debug_assert_eq!(&*global_id.as_ref().unwrap().0, &*window.element_id_stack);
-                }
-
-                let computed_id = window.compute_element_id::<E>(global_id.as_ref());
-                if let Some(global_id) = global_id.as_ref() {
-                    window.reuse_scene_display_list(global_id);
-                }
-                window.reuse_display_list_subtree(computed_id);
-                let paint_start = window.paint_index();
-                if let Some(paint_range) = window.cached_paint_range(layout_id) {
-                    window.reuse_paint(paint_range);
-                }
-                let paint_end = window.paint_index();
-                window.set_cached_paint_range(layout_id, paint_start..paint_end);
-                window.pop_element_path();
-                window.clear_layout_dirty_flags(layout_id);
-
-                if global_id.is_some() {
-                    window.element_id_stack.pop();
-                }
-
-                self.phase = ElementDrawPhase::Painted;
-            }
-            _ => panic!("must call prepaint before paint"),
         }
+
+        run_paint(self, window, cx);
     }
 
     pub(crate) fn layout_as_root(
@@ -847,6 +1172,35 @@ where
     fn has_interactive_styles(&self) -> bool {
         self.element.has_interactive_styles()
     }
+
+    fn reset_for_reuse(&mut self) {
+        self.phase = ElementDrawPhase::Start;
+        self.reset_children_for_reuse();
+    }
+
+    fn reset_children_for_reuse(&mut self) {
+        self.element.reset_children_for_reuse();
+    }
+
+    fn element_type_id(&self) -> TypeId {
+        TypeId::of::<E>()
+    }
+
+    fn style_hash(&self) -> u64 {
+        self.element.style_hash()
+    }
+
+    fn element_key(&self) -> Option<ElementId> {
+        self.element.id()
+    }
+
+    fn retained_id(&self) -> Option<RetainedElementId> {
+        self.retained_id
+    }
+
+    fn set_retained_id(&mut self, id: RetainedElementId) {
+        self.retained_id = Some(id);
+    }
 }
 
 /// A dynamically typed element that can be used to store any element type.
@@ -937,6 +1291,39 @@ impl AnyElement {
     /// change based on user interaction.
     pub fn has_interactive_styles(&self) -> bool {
         self.0.has_interactive_styles()
+    }
+
+    /// Reset the element's phase to Start so it can be reused in a new frame.
+    /// Called when reusing retained elements from the previous frame.
+    pub fn reset_for_reuse(&mut self) {
+        self.0.reset_for_reuse();
+    }
+
+    /// Get the TypeId of the concrete element type.
+    /// Used for reconciliation to match elements by type.
+    pub fn element_type_id(&self) -> TypeId {
+        self.0.element_type_id()
+    }
+
+    /// Get the style hash of the element (excluding children count).
+    /// Used for reconciliation to detect style changes.
+    pub fn style_hash(&self) -> u64 {
+        self.0.style_hash()
+    }
+
+    /// Get the element key (if any) for reconciliation.
+    pub fn element_key(&self) -> Option<ElementId> {
+        self.0.element_key()
+    }
+
+    /// Get the retained element ID assigned during reconciliation.
+    pub(crate) fn retained_id(&self) -> Option<RetainedElementId> {
+        self.0.retained_id()
+    }
+
+    /// Set the retained element ID assigned during reconciliation.
+    pub(crate) fn set_retained_id(&mut self, id: RetainedElementId) {
+        self.0.set_retained_id(id);
     }
 }
 
