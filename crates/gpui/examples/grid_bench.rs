@@ -2,46 +2,73 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use gpui::{
-    App, Application, Bounds, Context, Window, WindowBounds, WindowOptions, deferred, div,
+    App, Application, Bounds, Context, Entity, Window, WindowBounds, WindowOptions, deferred, div,
     prelude::*, px, rgb, size,
 };
 
 const GRID_SIZE: usize = 50;
 const FRAME_HISTORY: usize = 60;
 
-struct GridBench {
-    frame_times: VecDeque<Instant>,
+struct FpsCounter {
+    times: VecDeque<Instant>,
     fps: f64,
+}
+
+impl FpsCounter {
+    fn new() -> Self {
+        Self {
+            times: VecDeque::with_capacity(FRAME_HISTORY + 1),
+            fps: 0.0,
+        }
+    }
+
+    fn record(&mut self) {
+        let now = Instant::now();
+        self.times.push_back(now);
+
+        if self.times.len() > FRAME_HISTORY {
+            self.times.pop_front();
+        }
+
+        if self.times.len() >= 2 {
+            if let Some(oldest) = self.times.front() {
+                let elapsed = now.duration_since(*oldest).as_secs_f64();
+                self.fps = (self.times.len() - 1) as f64 / elapsed;
+            }
+        }
+    }
+}
+
+struct GridBench {
+    render_fps: FpsCounter,
+    frame_fps: FpsCounter,
 }
 
 impl GridBench {
     fn new() -> Self {
         Self {
-            frame_times: VecDeque::with_capacity(FRAME_HISTORY + 1),
-            fps: 0.0,
+            render_fps: FpsCounter::new(),
+            frame_fps: FpsCounter::new(),
         }
     }
 
-    fn record_frame(&mut self) {
-        let now = Instant::now();
-        self.frame_times.push_back(now);
-
-        if self.frame_times.len() > FRAME_HISTORY {
-            self.frame_times.pop_front();
-        }
-
-        if self.frame_times.len() >= 2 {
-            let oldest = self.frame_times.front().unwrap();
-            let elapsed = now.duration_since(*oldest).as_secs_f64();
-            self.fps = (self.frame_times.len() - 1) as f64 / elapsed;
-        }
+    fn schedule_frame_callback(this: Entity<Self>, window: &mut Window) {
+        let this_weak = this.downgrade();
+        window.on_next_frame(move |window, cx| {
+            if let Some(this) = this_weak.upgrade() {
+                this.update(cx, |bench, _cx| {
+                    bench.frame_fps.record();
+                });
+                Self::schedule_frame_callback(this, window);
+            }
+        });
     }
 }
 
 impl Render for GridBench {
     fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         window.request_animation_frame();
-        self.record_frame();
+        self.render_fps.record();
 
         div()
             .size_full()
@@ -55,9 +82,20 @@ impl Render for GridBench {
                     .py_1()
                     .bg(gpui::black().opacity(0.7))
                     .rounded_md()
-                    .text_color(rgb(0x00ff00))
                     .text_sm()
-                    .child(format!("{:.1} FPS", self.fps)),
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_color(rgb(0x00ff00))
+                            .child(format!("Render: {:.1} FPS", self.render_fps.fps)),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(0xffff00))
+                            .child(format!("Frame:  {:.1} FPS", self.frame_fps.fps)),
+                    ),
             ))
             .child(
                 div()
@@ -100,7 +138,11 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| GridBench::new()),
+            |window, cx| {
+                let entity = cx.new(|_| GridBench::new());
+                GridBench::schedule_frame_callback(entity.clone(), window);
+                entity
+            },
         )
         .unwrap();
         cx.activate(true);
