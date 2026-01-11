@@ -150,6 +150,8 @@ mod macos {
             "TransformationMatrix".into(),
             "CachedTextureInputIndex".into(),
             "CachedTextureSpriteGpu".into(),
+            "TileSpriteInputIndex".into(),
+            "TileSpriteGpu".into(),
         ]);
         config.no_includes = true;
         config.enumeration.prefix_with_name = true;

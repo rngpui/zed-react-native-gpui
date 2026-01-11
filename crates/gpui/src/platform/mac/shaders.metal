@@ -1098,6 +1098,56 @@ fragment float4 cached_texture_fragment(
   return cached_texture.sample(texture_sampler, input.texture_coords);
 }
 
+// Tile sprite shaders - for compositing scroll container tiles from a texture array
+struct TileSpriteVertexOutput {
+  float4 position [[position]];
+  float2 texture_coords;
+  uint slice [[flat]];
+  float clip_distance [[clip_distance]][4];
+};
+
+struct TileSpriteFragmentInput {
+  float4 position [[position]];
+  float2 texture_coords;
+  uint slice [[flat]];
+};
+
+vertex TileSpriteVertexOutput tile_sprite_vertex(
+    uint unit_vertex_id [[vertex_id]],
+    uint sprite_id [[instance_id]],
+    constant float2 *unit_vertices [[buffer(TileSpriteInputIndex_Vertices)]],
+    constant TileSpriteGpu *sprites [[buffer(TileSpriteInputIndex_Sprites)]],
+    constant Size_DevicePixels *viewport_size [[buffer(TileSpriteInputIndex_ViewportSize)]]) {
+  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  TileSpriteGpu sprite = sprites[sprite_id];
+
+  Bounds_ScaledPixels bounds = sprite.bounds;
+  bounds.origin.x += sprite.scroll_offset.x;
+  bounds.origin.y += sprite.scroll_offset.y;
+
+  float4 device_position = to_device_position(unit_vertex, bounds, viewport_size);
+  float4 clip_distance =
+      distance_from_clip_rect(unit_vertex, bounds, sprite.content_mask.bounds);
+
+  float2 uv = float2(
+    sprite.uv_bounds.origin.x + unit_vertex.x * sprite.uv_bounds.size.width,
+    sprite.uv_bounds.origin.y + unit_vertex.y * sprite.uv_bounds.size.height
+  );
+
+  return TileSpriteVertexOutput{
+      device_position,
+      uv,
+      sprite.texture_slice,
+      {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
+}
+
+fragment float4 tile_sprite_fragment(
+    TileSpriteFragmentInput input [[stage_in]],
+    texture2d_array<float> tile_textures [[texture(TileSpriteInputIndex_TextureArray)]]) {
+  constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear);
+  return tile_textures.sample(texture_sampler, input.texture_coords, input.slice);
+}
+
 float4 hsla_to_rgba(Hsla hsla) {
   float h = hsla.h * 6.0; // Now, it's an angle but scaled in [0, 6) range
   float s = hsla.s;

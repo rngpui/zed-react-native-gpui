@@ -32,8 +32,8 @@ const DEFAULT_TILE_MEMORY_BUDGET: usize = 128 * 1024 * 1024;
 
 /// State of a single cached tile.
 pub struct CachedTile {
-    /// The GPU texture holding rendered content.
-    pub texture: metal::Texture,
+    /// Slice index in the tile texture array.
+    pub slice: u32,
 
     /// Generation when this tile was last rendered.
     /// If container's content_generation > this, tile is stale.
@@ -120,8 +120,14 @@ pub struct TileCache {
     /// Metal device for texture allocation.
     device: metal::Device,
 
-    /// Reusable texture pool (all tiles are same size).
-    free_textures: Vec<metal::Texture>,
+    /// Texture array storing all tile slices (slice 0 is reserved as fallback).
+    tile_array_texture: metal::Texture,
+
+    /// Reusable slices in the texture array.
+    free_slices: Vec<u32>,
+
+    /// Maximum number of tile slices (excluding fallback).
+    max_slices: u32,
 
     /// Memory tracking.
     allocated_bytes: usize,
@@ -134,15 +140,44 @@ pub struct TileCache {
 impl TileCache {
     /// Create a new tile cache.
     pub fn new(device: metal::Device) -> Self {
-        Self {
+        let max_bytes = DEFAULT_TILE_MEMORY_BUDGET;
+        let tile_bytes = Self::tile_memory_size();
+        let total_slices = (max_bytes / tile_bytes).max(2);
+        let max_slices = (total_slices - 1) as u32;
+
+        let descriptor = metal::TextureDescriptor::new();
+        descriptor.set_width(TILE_SIZE as u64);
+        descriptor.set_height(TILE_SIZE as u64);
+        descriptor.set_array_length(total_slices as u64);
+        descriptor.set_texture_type(metal::MTLTextureType::D2Array);
+        descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+        descriptor.set_usage(
+            metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead,
+        );
+        descriptor.set_storage_mode(metal::MTLStorageMode::Managed);
+
+        let tile_array_texture = device.new_texture(&descriptor);
+
+        let mut free_slices = Vec::with_capacity(max_slices as usize);
+        if max_slices > 0 {
+            for slice in 1..=max_slices {
+                free_slices.push(slice);
+            }
+        }
+
+        let mut cache = Self {
             containers: FxHashMap::default(),
             frame: 0,
             device,
-            free_textures: Vec::new(),
-            allocated_bytes: 0,
-            max_bytes: DEFAULT_TILE_MEMORY_BUDGET,
+            tile_array_texture,
+            free_slices,
+            max_slices,
+            allocated_bytes: tile_bytes * total_slices,
+            max_bytes,
             stats: TileCacheStats::default(),
-        }
+        };
+        cache.fill_fallback_slice();
+        cache
     }
 
     /// Called at the start of each frame.
@@ -152,10 +187,10 @@ impl TileCache {
         self.stats.renders = 0;
     }
 
-    /// Called at the end of each frame. Evicts unused textures if over budget.
+    /// Called at the end of each frame. Evicts unused tiles if we need slices.
     pub fn end_frame(&mut self) {
-        // Evict tiles not used this frame if over memory budget
-        if self.allocated_bytes > self.max_bytes {
+        // Evict tiles not used this frame if we need more slices.
+        if self.free_slices.is_empty() {
             self.evict_stale_tiles();
         }
         self.update_stats();
@@ -226,11 +261,8 @@ impl TileCache {
         }
     }
 
-    /// Get or create a tile. Returns (needs_render, texture reference can be obtained via get_tile_texture).
-    /// If needs_render is true, the caller should render content to the texture.
-    ///
-    /// Note: Due to borrow checker constraints, this returns just needs_render.
-    /// Call get_tile_texture() afterwards to get the texture reference.
+    /// Get or create a tile. Returns whether this tile needs to be rendered.
+    /// If needs_render is true, the caller should render content to the tile slice.
     pub fn acquire_tile(
         &mut self,
         container_id: &GlobalElementId,
@@ -279,7 +311,7 @@ impl TileCache {
         }
 
         // Need to allocate - do this outside the container borrow
-        let texture = self.allocate_tile_texture();
+        let slice = self.allocate_tile_slice();
         self.stats.renders += 1;
 
         // Now insert into container
@@ -290,7 +322,7 @@ impl TileCache {
                 .expect("Container should still exist");
 
             let tile = CachedTile {
-                texture,
+                slice,
                 // Start at 0 - will be updated by mark_tile_rendered() after actual rasterization
                 rendered_generation: 0,
                 last_used_frame: current_frame,
@@ -306,31 +338,41 @@ impl TileCache {
         true // New tile always needs render
     }
 
-    /// Look up a tile's texture by key (for rendering during compositing).
-    pub fn get_tile_texture(&self, key: &TileKey) -> Option<&metal::Texture> {
+    /// Access the backing texture array for all tiles.
+    pub fn tile_texture_array(&self) -> &metal::Texture {
+        &self.tile_array_texture
+    }
+
+    /// Slice index reserved for the fallback tile.
+    pub fn fallback_slice(&self) -> u32 {
+        0
+    }
+
+    /// Look up a tile's slice by key (for rendering during compositing).
+    pub fn tile_slice(&self, key: &TileKey) -> Option<u32> {
         self.containers
             .get(&key.container_id)?
             .tiles
             .get(&key.coord)
-            .map(|tile| &tile.texture)
+            .map(|tile| tile.slice)
     }
 
-    /// Look up a tile's texture by key, but only if it has been rendered at least once.
+    /// Look up a tile's slice by key, but only if it has been rendered at least once.
     ///
-    /// Newly-allocated tiles start with `rendered_generation == 0`. These textures are
+    /// Newly-allocated tiles start with `rendered_generation == 0`. These slices are
     /// uninitialized GPU memory and must never be sampled for drawing.
-    pub fn get_tile_texture_if_rendered(&self, key: &TileKey) -> Option<&metal::Texture> {
+    pub fn tile_slice_if_rendered(&self, key: &TileKey) -> Option<u32> {
         let container = self.containers.get(&key.container_id)?;
         let tile = container.tiles.get(&key.coord)?;
         if tile.rendered_generation == 0 {
             None
         } else {
-            Some(&tile.texture)
+            Some(tile.slice)
         }
     }
 
     /// Mark a tile as having been successfully rendered to the given generation.
-    /// Call this after rasterization completes and the texture has been updated.
+    /// Call this after rasterization completes and the slice has been updated.
     pub fn mark_tile_rendered(
         &mut self,
         container_id: &GlobalElementId,
@@ -346,28 +388,85 @@ impl TileCache {
         }
     }
 
-    /// Allocate a new tile texture (or reuse from pool).
-    fn allocate_tile_texture(&mut self) -> metal::Texture {
-        if let Some(texture) = self.free_textures.pop() {
-            return texture;
+    /// Allocate a new tile slice (or reuse from the free list).
+    fn allocate_tile_slice(&mut self) -> u32 {
+        if let Some(slice) = self.free_slices.pop() {
+            return slice;
         }
 
-        let descriptor = metal::TextureDescriptor::new();
-        descriptor.set_width(TILE_SIZE as u64);
-        descriptor.set_height(TILE_SIZE as u64);
-        descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
-        descriptor.set_usage(
-            metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead,
-        );
-        descriptor.set_storage_mode(metal::MTLStorageMode::Private);
+        self.evict_stale_tiles();
+        if let Some(slice) = self.free_slices.pop() {
+            return slice;
+        }
 
-        self.allocated_bytes += Self::tile_memory_size();
-        self.device.new_texture(&descriptor)
+        self.evict_oldest_tile();
+        self.free_slices
+            .pop()
+            .expect("tile cache ran out of available slices")
+    }
+
+    /// Fill the reserved fallback slice with a simple checkerboard pattern.
+    fn fill_fallback_slice(&self) {
+        let tile_pixels = TILE_SIZE as usize;
+        let bytes_per_row = tile_pixels * 4;
+        let bytes_per_image = bytes_per_row * tile_pixels;
+        let mut pixels = vec![0u8; bytes_per_image];
+        let checker_size = 32;
+
+        for y in 0..tile_pixels {
+            for x in 0..tile_pixels {
+                let is_dark = ((x / checker_size) + (y / checker_size)) % 2 == 0;
+                let (r, g, b) = if is_dark { (0x40, 0x40, 0x40) } else { (0x80, 0x80, 0x80) };
+                let idx = (y * tile_pixels + x) * 4;
+                pixels[idx] = b;
+                pixels[idx + 1] = g;
+                pixels[idx + 2] = r;
+                pixels[idx + 3] = 0xFF;
+            }
+        }
+
+        let region =
+            metal::MTLRegion::new_2d(0, 0, TILE_SIZE as u64, TILE_SIZE as u64);
+        self.tile_array_texture.replace_region_in_slice(
+            region,
+            0,
+            self.fallback_slice() as u64,
+            pixels.as_ptr() as *const _,
+            bytes_per_row as u64,
+            bytes_per_image as u64,
+        );
     }
 
     /// Memory size of one tile in bytes.
     const fn tile_memory_size() -> usize {
         (TILE_SIZE as usize) * (TILE_SIZE as usize) * 4 // BGRA8 = 4 bytes/pixel
+    }
+
+    /// Evict the oldest tile across all containers to free a slice.
+    fn evict_oldest_tile(&mut self) {
+        let mut oldest: Option<(GlobalElementId, TileCoord, u64)> = None;
+        for (container_id, container) in self.containers.iter() {
+            for (&coord, tile) in &container.tiles {
+                if oldest
+                    .as_ref()
+                    .map_or(true, |(_, _, last_used)| tile.last_used_frame < *last_used)
+                {
+                    oldest = Some((container_id.clone(), coord, tile.last_used_frame));
+                }
+            }
+        }
+
+        let Some((container_id, coord, _)) = oldest else {
+            return;
+        };
+
+        if let Some(container) = self.containers.get_mut(&container_id) {
+            if let Some(tile) = container.tiles.remove(&coord) {
+                self.free_slices.push(tile.slice);
+            }
+            container.invalidated_tiles.remove(&coord);
+            container.lru_order.retain(|&c| c != coord);
+        }
     }
 
     /// Evict old tiles if container exceeds per-container limit.
@@ -377,7 +476,7 @@ impl TileCache {
         while container.tiles.len() > MAX_TILES_PER_CONTAINER {
             if let Some(oldest_coord) = container.oldest_tile() {
                 if let Some(tile) = container.tiles.remove(&oldest_coord) {
-                    self.free_textures.push(tile.texture);
+                    self.free_slices.push(tile.slice);
                     // Memory stays same (moved from active to pool)
                 }
                 container.invalidated_tiles.remove(&oldest_coord);
@@ -401,7 +500,7 @@ impl TileCache {
 
             for coord in tiles_to_remove {
                 if let Some(tile) = container.tiles.remove(&coord) {
-                    self.free_textures.push(tile.texture);
+                    self.free_slices.push(tile.slice);
                 }
                 container.invalidated_tiles.remove(&coord);
                 // Also remove from LRU
@@ -409,10 +508,9 @@ impl TileCache {
             }
         }
 
-        // If still over budget, drop some pooled textures
-        while self.allocated_bytes > self.max_bytes && !self.free_textures.is_empty() {
-            self.free_textures.pop();
-            self.allocated_bytes -= Self::tile_memory_size();
+        // If still no free slices, evict the oldest remaining tile.
+        if self.free_slices.is_empty() {
+            self.evict_oldest_tile();
         }
     }
 
@@ -420,7 +518,7 @@ impl TileCache {
     pub fn remove_container(&mut self, container_id: &GlobalElementId) {
         if let Some(container) = self.containers.remove(container_id) {
             for (_, tile) in container.tiles {
-                self.free_textures.push(tile.texture);
+                self.free_slices.push(tile.slice);
             }
         }
     }
@@ -428,12 +526,16 @@ impl TileCache {
     /// Clear all cached tiles (e.g., on window resize).
     pub fn clear(&mut self) {
         for container in self.containers.values_mut() {
-            for (_, tile) in container.tiles.drain() {
-                self.free_textures.push(tile.texture);
-            }
+            container.tiles.clear();
             container.lru_order.clear();
             container.invalidated_tiles.clear();
             container.last_processed_dirty_token = None;
+        }
+        self.free_slices.clear();
+        if self.max_slices > 0 {
+            for slice in 1..=self.max_slices {
+                self.free_slices.push(slice);
+            }
         }
     }
 
@@ -445,7 +547,7 @@ impl TileCache {
         }
 
         self.stats.active_tiles = active_tiles;
-        self.stats.pooled_tiles = self.free_textures.len() as u64;
+        self.stats.pooled_tiles = self.free_slices.len() as u64;
         self.stats.total_memory = self.allocated_bytes as u64;
     }
 
