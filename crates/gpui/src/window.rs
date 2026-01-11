@@ -1,7 +1,7 @@
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::Inspector;
 use crate::{
-    Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
+    Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Asset,
     AsyncWindowContext, AvailableSpace, Background, BackdropBlur, BorderStyle, Bounds, BoxShadow,
     Capslock, Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
     DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
@@ -386,23 +386,6 @@ pub struct FocusOutEvent {
 slotmap::new_key_type! {
     /// A globally unique identifier for a focusable element.
     pub struct FocusId;
-}
-
-thread_local! {
-    pub(crate) static ELEMENT_ARENA: RefCell<Arena> = RefCell::new(Arena::new(1024 * 1024));
-}
-
-/// Returned when the element arena has been used and so must be cleared before the next draw.
-#[must_use]
-pub struct ArenaClearNeeded;
-
-impl ArenaClearNeeded {
-    /// Clear the element arena.
-    pub fn clear(self) {
-        ELEMENT_ARENA.with_borrow_mut(|element_arena| {
-            element_arena.clear();
-        });
-    }
 }
 
 pub(crate) type FocusMap = RwLock<SlotMap<FocusId, FocusRef>>;
@@ -1497,9 +1480,8 @@ impl Window {
                     measure("frame duration", || {
                         handle
                             .update(&mut cx, |_, window, cx| {
-                                let arena_clear_needed = window.draw(cx);
+                                window.draw(cx);
                                 window.present();
-                                arena_clear_needed.clear();
                             })
                             .log_err();
                     })
@@ -2655,7 +2637,7 @@ impl Window {
     /// Produces a new frame and assigns it to `rendered_frame`. To actually show
     /// the contents of the new [`Scene`], use [`Self::present`].
     #[profiling::function]
-    pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
+    pub fn draw(&mut self, cx: &mut App) {
         self.invalidate_entities();
         self.layout_engine.as_mut().unwrap().begin_frame();
         // Phase 20: Swap display lists in layers for per-element caching
@@ -2744,8 +2726,6 @@ impl Window {
         // Commit a frame snapshot for compositor-driven updates.
         // This captures the immutable state that can be composited at different scroll offsets.
         self.commit_frame_snapshot();
-
-        ArenaClearNeeded
     }
 
     fn record_entities_accessed(&mut self, cx: &mut App) {
@@ -6362,7 +6342,7 @@ impl Window {
 
     fn dispatch_key_event(&mut self, event: &dyn Any, cx: &mut App) {
         if self.invalidator.is_dirty() {
-            self.draw(cx).clear();
+            self.draw(cx);
         }
 
         let node_id = self.focus_node_id_in_rendered_frame(self.focus);

@@ -32,7 +32,7 @@
 //! your own custom layout algorithm or rendering a code editor.
 
 use crate::{
-    App, ArenaBox, AvailableSpace, Bounds, CachePolicy, Context, DispatchNodeId, ELEMENT_ARENA,
+    App, AvailableSpace, Bounds, CachePolicy, Context, DispatchNodeId,
     ElementId, FocusHandle, InspectorElementId, LayoutId, Pixels, Point, Size,
     Style, Window,
     util::FluentBuilder,
@@ -695,7 +695,7 @@ where
 }
 
 /// A dynamically typed element that can be used to store any element type.
-pub struct AnyElement(ArenaBox<dyn ElementObject>);
+pub struct AnyElement(Box<dyn ElementObject>);
 
 impl AnyElement {
     pub(crate) fn new<E>(element: E) -> Self
@@ -703,10 +703,7 @@ impl AnyElement {
         E: 'static + Element,
         E::RequestLayoutState: Any,
     {
-        let element = ELEMENT_ARENA
-            .with_borrow_mut(|arena| arena.alloc(|| Drawable::new(element)))
-            .map(|element| element as &mut dyn ElementObject);
-        AnyElement(element)
+        AnyElement(Box::new(Drawable::new(element)))
     }
 
     /// Attempt to downcast a reference to the boxed element to a specific type.
