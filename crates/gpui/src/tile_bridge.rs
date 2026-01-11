@@ -181,12 +181,14 @@ impl TileBridge {
         viewport_origin: Point<Pixels>,
         viewport_size: Size<Pixels>,
         scroll_offset: Point<Pixels>,
+        required_for_activation: bool,
     ) {
         self.tile_manager.update_priorities(
             layer_id,
             viewport_origin,
             viewport_size,
             scroll_offset,
+            required_for_activation,
         );
     }
 
@@ -277,10 +279,11 @@ impl TileBridge {
 
     /// Look up a tile with three-tier fallback.
     pub fn lookup_tile<R: TextureRegistry>(
-        &self,
+        &mut self,
         key: &TileKey,
         registry: &R,
     ) -> TileLookupResult<R::Texture> {
+        self.tile_manager.touch_tile(key);
         let fallback = self.tile_manager.get_tile_fallback(key);
         let texture = fallback
             .texture_id()

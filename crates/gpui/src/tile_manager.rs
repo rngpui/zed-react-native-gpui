@@ -216,6 +216,9 @@ pub(crate) struct ManagedTile {
     /// Content generation when this tile was last rasterized.
     /// Used to detect stale tiles when content changes.
     pub rendered_generation: u64,
+
+    /// Monotonic access counter for LRU eviction.
+    pub last_used: u64,
 }
 
 impl ManagedTile {
@@ -230,6 +233,7 @@ impl ManagedTile {
             low_res_texture_id: None,
             stale_texture_id: None,
             rendered_generation: 0,
+            last_used: 0,
         }
     }
 
@@ -431,6 +435,9 @@ pub(crate) struct TileManager {
 
     /// Current scroll velocity for priority calculation.
     scroll_velocity: FxHashMap<LayerId, ScrollVelocity>,
+
+    /// Monotonic counter for LRU tracking.
+    usage_counter: u64,
 }
 
 impl TileManager {
@@ -447,6 +454,7 @@ impl TileManager {
             memory_budget,
             next_task_id: 1,
             scroll_velocity: FxHashMap::default(),
+            usage_counter: 0,
         }
     }
 
@@ -496,6 +504,14 @@ impl TileManager {
             .unwrap_or(TileFallback::Checkerboard)
     }
 
+    /// Record a tile access for LRU eviction tracking.
+    pub fn touch_tile(&mut self, key: &TileKey) {
+        if let Some(tile) = self.tiles.get_mut(key) {
+            self.usage_counter = self.usage_counter.wrapping_add(1);
+            tile.last_used = self.usage_counter;
+        }
+    }
+
     /// Update scroll velocity for priority calculation.
     pub fn set_scroll_velocity(&mut self, layer_id: LayerId, velocity: ScrollVelocity) {
         self.scroll_velocity.insert(layer_id, velocity);
@@ -514,6 +530,7 @@ impl TileManager {
         _viewport_origin: Point<Pixels>,
         viewport_size: Size<Pixels>,
         scroll_offset: Point<Pixels>,
+        required_for_activation: bool,
     ) {
         let velocity = self.scroll_velocity.get(&layer_id).copied().unwrap_or_default();
 
@@ -570,7 +587,7 @@ impl TileManager {
                         distance_to_visible: distance.max(0.0),
                         time_to_visible,
                         resolution: TileResolution::High,
-                        required_for_activation: distance <= 0.0,
+                        required_for_activation: required_for_activation && distance <= 0.0,
                     };
                 }
             }
@@ -697,20 +714,21 @@ impl TileManager {
             .tiles
             .iter()
             .filter(|(_, t)| t.state == TileState::Ready)
-            .map(|(k, t)| (k.clone(), t.priority.priority_score()))
+            .map(|(k, t)| (k.clone(), t.priority.priority_score(), t.last_used))
             .collect();
 
-        // Sort by priority score descending (highest score = lowest priority = evict first)
+        // Sort by priority score descending, then least recently used.
         eviction_candidates.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.2.cmp(&b.2))
         });
 
         let mut evicted_textures = Vec::new();
 
         // Evict until under soft limit
         while self.memory_budget.should_evict() {
-            if let Some((key, _)) = eviction_candidates.pop() {
+            if let Some((key, _, _)) = eviction_candidates.pop() {
                 if let Some(tile) = self.tiles.get_mut(&key) {
                     if let Some(texture_id) = tile.texture_id.take() {
                         evicted_textures.push(texture_id);

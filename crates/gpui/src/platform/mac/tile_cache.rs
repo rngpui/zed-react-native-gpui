@@ -43,6 +43,16 @@ pub struct CachedTile {
     pub last_used_frame: u64,
 }
 
+/// Best available draw state for a tile.
+pub enum TileDrawState {
+    /// Tile is up-to-date for the current content generation.
+    Ready(u32),
+    /// Tile has rendered content but is stale or re-rasterizing.
+    Stale(u32),
+    /// Tile has no valid content (use fallback).
+    Missing,
+}
+
 /// Tracks tile state for a single scroll container.
 pub struct ScrollContainerTiles {
     /// Content generation counter. Incremented when content changes.
@@ -369,6 +379,26 @@ impl TileCache {
         } else {
             Some(tile.slice)
         }
+    }
+
+    /// Determine the best draw state for a tile at a given content generation.
+    pub fn tile_draw_state(&self, key: &TileKey, content_generation: u64) -> TileDrawState {
+        let Some(container) = self.containers.get(&key.container_id) else {
+            return TileDrawState::Missing;
+        };
+        let Some(tile) = container.tiles.get(&key.coord) else {
+            return TileDrawState::Missing;
+        };
+        if tile.rendered_generation == 0 {
+            return TileDrawState::Missing;
+        }
+        if tile.rendered_generation < content_generation {
+            return TileDrawState::Stale(tile.slice);
+        }
+        if container.invalidated_tiles.contains(&key.coord) {
+            return TileDrawState::Stale(tile.slice);
+        }
+        TileDrawState::Ready(tile.slice)
     }
 
     /// Mark a tile as having been successfully rendered to the given generation.

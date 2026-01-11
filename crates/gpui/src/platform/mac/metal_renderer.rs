@@ -1,5 +1,5 @@
 use super::metal_atlas::MetalAtlas;
-use super::tile_cache::TileCache;
+use super::tile_cache::{TileCache, TileDrawState};
 use crate::raster_worker_pool::{
     RasterResultType, RasterWork, RasterWorkType, RasterWorkerPool,
 };
@@ -788,11 +788,14 @@ impl MetalRenderer {
         // Begin tile cache frame for scroll container tiled rendering
         self.tile_cache.begin_frame();
 
-        // Pre-pass: render captured subtrees to textures for RTT caching
+        // Submit tile raster work early so workers can run in parallel.
+        self.submit_tile_raster_work(scene);
+
+        // Pre-pass: render captured subtrees to textures for RTT caching.
         self.render_subtrees_to_textures(scene);
 
-        // Pre-pass: rasterize display lists to tile textures for scroll containers
-        self.rasterize_tiles_from_display_lists(scene);
+        // Upload any completed tile rasters without blocking.
+        self.process_completed_tile_rasters();
 
         let layer = self.layer.clone();
         let viewport_size = layer.drawable_size();
@@ -1109,15 +1112,28 @@ impl MetalRenderer {
             dirty_flags.surfaces,
         );
 
+        let mut display_list_generations: FxHashMap<&crate::GlobalElementId, u64> =
+            FxHashMap::default();
+        for (container_id, display_list) in &scene.display_lists {
+            display_list_generations.insert(container_id, display_list.generation);
+        }
+
         let fallback_slice = self.tile_cache.fallback_slice();
         let tile_sprite_gpus: Vec<TileSpriteGpu> = scene
             .tile_sprites
             .iter()
             .map(|sprite| {
-                let slice = self
-                    .tile_cache
-                    .tile_slice_if_rendered(&sprite.tile_key)
-                    .unwrap_or(fallback_slice);
+                let content_generation = display_list_generations
+                    .get(&sprite.tile_key.container_id)
+                    .copied()
+                    .unwrap_or(0);
+                let draw_state =
+                    self.tile_cache
+                        .tile_draw_state(&sprite.tile_key, content_generation);
+                let slice = match draw_state {
+                    TileDrawState::Ready(slice) | TileDrawState::Stale(slice) => slice,
+                    TileDrawState::Missing => fallback_slice,
+                };
                 TileSpriteGpu {
                     bounds: sprite.stable_bounds,
                     content_mask: sprite.content_mask.clone(),
@@ -2177,7 +2193,7 @@ impl MetalRenderer {
     /// **Phase 4 (Dirty Region Invalidation)**: Before rendering tiles, we check dirty
     /// regions from each display list and mark intersecting tiles for re-rasterization.
     /// This enables O(dirty_tiles) work instead of O(all_tiles) when content changes.
-    fn rasterize_tiles_from_display_lists(&mut self, scene: &Scene) {
+    fn submit_tile_raster_work(&mut self, scene: &Scene) {
         let tile_sprites = &scene.tile_sprites;
 
         if tile_sprites.is_empty() {
@@ -2206,8 +2222,6 @@ impl MetalRenderer {
         }
 
         // Collect tiles that need rendering and submit to worker pool
-        let mut submitted_count = 0;
-
         // Tile size in scaled pixels for bounds calculation
         let tile_size_scaled = super::tile_cache::TILE_SIZE as f32;
 
@@ -2272,36 +2286,20 @@ impl MetalRenderer {
                     },
                 };
 
-                // Submit to worker pool (may fail if at capacity, but we'll collect results anyway)
-                if self.raster_worker_pool.submit(work) {
-                    submitted_count += 1;
-                }
+                // Submit to worker pool (may fail if at capacity).
+                let _submitted = self.raster_worker_pool.submit(work);
             }
         }
+    }
 
-        if submitted_count == 0 {
+    fn process_completed_tile_rasters(&mut self) {
+        let results = self.raster_worker_pool.collect_completed();
+        if results.is_empty() {
             return;
         }
 
-        // Wait for all submitted work to complete, collecting results as they arrive.
-        // (For now we block to maintain same behavior as rayon - Phase 3 will make this async)
-        let mut results = Vec::new();
-        while self.raster_worker_pool.in_flight_count() > 0 {
-            let mut batch = self.raster_worker_pool.collect_completed_blocking();
-            if batch.is_empty() {
-                break;
-            }
-            results.append(&mut batch);
-        }
-        results.extend(self.raster_worker_pool.collect_completed());
-
-        // P1: Batch all tiles into ONE command buffer.
-        // This reduces command buffer creation overhead and improves GPU utilization.
-        // Metal renders encoders in sequence, and queue ordering ensures
-        // tiles are ready before the main pass uses them.
+        // Batch all completed tiles into one command buffer.
         let command_buffer = self.command_queue.new_command_buffer();
-
-        // Collect tiles to mark as rendered (to avoid borrow conflicts)
         let mut tiles_to_mark = Vec::new();
 
         for result in results {
@@ -2317,13 +2315,11 @@ impl MetalRenderer {
                     &raster_result,
                     command_buffer,
                 );
-                // Track this tile for generation update after encoding
                 tiles_to_mark.push((tile_key, content_generation));
             }
         }
         command_buffer.commit();
 
-        // Now mark all tiles as rendered with their correct generation
         for (tile_key, generation) in tiles_to_mark {
             self.tile_cache
                 .mark_tile_rendered(&tile_key.container_id, tile_key.coord, generation);
