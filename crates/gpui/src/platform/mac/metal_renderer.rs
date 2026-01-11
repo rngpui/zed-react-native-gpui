@@ -288,7 +288,7 @@ impl<T> TypedBuffer<T> {
         slot: usize,
         data: &[T],
         dirty: bool,
-    ) -> Option<&metal::Buffer> {
+    ) -> Option<metal::Buffer> {
         if data.is_empty() {
             return None;
         }
@@ -330,7 +330,7 @@ impl<T> TypedBuffer<T> {
             self.slot_generation[slot] = self.data_generation;
         }
 
-        self.buffers[slot].as_ref()
+        self.buffers[slot].clone()
     }
 }
 
@@ -825,12 +825,13 @@ impl MetalRenderer {
         };
 
         let frame_slot = self.acquire_frame_slot();
+        let dirty_flags = self.array_dirty_flags;
         let command_buffer = match self.draw_primitives(
             scene,
             frame_slot,
             drawable,
             viewport_size,
-            &self.array_dirty_flags,
+            &dirty_flags,
         ) {
             Ok(command_buffer) => command_buffer,
             Err(err) => {
@@ -1142,8 +1143,8 @@ impl MetalRenderer {
                 PrimitiveBatch::Shadows(shadows, transforms) => self.draw_shadows(
                     shadows,
                     transforms,
-                    shadow_buffer,
-                    shadow_transform_buffer,
+                    shadow_buffer.as_ref(),
+                    shadow_transform_buffer.as_ref(),
                     slice_offset_bytes(&scene.shadows, shadows),
                     slice_offset_bytes(&scene.shadow_transforms, transforms),
                     viewport_size,
@@ -1152,8 +1153,8 @@ impl MetalRenderer {
                 PrimitiveBatch::Quads(quads, transforms) => self.draw_quads(
                     quads,
                     transforms,
-                    quad_buffer,
-                    quad_transform_buffer,
+                    quad_buffer.as_ref(),
+                    quad_transform_buffer.as_ref(),
                     slice_offset_bytes(&scene.quads, quads),
                     slice_offset_bytes(&scene.quad_transforms, transforms),
                     viewport_size,
@@ -1178,8 +1179,8 @@ impl MetalRenderer {
                         self.draw_backdrop_blurs(
                             blurs,
                             transforms,
-                            blur_buffer,
-                            blur_transform_buffer,
+                            blur_buffer.as_ref(),
+                            blur_transform_buffer.as_ref(),
                             slice_offset_bytes(&scene.backdrop_blurs, blurs),
                             slice_offset_bytes(&scene.backdrop_blur_transforms, transforms),
                             viewport_size,
@@ -1224,8 +1225,8 @@ impl MetalRenderer {
                 PrimitiveBatch::Underlines(underlines, transforms) => self.draw_underlines(
                     underlines,
                     transforms,
-                    underline_buffer,
-                    underline_transform_buffer,
+                    underline_buffer.as_ref(),
+                    underline_transform_buffer.as_ref(),
                     slice_offset_bytes(&scene.underlines, underlines),
                     slice_offset_bytes(&scene.underline_transforms, transforms),
                     viewport_size,
@@ -1237,7 +1238,7 @@ impl MetalRenderer {
                 } => self.draw_monochrome_sprites(
                     texture_id,
                     sprites,
-                    monochrome_buffer,
+                    monochrome_buffer.as_ref(),
                     slice_offset_bytes(&scene.monochrome_sprites, sprites),
                     viewport_size,
                     command_encoder,
@@ -1250,8 +1251,8 @@ impl MetalRenderer {
                     texture_id,
                     sprites,
                     transforms,
-                    polychrome_buffer,
-                    polychrome_transform_buffer,
+                    polychrome_buffer.as_ref(),
+                    polychrome_transform_buffer.as_ref(),
                     slice_offset_bytes(&scene.polychrome_sprites, sprites),
                     slice_offset_bytes(&scene.polychrome_sprite_transforms, transforms),
                     viewport_size,
@@ -1259,14 +1260,14 @@ impl MetalRenderer {
                 ),
                 PrimitiveBatch::Surfaces(surfaces) => self.draw_surfaces(
                     surfaces,
-                    surface_buffer,
+                    surface_buffer.as_ref(),
                     slice_offset_bytes(&scene.surfaces, surfaces),
                     viewport_size,
                     command_encoder,
                 ),
                 PrimitiveBatch::CachedTextures(sprites) => self.draw_cached_textures(
                     sprites,
-                    cached_texture_buffer,
+                    cached_texture_buffer.as_ref(),
                     slice_offset_bytes(&scene.cached_textures, sprites),
                     viewport_size,
                     command_encoder,
@@ -1274,7 +1275,7 @@ impl MetalRenderer {
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
                 PrimitiveBatch::TileSprites(sprites) => self.draw_tile_sprites(
                     sprites,
-                    tile_sprite_buffer,
+                    tile_sprite_buffer.as_ref(),
                     slice_offset_bytes(&scene.tile_sprites, sprites),
                     viewport_size,
                     command_encoder,
@@ -1355,7 +1356,7 @@ impl MetalRenderer {
         };
         command_encoder.set_vertex_buffer(
             PathRasterizationInputIndex::Vertices as u64,
-            Some(vertex_buffer),
+            Some(&vertex_buffer),
             0,
         );
         command_encoder.set_vertex_bytes(
@@ -1365,7 +1366,7 @@ impl MetalRenderer {
         );
         command_encoder.set_fragment_buffer(
             PathRasterizationInputIndex::Vertices as u64,
-            Some(vertex_buffer),
+            Some(&vertex_buffer),
             0,
         );
         command_encoder.draw_primitives(
@@ -1654,7 +1655,7 @@ impl MetalRenderer {
 
         command_encoder.set_vertex_buffer(
             SpriteInputIndex::Sprites as u64,
-            Some(sprite_buffer),
+            Some(&sprite_buffer),
             0,
         );
 
