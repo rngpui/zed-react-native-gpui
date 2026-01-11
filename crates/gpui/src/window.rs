@@ -180,6 +180,9 @@ impl DispatchPhase {
 
 struct WindowInvalidatorInner {
     pub dirty: bool,
+    /// Scoped invalidation for layers (e.g., scroll containers).
+    /// This still triggers a draw, but avoids marking the window-wide dirty flag.
+    pub layer_dirty: bool,
     /// P2: Flag for compositor-only updates (scroll offset changed, no content change).
     /// When set, the frame callback skips full draw() and only updates tile sprites.
     pub composite_only: bool,
@@ -188,6 +191,7 @@ struct WindowInvalidatorInner {
     pub consecutive_composite_frames: u32,
     pub draw_phase: DrawPhase,
     pub dirty_views: FxHashSet<EntityId>,
+    pub window_id: WindowId,
 }
 
 #[derive(Clone)]
@@ -201,14 +205,16 @@ pub(crate) struct WindowInvalidator {
 const MAX_COMPOSITE_ONLY_FRAMES: u32 = 4;
 
 impl WindowInvalidator {
-    pub fn new() -> Self {
+    pub fn new(window_id: WindowId) -> Self {
         WindowInvalidator {
             inner: Rc::new(RefCell::new(WindowInvalidatorInner {
                 dirty: true,
+                layer_dirty: false,
                 composite_only: false,
                 consecutive_composite_frames: 0,
                 draw_phase: DrawPhase::None,
                 dirty_views: FxHashSet::default(),
+                window_id,
             })),
         }
     }
@@ -220,7 +226,12 @@ impl WindowInvalidator {
         // and dirty is handled on a subsequent frame.
         inner.dirty_views.insert(entity);
         if inner.draw_phase == DrawPhase::None {
-            inner.dirty = true;
+            let window_id = inner.window_id;
+            if Self::should_mark_window_dirty(window_id, entity, cx) {
+                inner.dirty = true;
+            } else {
+                inner.layer_dirty = true;
+            }
             cx.push_effect(Effect::Notify { emitter: entity });
             true
         } else {
@@ -229,11 +240,44 @@ impl WindowInvalidator {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.inner.borrow().dirty
+        let inner = self.inner.borrow();
+        inner.dirty || inner.layer_dirty
     }
 
     pub fn set_dirty(&self, dirty: bool) {
-        self.inner.borrow_mut().dirty = dirty
+        let mut inner = self.inner.borrow_mut();
+        inner.dirty = dirty;
+        if !dirty {
+            inner.layer_dirty = false;
+        }
+    }
+
+    pub fn is_paint_phase(&self) -> bool {
+        matches!(self.inner.borrow().draw_phase, DrawPhase::Paint)
+    }
+
+    fn should_mark_window_dirty(window_id: WindowId, entity: EntityId, cx: &App) -> bool {
+        let Some(window) = cx
+            .windows
+            .get(window_id)
+            .and_then(|window| window.as_deref())
+        else {
+            return true;
+        };
+
+        let Some(layer_ids) = window.entity_to_layers.get(&entity) else {
+            return true;
+        };
+        if layer_ids.is_empty() {
+            return true;
+        }
+
+        layer_ids.iter().any(|layer_id| {
+            window
+                .layer_tree
+                .get(*layer_id)
+                .map_or(true, |layer| layer.reason != crate::layer::LayerReason::ScrollContainer)
+        })
     }
 
     /// P2: Check if compositor-only update is needed (scroll offset changed, no content change).
@@ -1102,9 +1146,9 @@ pub struct Window {
     inside_tiled_scroll_container: bool,
     /// The layer tree for compositing. Manages scroll containers, transforms, and opacity layers.
     layer_tree: crate::layer::LayerTree,
-    /// P5.2: Mapping from rendered entity (view) to the layer(s) it owns.
-    /// When a layer is created during paint, we record which entity was being rendered.
-    /// This enables scoped invalidation - notify() only invalidates the view's layer.
+    /// P5.2: Mapping from rendered entity (view) to the layer(s) it painted into.
+    /// We record the current layer when a view is painted, so notify() can scope
+    /// invalidation to the layer containing that view's content.
     entity_to_layers: collections::FxHashMap<EntityId, Vec<LayerId>>,
     /// Stack of path hashes for Phase 20 per-element caching.
     /// Each entry is the path hash for children at that level.
@@ -1379,7 +1423,7 @@ impl Window {
         let scale_factor = platform_window.scale_factor();
         let appearance = platform_window.appearance();
         let text_system = Arc::new(WindowTextSystem::new(cx.text_system().clone()));
-        let invalidator = WindowInvalidator::new();
+        let invalidator = WindowInvalidator::new(handle.window_id());
         let active = Rc::new(Cell::new(platform_window.is_active()));
         let hovered = Rc::new(Cell::new(platform_window.is_hovered()));
         let needs_present = Rc::new(Cell::new(false));
@@ -2616,7 +2660,7 @@ impl Window {
         self.layout_engine.as_mut().unwrap().begin_frame();
         // Phase 20: Swap display lists in layers for per-element caching
         self.layer_tree.begin_frame();
-        // P5.2: Clear entity-to-layer mapping for new frame
+        // P5.2: Clear entity-to-layer paint mapping for new frame
         self.entity_to_layers.clear();
         // Reset element path tracking for per-element caching
         self.element_path_stack.clear();
@@ -2723,7 +2767,7 @@ impl Window {
         let mut views = self.invalidator.take_views();
         for entity in views.drain() {
             self.mark_view_dirty(entity);
-            // P5.2: Also invalidate layers owned by this entity for scoped invalidation.
+            // P5.2: Also invalidate layers painted by this entity for scoped invalidation.
             // This enables FPS counter updates without affecting scroll container layers.
             self.invalidate_layers_for_entity(entity);
         }
@@ -4160,22 +4204,12 @@ impl Window {
     /// Note: After calling this, you should set the layer's content_origin and then
     /// call `seed_layer_inherited_clip()` to properly inherit the parent's clipping.
     ///
-    /// P5.2: Also records which entity (view) owns this layer for scoped invalidation.
     pub(crate) fn push_layer(
         &mut self,
         element_id: GlobalElementId,
         reason: crate::layer::LayerReason,
     ) -> crate::layer::LayerId {
         let layer_id = self.layer_tree.push_layer(element_id, reason);
-
-        // P5.2: Record which entity owns this layer for scoped invalidation.
-        // When notify() is called for an entity, we can invalidate just its layers.
-        if let Some(&entity_id) = self.rendered_entity_stack.last() {
-            self.entity_to_layers
-                .entry(entity_id)
-                .or_default()
-                .push(layer_id);
-        }
 
         layer_id
     }
@@ -4231,9 +4265,18 @@ impl Window {
         &mut self.layer_tree
     }
 
-    /// P5.2: Get the layers owned by a specific entity (view).
+    /// P5.2: Record the layer that a view is painting into.
+    fn record_entity_layer(&mut self, entity_id: EntityId) {
+        let layer_id = self.layer_tree.current_layer().id;
+        let entry = self.entity_to_layers.entry(entity_id).or_default();
+        if !entry.contains(&layer_id) {
+            entry.push(layer_id);
+        }
+    }
+
+    /// P5.2: Get the layers that a specific entity (view) painted into.
     ///
-    /// Returns an empty slice if the entity doesn't own any layers.
+    /// Returns an empty slice if the entity hasn't been painted into any layers.
     pub(crate) fn layers_for_entity(&self, entity_id: EntityId) -> &[LayerId] {
         self.entity_to_layers
             .get(&entity_id)
@@ -4241,7 +4284,7 @@ impl Window {
             .unwrap_or(&[])
     }
 
-    /// P5.2: Invalidate all layers owned by a specific entity.
+    /// P5.2: Invalidate all layers painted by a specific entity.
     ///
     /// This marks the entity's layers as needing repaint, enabling
     /// scoped invalidation where only the affected view's layers are updated.
@@ -5925,6 +5968,9 @@ impl Window {
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         self.rendered_entity_stack.push(id);
+        if self.invalidator.is_paint_phase() {
+            self.record_entity_layer(id);
+        }
         let result = f(self);
         self.rendered_entity_stack.pop();
         result
