@@ -32,10 +32,9 @@
 //! your own custom layout algorithm or rendering a code editor.
 
 use crate::{
-    AnyDescriptor, AnyView, App, ArenaBox, AvailableSpace, Bounds, Context, Deferred,
-    DispatchNodeId, Div, ELEMENT_ARENA, ElementId, FocusHandle, InspectorElementId, LayoutId,
-    Pixels, Point, SharedString, Size, Style, TextDescriptor, TextStyleRefinement, ViewDescriptor,
-    Window,
+    AnyDescriptor, AnyView, App, ArenaBox, AvailableSpace, Bounds, Context, Deferred, DispatchNodeId,
+    Div, ELEMENT_ARENA, ElementId, FiberId, FocusHandle, InspectorElementId, LayoutId, Pixels,
+    Point, SharedString, Size, Style, TextDescriptor, TextStyleRefinement, ViewDescriptor, Window,
     util::FluentBuilder,
 };
 use stacksafe::stacksafe;
@@ -106,6 +105,12 @@ pub trait Element: 'static + IntoElement {
         cx: &mut App,
     );
 
+    /// Build a descriptor tree for this element.
+    /// Default implementation returns `AnyDescriptor::Empty`.
+    fn build_descriptor(&mut self, _window: &mut Window, _cx: &mut App) -> AnyDescriptor {
+        AnyDescriptor::Empty
+    }
+
     /// Convert this element into a dynamically-typed [`AnyElement`].
     fn into_any(self) -> AnyElement {
         AnyElement::new(self)
@@ -134,6 +139,16 @@ impl<T: IntoElement> FluentBuilder for T {}
 pub trait Render: 'static + Sized {
     /// Render this view into an element tree.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement;
+
+    /// Render this view into a descriptor tree.
+    fn render_descriptor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyDescriptor {
+        let mut element = self.render(window, cx).into_any_element();
+        element.build_descriptor(window, cx)
+    }
 }
 
 impl Render for Empty {
@@ -264,6 +279,16 @@ impl<C: RenderOnce> Element for Component<C> {
             element.paint(window, cx);
         })
     }
+
+    fn build_descriptor(&mut self, window: &mut Window, cx: &mut App) -> AnyDescriptor {
+        let mut element = self
+            .component
+            .take()
+            .unwrap()
+            .render(window, cx)
+            .into_any_element();
+        element.build_descriptor(window, cx)
+    }
 }
 
 impl<C: RenderOnce> IntoElement for Component<C> {
@@ -305,6 +330,8 @@ trait ElementObject {
         window: &mut Window,
         cx: &mut App,
     ) -> Size<Pixels>;
+
+    fn build_descriptor(&mut self, window: &mut Window, cx: &mut App) -> AnyDescriptor;
 }
 
 /// A wrapper around an implementer of [`Element`] that allows it to be drawn in a window.
@@ -625,6 +652,14 @@ where
     ) -> Size<Pixels> {
         Drawable::layout_as_root(self, available_space, window, cx)
     }
+
+    fn build_descriptor(&mut self, window: &mut Window, cx: &mut App) -> AnyDescriptor {
+        let desc = self.element.build_descriptor(window, cx);
+        if matches!(desc, AnyDescriptor::Empty) {
+            eprintln!("  build_descriptor returned Empty for type: {}", std::any::type_name::<E>());
+        }
+        desc
+    }
 }
 
 /// A dynamically typed element that can be used to store any element type.
@@ -720,33 +755,7 @@ impl AnyElement {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyDescriptor {
-        if let Some(div) = self.downcast_mut::<Div>() {
-            return div.build_descriptor(window, cx);
-        }
-        if let Some(deferred) = self.downcast_mut::<Deferred>() {
-            return deferred.build_descriptor(window, cx);
-        }
-        if let Some(view) = self.downcast_mut::<AnyView>() {
-            // Don't call render() here - just return a ViewDescriptor.
-            // render() will be called in Entity<V>::request_layout.
-            // This avoids calling render() twice per frame.
-            return AnyDescriptor::View(crate::ViewDescriptor::new(view.entity_id()));
-        }
-        if let Some(text) = self.downcast_mut::<SharedString>() {
-            let style = window
-                .text_style_stack
-                .last()
-                .cloned()
-                .unwrap_or_default();
-            return AnyDescriptor::Text(TextDescriptor {
-                text: text.clone(),
-                style,
-            });
-        }
-        if self.downcast_mut::<Empty>().is_some() {
-            return AnyDescriptor::Empty;
-        }
-        AnyDescriptor::Empty
+        self.0.build_descriptor(window, cx)
     }
 
     #[stacksafe]
@@ -770,6 +779,82 @@ impl AnyElement {
             return AnyDescriptor::Empty;
         }
         AnyDescriptor::Empty
+    }
+}
+
+/// An element that replays cached prepaint/paint results for a fiber subtree.
+pub(crate) struct CachedSubtree {
+    fiber_id: FiberId,
+}
+
+impl CachedSubtree {
+    pub(crate) fn new(fiber_id: FiberId) -> Self {
+        Self { fiber_id }
+    }
+}
+
+impl IntoElement for CachedSubtree {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for CachedSubtree {
+    type RequestLayoutState = FiberId;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        window.mark_fiber_subtree_used(self.fiber_id);
+        (LayoutId::from(self.fiber_id), self.fiber_id)
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        fiber_id: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        _cx: &mut App,
+    ) {
+        if let Some(fiber) = window.fiber_tree.get(*fiber_id)
+            && let Some(prepaint_state) = fiber.prepaint_state
+        {
+            window.replay_prepaint_state(prepaint_state);
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        fiber_id: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        _cx: &mut App,
+    ) {
+        if let Some(fiber) = window.fiber_tree.get(*fiber_id)
+            && let Some(paint_list) = fiber.paint_list
+        {
+            window.replay_paint_list(paint_list);
+        }
     }
 }
 
@@ -898,5 +983,9 @@ impl Element for Empty {
         _window: &mut Window,
         _cx: &mut App,
     ) {
+    }
+
+    fn build_descriptor(&mut self, _window: &mut Window, _cx: &mut App) -> AnyDescriptor {
+        AnyDescriptor::Empty
     }
 }

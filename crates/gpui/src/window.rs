@@ -1,9 +1,10 @@
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::Inspector;
 use crate::{
-    Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App,
+    Action, AnyDescriptor, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App,
     AppContext, Arena, Asset, AsyncWindowContext, AvailableSpace, Background, BackdropBlur,
-    BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorStyle, Decorations,
+    BorderStyle, Bounds, BoxShadow, CachedSubtree, Capslock, Context, Corners, CursorStyle,
+    Decorations,
     DevicePixels, DirtyFlags, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId,
     Edges, Effect, Entity, EntityId, EventEmitter, FiberId, FiberTree, FileDropEvent, FontId,
     Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext,
@@ -2457,6 +2458,11 @@ impl Window {
     }
 
     fn finalize_dirty_flags(&mut self) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static BOUNDS_CHANGED_COUNT: AtomicUsize = AtomicUsize::new(0);
+        static BOUNDS_SAME_COUNT: AtomicUsize = AtomicUsize::new(0);
+        static FINALIZE_FRAME: AtomicUsize = AtomicUsize::new(0);
+
         let fiber_ids: Vec<FiberId> = self.fiber_tree.fibers.keys().collect();
         let scale_factor = self.scale_factor();
         let mut cache = FxHashMap::default();
@@ -2473,10 +2479,20 @@ impl Window {
             }
 
             if bounds_changed {
+                BOUNDS_CHANGED_COUNT.fetch_add(1, Ordering::Relaxed);
                 self.fiber_tree
                     .mark_dirty(fiber_id, DirtyFlags::BOUNDS_CHANGED);
                 self.fiber_tree.propagate_bounds_changed(fiber_id);
+            } else {
+                BOUNDS_SAME_COUNT.fetch_add(1, Ordering::Relaxed);
             }
+        }
+
+        let frame = FINALIZE_FRAME.fetch_add(1, Ordering::Relaxed);
+        let changed = BOUNDS_CHANGED_COUNT.swap(0, Ordering::Relaxed);
+        let same = BOUNDS_SAME_COUNT.swap(0, Ordering::Relaxed);
+        if frame > 0 {
+            println!("  Finalize: bounds_changed={} bounds_same={}", changed, same);
         }
     }
 
@@ -2502,7 +2518,28 @@ impl Window {
             }
         };
 
-        let mut root_element = self.root.as_ref().unwrap().clone().into_any();
+        let root_view = self.root.as_ref().unwrap().clone();
+        let root_descriptor = self.with_rendered_view(root_view.entity_id(), |window| {
+            root_view.render_descriptor(window, cx)
+        });
+
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DESC_FRAME: AtomicUsize = AtomicUsize::new(0);
+        let frame = DESC_FRAME.fetch_add(1, Ordering::Relaxed);
+        if frame == 1 {
+            println!("  Descriptor count: {}", root_descriptor.count());
+            println!("  Descriptor tree:");
+            root_descriptor.debug_tree(2);
+        }
+
+        let root_view = self.root.as_ref().unwrap().clone();
+        let root_fiber = self.fiber_tree.ensure_root(&root_descriptor);
+        self.fiber_tree.reconcile(root_fiber, &root_descriptor);
+        self.fiber_tree.view_roots.clear();
+        self.map_view_roots_from_descriptor(root_fiber, &root_descriptor);
+
+        // Populate fiber_path_cache from reconciled fiber tree so layout can reuse the same fibers
+        self.populate_fiber_path_cache(root_fiber);
 
         // Mark root fiber dirty if viewport size changed
         if self
@@ -2510,10 +2547,8 @@ impl Window {
             .is_none_or(|size| size != root_size)
         {
             // Root fiber will be created during layout if it doesn't exist
-            if let Some(root_fiber) = self.fiber_tree.root {
-                self.fiber_tree
-                    .mark_dirty(root_fiber, DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT);
-            }
+            self.fiber_tree
+                .mark_dirty(root_fiber, DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT);
             self.last_layout_viewport_size = Some(root_size);
         }
 
@@ -2526,6 +2561,21 @@ impl Window {
                 );
             }
         }
+
+        let mut root_element = if !self.refreshing
+            && self
+                .fiber_tree
+                .get(root_fiber)
+                .is_some_and(|fiber| {
+                    !fiber.dirty.any()
+                        && fiber.prepaint_state.is_some()
+                        && fiber.paint_list.is_some()
+                })
+        {
+            CachedSubtree::new(root_fiber).into_any()
+        } else {
+            root_view.into_any()
+        };
 
         let t0 = std::time::Instant::now();
         root_element.layout_as_root(root_size.into(), self, cx);
@@ -4277,6 +4327,10 @@ impl Window {
         let fiber_id = self.fiber_tree.fibers.insert_with_key(|id| {
             crate::Fiber::new(id, 0, 0, 0, 0)
         });
+        // Debug: print when creating fiber 2185+
+        if fiber_id.as_u64() >= 2185 {
+            eprintln!("  Creating fiber {:?} at path {:?}", fiber_id, self.layout_path);
+        }
 
         // Set up parent relationship if we have a parent path
         if !self.layout_path.is_empty() {
@@ -4304,12 +4358,41 @@ impl Window {
         }
     }
 
+    fn populate_fiber_path_cache(&mut self, root_fiber: FiberId) {
+        self.fiber_path_cache.clear();
+        let mut stack: Vec<(FiberId, SmallVec<[u32; 16]>)> = vec![(root_fiber, SmallVec::new())];
+        while let Some((fiber_id, path)) = stack.pop() {
+            self.fiber_path_cache.insert(path.clone(), fiber_id);
+            self.used_fiber_ids.insert(fiber_id);
+
+            let children: Vec<_> = self.fiber_tree.children(fiber_id).collect();
+            for (i, child_id) in children.into_iter().enumerate() {
+                let mut child_path = path.clone();
+                child_path.push(i as u32);
+                stack.push((child_id, child_path));
+            }
+        }
+    }
+
     /// Register a view's entity ID with the current fiber.
     /// This enables view-level dirty tracking.
     /// Call ensure_fiber_for_current_path() before this to ensure the fiber exists.
-    pub(crate) fn register_view_fiber(&mut self, entity_id: EntityId) {
+    pub(crate) fn register_view_fiber(&mut self, entity_id: EntityId) -> FiberId {
         let fiber_id = self.ensure_fiber_for_current_path();
         self.fiber_tree.view_roots.insert(entity_id, fiber_id);
+        fiber_id
+    }
+
+    fn map_view_roots_from_descriptor(&mut self, fiber_id: FiberId, descriptor: &AnyDescriptor) {
+        if let AnyDescriptor::View(view_desc) = descriptor {
+            self.fiber_tree
+                .set_view_root(view_desc.entity_id, fiber_id);
+        }
+
+        let child_ids: Vec<FiberId> = self.fiber_tree.children(fiber_id).collect();
+        for (child_id, child_desc) in child_ids.into_iter().zip(descriptor.children()) {
+            self.map_view_roots_from_descriptor(child_id, child_desc);
+        }
     }
 
     /// Reconcile a fiber with new hash values, setting dirty flags if changed.

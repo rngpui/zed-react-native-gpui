@@ -85,6 +85,27 @@ impl DirtyFlags {
         self.0 != 0
     }
 
+    /// Check if this fiber itself needs work (excluding HAS_DIRTY_DESCENDANT).
+    /// HAS_DIRTY_DESCENDANT only indicates a descendant is dirty, not this fiber.
+    pub fn needs_work(self) -> bool {
+        const WORK_FLAGS: u8 = DirtyFlags::NEEDS_LAYOUT.0
+            | DirtyFlags::NEEDS_PAINT.0
+            | DirtyFlags::BOUNDS_CHANGED.0
+            | DirtyFlags::STRUCTURE_CHANGED.0
+            | DirtyFlags::STYLE_CHANGED.0;
+        (self.0 & WORK_FLAGS) != 0
+    }
+
+    /// Check if this fiber needs re-prepaint (excludes NEEDS_LAYOUT since layout
+    /// is handled separately and only BOUNDS_CHANGED affects prepaint).
+    pub fn needs_prepaint(self) -> bool {
+        const PREPAINT_FLAGS: u8 = DirtyFlags::NEEDS_PAINT.0
+            | DirtyFlags::BOUNDS_CHANGED.0
+            | DirtyFlags::STRUCTURE_CHANGED.0
+            | DirtyFlags::STYLE_CHANGED.0;
+        (self.0 & PREPAINT_FLAGS) != 0
+    }
+
     /// Check if specific flags are set
     pub fn contains(self, other: DirtyFlags) -> bool {
         (self.0 & other.0) == other.0
@@ -461,7 +482,23 @@ impl FiberTree {
             let Some(parent) = self.fibers.get(parent_id) else {
                 break;
             };
-            if parent.dirty.any() {
+            // Only check if the ancestor itself needs work, not HAS_DIRTY_DESCENDANT
+            if parent.dirty.needs_work() {
+                return true;
+            }
+            current = parent.parent;
+        }
+        false
+    }
+
+    /// Returns true if any ancestor needs prepaint (excludes NEEDS_LAYOUT).
+    pub fn has_prepaint_dirty_ancestor(&self, fiber_id: FiberId) -> bool {
+        let mut current = self.fibers.get(fiber_id).and_then(|f| f.parent);
+        while let Some(parent_id) = current {
+            let Some(parent) = self.fibers.get(parent_id) else {
+                break;
+            };
+            if parent.dirty.needs_prepaint() {
                 return true;
             }
             current = parent.parent;
@@ -531,6 +568,11 @@ impl FiberTree {
         fiber_id: FiberId,
         descriptor: &AnyDescriptor,
     ) -> bool {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static RECONCILE_DIRTY_COUNT: AtomicUsize = AtomicUsize::new(0);
+        static RECONCILE_CLEAN_COUNT: AtomicUsize = AtomicUsize::new(0);
+        static RECONCILE_FRAME: AtomicUsize = AtomicUsize::new(0);
+
         let new_descriptor_hash = descriptor.content_hash();
         let new_layout_hash = descriptor.layout_hash();
         let new_paint_hash = descriptor.paint_hash();
@@ -538,23 +580,26 @@ impl FiberTree {
 
         let mut changed = false;
         let mut dirty_flags = DirtyFlags::NONE;
+        let mut layout_changed = false;
         if let Some(fiber) = self.fibers.get_mut(fiber_id) {
 
             if fiber.child_count != new_child_count {
                 dirty_flags |= DirtyFlags::STRUCTURE_CHANGED;
                 dirty_flags |= DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT;
+                layout_changed = true;
             }
 
             if fiber.layout_hash != new_layout_hash {
                 dirty_flags |= DirtyFlags::STYLE_CHANGED;
                 dirty_flags |= DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT;
+                layout_changed = true;
             } else if fiber.paint_hash != new_paint_hash {
                 dirty_flags |= DirtyFlags::STYLE_CHANGED;
                 dirty_flags |= DirtyFlags::NEEDS_PAINT;
             }
 
             if fiber.descriptor_hash != new_descriptor_hash && dirty_flags == DirtyFlags::NONE {
-                dirty_flags |= DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT;
+                dirty_flags |= DirtyFlags::NEEDS_PAINT;
             }
 
             if dirty_flags != DirtyFlags::NONE {
@@ -564,7 +609,9 @@ impl FiberTree {
                 fiber.child_count = new_child_count;
                 Self::update_cached_props(fiber, descriptor);
                 changed = true;
+                RECONCILE_DIRTY_COUNT.fetch_add(1, Ordering::Relaxed);
             } else {
+                RECONCILE_CLEAN_COUNT.fetch_add(1, Ordering::Relaxed);
                 match descriptor {
                     AnyDescriptor::Div(_) if fiber.cached_style.is_none() => {
                         Self::update_cached_props(fiber, descriptor);
@@ -580,11 +627,25 @@ impl FiberTree {
             self.mark_dirty(fiber_id, dirty_flags);
         }
 
-        // Reconcile children by position
-        let children = descriptor.children();
-        self.reconcile_children(fiber_id, children);
+        // Print stats for root fiber only
+        if fiber_id == self.root.unwrap_or(fiber_id) {
+            let frame = RECONCILE_FRAME.fetch_add(1, Ordering::Relaxed);
+            let dirty = RECONCILE_DIRTY_COUNT.swap(0, Ordering::Relaxed);
+            let clean = RECONCILE_CLEAN_COUNT.swap(0, Ordering::Relaxed);
+            if frame > 0 {
+                println!("  Reconcile: dirty={} clean={}", dirty, clean);
+            }
+        }
 
-        if changed {
+        // Reconcile children by position unless the descriptor is a view.
+        // Views are opaque: their internal element tree is reconciled during layout.
+        if !matches!(descriptor, AnyDescriptor::View(_)) {
+            let children = descriptor.children();
+            self.reconcile_children(fiber_id, children);
+        }
+
+        // Only propagate BOUNDS_CHANGED to children when layout-affecting properties changed
+        if layout_changed {
             let child_ids: Vec<FiberId> = self.children(fiber_id).collect();
             for child_id in child_ids {
                 if let Some(child) = self.fibers.get_mut(child_id) {
@@ -605,6 +666,9 @@ impl FiberTree {
         parent_id: FiberId,
         children: &[AnyDescriptor],
     ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEW_FIBER_COUNT: AtomicUsize = AtomicUsize::new(0);
+
         // Collect existing children
         let existing_children: Vec<FiberId> = self.children(parent_id).collect();
 
@@ -616,6 +680,7 @@ impl FiberTree {
                 self.reconcile(child_fiber_id, child_desc);
             } else {
                 // No fiber at this position - create new one
+                NEW_FIBER_COUNT.fetch_add(1, Ordering::Relaxed);
                 let new_fiber_id = self.create_fiber_for(child_desc);
                 self.add_child(parent_id, new_fiber_id);
                 if let Some(fiber) = self.fibers.get_mut(new_fiber_id) {

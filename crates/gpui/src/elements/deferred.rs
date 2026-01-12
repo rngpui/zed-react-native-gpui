@@ -95,6 +95,10 @@ impl Element for Deferred {
         _cx: &mut App,
     ) {
     }
+
+    fn build_descriptor(&mut self, window: &mut Window, cx: &mut App) -> AnyDescriptor {
+        Deferred::build_descriptor(self, window, cx)
+    }
 }
 
 impl IntoElement for Deferred {

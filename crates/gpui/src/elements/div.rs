@@ -18,7 +18,7 @@
 use crate::{
     AbsoluteLength, Action, AnyDescriptor, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds,
     ClickEvent, DispatchPhase, Display, DivDescriptor, Element, ElementId, Entity,
-    FiberId, FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior, HitboxId,
+    DirtyFlags, FiberId, FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior, HitboxId,
     InspectorElementId, IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton,
     KeyboardClickEvent, LayoutId, ModifiersChangedEvent, MouseButton, MouseClickEvent,
     MouseDownEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent, Overflow, ParentElement,
@@ -42,6 +42,8 @@ pub static PAINT_FULL_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub static PREPAINT_NO_FIBER: AtomicUsize = AtomicUsize::new(0);
 /// Debug counter: prepaint skip failed due to dirty flags
 pub static PREPAINT_DIRTY: AtomicUsize = AtomicUsize::new(0);
+/// Debug counter: prepaint skip failed due to dirty ancestor
+pub static PREPAINT_DIRTY_ANCESTOR: AtomicUsize = AtomicUsize::new(0);
 /// Debug counter: prepaint skip failed due to no cached state
 pub static PREPAINT_NO_CACHE: AtomicUsize = AtomicUsize::new(0);
 /// Debug counter: prepaint skip failed due to replay failure
@@ -1347,6 +1349,11 @@ impl Div {
 
     #[stacksafe]
     pub(crate) fn build_descriptor(&mut self, window: &mut Window, cx: &mut App) -> AnyDescriptor {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DIV_DESC_COUNT: AtomicUsize = AtomicUsize::new(0);
+        static FRAME_COUNT: AtomicUsize = AtomicUsize::new(0);
+        let count = DIV_DESC_COUNT.fetch_add(1, Ordering::Relaxed);
+
         let style = (*self.interactivity.base_style).clone();
         let element_id = self.interactivity.element_id.clone();
         let mut children = SmallVec::new();
@@ -1356,10 +1363,25 @@ impl Div {
             None
         };
         window.with_text_style(text_style, |window| {
-            for child in &mut self.children {
-                children.push(child.build_descriptor(window, cx));
+            for (i, child) in self.children.iter_mut().enumerate() {
+                let child_desc = child.build_descriptor(window, cx);
+                let child_type = match &child_desc {
+                    AnyDescriptor::Div(_) => "Div",
+                    AnyDescriptor::Text(_) => "Text",
+                    AnyDescriptor::Deferred(_) => "Deferred",
+                    AnyDescriptor::View(_) => "View",
+                    AnyDescriptor::Empty => "Empty",
+                };
+                // Print first frame only
+                if FRAME_COUNT.load(Ordering::Relaxed) == 0 && count < 5 {
+                    println!("  Div[{}].child[{}] -> {}", count, i, child_type);
+                }
+                children.push(child_desc);
             }
         });
+        if count == 0 {
+            FRAME_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
         AnyDescriptor::Div(Box::new(DivDescriptor {
             style,
             element_id,
@@ -1479,11 +1501,10 @@ impl Element for Div {
             )
         });
 
-        // Reconcile fiber with current style and child count
-        let layout_hash = self.interactivity.base_style.layout_hash();
-        let paint_hash = self.interactivity.base_style.paint_hash();
-        let child_count = self.children.len();
-        window.reconcile_fiber(fiber_id, layout_hash, paint_hash, child_count);
+        // Note: We don't call reconcile_fiber here anymore because descriptor
+        // reconciliation in draw_roots() already handles dirty tracking.
+        // The dual reconciliation was causing hash mismatches because descriptor
+        // hashes include discriminants while style hashes don't.
 
         (
             layout_id,
@@ -1517,17 +1538,28 @@ impl Element for Div {
                 PREPAINT_NO_FIBER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 break 'skip None;
             };
-            // Check this fiber's own dirty flags
-            if fiber.dirty.any() {
+            // Check this fiber's own dirty flags (only prepaint-affecting flags, not NEEDS_LAYOUT)
+            if fiber.dirty.needs_prepaint() {
+                PREPAINT_DIRTY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Debug
+                use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+                static DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
+                let count = DEBUG_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                if count > 1122 && count < 2500 {
+                    eprintln!("  Prepaint dirty: fiber={:?} flags={:?}", fiber_id, fiber.dirty);
+                }
+                break 'skip None;
+            }
+            // If any descendant is dirty, we must traverse into the subtree; replaying a cached
+            // prepaint state would also replay stale descendant prepaint output.
+            if fiber.dirty.contains(DirtyFlags::HAS_DIRTY_DESCENDANT) {
                 PREPAINT_DIRTY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 break 'skip None;
             }
-            // Also check if any ancestor is dirty. When cx.notify(view) is called,
-            // the view's fiber is marked dirty, but children's visual output may
-            // still change (e.g., scroll_offset). We need to re-prepaint to pick
-            // up external state changes.
-            if window.fiber_tree.has_any_dirty_ancestor(fiber_id) {
-                PREPAINT_DIRTY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Also check if any ancestor needs prepaint (excludes NEEDS_LAYOUT).
+            // When an ancestor's visual properties change, children may need repaint.
+            if window.fiber_tree.has_prepaint_dirty_ancestor(fiber_id) {
+                PREPAINT_DIRTY_ANCESTOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 break 'skip None;
             }
             let Some(prepaint_state) = fiber.prepaint_state else {
@@ -1666,8 +1698,9 @@ impl Element for Div {
         let mut cached_paint = None;
         if let Some(fiber_id) = request_layout.fiber_id
             && let Some(fiber) = window.fiber_tree.get(fiber_id)
-            && !fiber.dirty.any()
-            && !window.fiber_tree.has_any_dirty_ancestor(fiber_id)
+            && !fiber.dirty.needs_prepaint()
+            && !fiber.dirty.contains(DirtyFlags::HAS_DIRTY_DESCENDANT)
+            && !window.fiber_tree.has_prepaint_dirty_ancestor(fiber_id)
             && let Some(paint_list) = fiber.paint_list
         {
             cached_paint = Some(paint_list);
@@ -1719,6 +1752,10 @@ impl Element for Div {
                 fiber.dirty.clear();
             }
         }
+    }
+
+    fn build_descriptor(&mut self, window: &mut Window, cx: &mut App) -> AnyDescriptor {
+        Div::build_descriptor(self, window, cx)
     }
 }
 
@@ -3379,6 +3416,10 @@ where
             window,
             cx,
         );
+    }
+
+    fn build_descriptor(&mut self, window: &mut Window, cx: &mut App) -> AnyDescriptor {
+        self.element.build_descriptor(window, cx)
     }
 }
 

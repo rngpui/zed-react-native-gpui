@@ -1,9 +1,9 @@
 use crate::{
-    ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
-    TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
-    WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
+    ActiveTooltip, AnyDescriptor, AnyView, App, Bounds, DispatchPhase, Element, ElementId,
+    GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
+    LayoutId, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size,
+    TextDescriptor, TextOverflow, TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window,
+    WrappedLine, WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
 use anyhow::Context as _;
 use itertools::Itertools;
@@ -66,6 +66,18 @@ impl Element for &'static str {
         cx: &mut App,
     ) {
         text_layout.paint(self, window, cx)
+    }
+
+    fn build_descriptor(&mut self, window: &mut Window, _cx: &mut App) -> AnyDescriptor {
+        let style = window
+            .text_style_stack
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        AnyDescriptor::Text(TextDescriptor {
+            text: SharedString::from(*self),
+            style,
+        })
     }
 }
 
@@ -132,6 +144,18 @@ impl Element for SharedString {
         cx: &mut App,
     ) {
         text_layout.paint(self.as_ref(), window, cx)
+    }
+
+    fn build_descriptor(&mut self, window: &mut Window, _cx: &mut App) -> AnyDescriptor {
+        let style = window
+            .text_style_stack
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        AnyDescriptor::Text(TextDescriptor {
+            text: self.clone(),
+            style,
+        })
     }
 }
 

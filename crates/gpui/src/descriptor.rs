@@ -43,6 +43,31 @@ impl AnyDescriptor {
         }
     }
 
+    /// Count total number of descriptors in this tree
+    pub fn count(&self) -> usize {
+        let mut count = 1;
+        for child in self.children() {
+            count += child.count();
+        }
+        count
+    }
+
+    /// Debug print the tree structure
+    pub fn debug_tree(&self, indent: usize) {
+        let prefix = "  ".repeat(indent);
+        let name = match self {
+            AnyDescriptor::Div(_) => "Div",
+            AnyDescriptor::Text(_) => "Text",
+            AnyDescriptor::Deferred(_) => "Deferred",
+            AnyDescriptor::View(_) => "View",
+            AnyDescriptor::Empty => "Empty",
+        };
+        println!("{}{} (children={})", prefix, name, self.children().len());
+        for child in self.children() {
+            child.debug_tree(indent + 1);
+        }
+    }
+
     /// Compute a content hash for this descriptor for change detection.
     /// This hash is based on the actual content of the descriptor, allowing
     /// reconciliation to detect when a descriptor has truly changed.

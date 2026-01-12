@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use gpui::{
     App, Application, Bounds, Context, ElementId, Entity, PAINT_FULL_COUNT, PAINT_SKIP_COUNT,
-    PREPAINT_DIRTY, PREPAINT_FULL_COUNT, PREPAINT_NO_CACHE, PREPAINT_NO_FIBER, PREPAINT_REFRESHING,
+    PREPAINT_DIRTY, PREPAINT_DIRTY_ANCESTOR, PREPAINT_FULL_COUNT, PREPAINT_NO_CACHE, PREPAINT_NO_FIBER, PREPAINT_REFRESHING,
     PREPAINT_REPLAY_FAIL, PREPAINT_SKIP_COUNT, PREPAINT_STORED, Window, WindowBounds,
     WindowOptions, deferred, div, prelude::*, px, rgb, size,
 };
@@ -145,6 +145,7 @@ impl Render for GridBench {
         let paint_full = PAINT_FULL_COUNT.swap(0, Ordering::Relaxed);
         let no_fiber = PREPAINT_NO_FIBER.swap(0, Ordering::Relaxed);
         let dirty = PREPAINT_DIRTY.swap(0, Ordering::Relaxed);
+        let dirty_ancestor = PREPAINT_DIRTY_ANCESTOR.swap(0, Ordering::Relaxed);
         let no_cache = PREPAINT_NO_CACHE.swap(0, Ordering::Relaxed);
         let replay_fail = PREPAINT_REPLAY_FAIL.swap(0, Ordering::Relaxed);
         let stored = PREPAINT_STORED.swap(0, Ordering::Relaxed);
@@ -152,8 +153,8 @@ impl Render for GridBench {
 
         if prepaint_skip > 0 || prepaint_full > 0 {
             println!(
-                "Prepaint: skip={} full={} (fib={} dirty={} cache={} replay={} stored={} refresh={}) | Paint: skip={} full={}",
-                prepaint_skip, prepaint_full, no_fiber, dirty, no_cache, replay_fail, stored, refreshing,
+                "Prepaint: skip={} full={} (fib={} dirty={} anc={} cache={} replay={} stored={} refresh={}) | Paint: skip={} full={}",
+                prepaint_skip, prepaint_full, no_fiber, dirty, dirty_ancestor, no_cache, replay_fail, stored, refreshing,
                 paint_skip, paint_full
             );
         }

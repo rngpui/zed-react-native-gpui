@@ -1,7 +1,8 @@
 use crate::{
-    AnyElement, AnyEntity, AnyWeakEntity, App, Bounds, ContentMask, Context, Element, ElementId,
-    Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintIndex,
-    Pixels, PrepaintStateIndex, Render, Style, StyleRefinement, TextStyle, WeakEntity,
+    AnyDescriptor, AnyElement, AnyEntity, AnyWeakEntity, App, Bounds, ContentMask, Context, Element,
+    ElementId, Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
+    PaintIndex, Pixels, PrepaintStateIndex, Render, Style, StyleRefinement, TextStyle,
+    ViewDescriptor, WeakEntity,
 };
 use crate::{Empty, Window};
 use anyhow::Result;
@@ -44,7 +45,7 @@ impl<V: Render> Element for Entity<V> {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        window.register_view_fiber(self.entity_id());
+        let _fiber_id = window.register_view_fiber(self.entity_id());
         let mut element = self.update(cx, |view, cx| view.render(window, cx).into_any_element());
         let layout_id = window.with_rendered_view(self.entity_id(), |window| {
             element.request_layout(window, cx)
@@ -62,7 +63,21 @@ impl<V: Render> Element for Entity<V> {
         cx: &mut App,
     ) {
         window.set_view_id(self.entity_id());
+        let prepaint_start = window.prepaint_index();
         window.with_rendered_view(self.entity_id(), |window| element.prepaint(window, cx));
+        let prepaint_end = window.prepaint_index();
+
+        if let Some(fiber_id) = window.fiber_tree.get_view_root(self.entity_id()) {
+            let existing_prepaint_state = window
+                .fiber_tree
+                .get(fiber_id)
+                .and_then(|fiber| fiber.prepaint_state);
+            let prepaint_state =
+                window.store_prepaint_state(prepaint_start..prepaint_end, existing_prepaint_state);
+            if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
+                fiber.prepaint_state = Some(prepaint_state);
+            }
+        }
     }
 
     fn paint(
@@ -75,11 +90,25 @@ impl<V: Render> Element for Entity<V> {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let paint_start = window.paint_index();
         window.with_rendered_view(self.entity_id(), |window| element.paint(window, cx));
+        let paint_end = window.paint_index();
+        if let Some(fiber_id) = window.fiber_tree.get_view_root(self.entity_id()) {
+            let existing_paint_list =
+                window.fiber_tree.get(fiber_id).and_then(|fiber| fiber.paint_list);
+            let paint_list = window.store_paint_list(paint_start..paint_end, existing_paint_list);
+            if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
+                fiber.paint_list = Some(paint_list);
+            }
+        }
         // Clear the view's fiber dirty flags after paint
         if let Some(fiber_id) = window.fiber_tree.get_view_root(self.entity_id()) {
             window.fiber_tree.clear_dirty(fiber_id);
         }
+    }
+
+    fn build_descriptor(&mut self, _window: &mut Window, _cx: &mut App) -> AnyDescriptor {
+        AnyDescriptor::View(ViewDescriptor::new(self.entity_id()))
     }
 }
 
@@ -88,6 +117,7 @@ impl<V: Render> Element for Entity<V> {
 pub struct AnyView {
     entity: AnyEntity,
     render: fn(&AnyView, &mut Window, &mut App) -> AnyElement,
+    render_descriptor: fn(&AnyView, &mut Window, &mut App) -> AnyDescriptor,
     cached_style: Option<Rc<StyleRefinement>>,
 }
 
@@ -96,6 +126,7 @@ impl<V: Render> From<Entity<V>> for AnyView {
         AnyView {
             entity: value.into_any(),
             render: any_view::render::<V>,
+            render_descriptor: any_view::render_descriptor::<V>,
             cached_style: None,
         }
     }
@@ -115,6 +146,7 @@ impl AnyView {
         AnyWeakView {
             entity: self.entity.downgrade(),
             render: self.render,
+            render_descriptor: self.render_descriptor,
         }
     }
 
@@ -126,6 +158,7 @@ impl AnyView {
             Err(entity) => Err(Self {
                 entity,
                 render: self.render,
+                render_descriptor: self.render_descriptor,
                 cached_style: self.cached_style,
             }),
         }
@@ -139,6 +172,10 @@ impl AnyView {
     /// Gets the entity id of this handle.
     pub fn entity_id(&self) -> EntityId {
         self.entity.entity_id()
+    }
+
+    pub(crate) fn render_descriptor(&self, window: &mut Window, cx: &mut App) -> AnyDescriptor {
+        (self.render_descriptor)(self, window, cx)
     }
 }
 
@@ -169,12 +206,35 @@ impl Element for AnyView {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        // Register this view's fiber for dirty tracking
-        window.register_view_fiber(self.entity_id());
+        // Register this view's fiber for dirty tracking, but avoid aliasing the descriptor root
+        // fiber when drawing the window's root view. The root view itself isn't represented by a
+        // `ViewDescriptor` in the descriptor tree, so mapping it to the descriptor root fiber
+        // causes persistent `STRUCTURE_CHANGED` via `request_animation_frame` / `cx.notify`.
+        let is_window_root_view = window
+            .root
+            .as_ref()
+            .is_some_and(|root| root.entity_id() == self.entity_id());
+        let fiber_id = (!is_window_root_view).then(|| window.register_view_fiber(self.entity_id()));
 
         window.with_rendered_view(self.entity_id(), |window| {
             // Disable caching when inspecting so that mouse_hit_test has all hitboxes.
             let caching_disabled = window.is_inspector_picking(cx);
+            if let Some(fiber_id) = fiber_id {
+                let can_reuse_fiber_cache = !caching_disabled
+                    && !window.refreshing
+                    && window
+                        .fiber_tree
+                        .get(fiber_id)
+                        .is_some_and(|fiber| {
+                            !fiber.dirty.any()
+                                && fiber.prepaint_state.is_some()
+                                && fiber.paint_list.is_some()
+                        });
+                if can_reuse_fiber_cache {
+                    window.mark_fiber_subtree_used(fiber_id);
+                    return (LayoutId::from(fiber_id), None);
+                }
+            }
             match self.cached_style.as_ref() {
                 Some(style) if !caching_disabled => {
                     let mut root_style = Style::default();
@@ -202,6 +262,17 @@ impl Element for AnyView {
         cx: &mut App,
     ) -> Option<AnyElement> {
         window.set_view_id(self.entity_id());
+        if element.is_none() && self.cached_style.is_none() && !window.refreshing {
+            if let Some(fiber_id) = window.fiber_tree.get_view_root(self.entity_id())
+                && let Some(fiber) = window.fiber_tree.get(fiber_id)
+                && !fiber.dirty.any()
+                && let Some(prepaint_state) = fiber.prepaint_state
+                && window.replay_prepaint_state(prepaint_state)
+            {
+                return None;
+            }
+        }
+        let prepaint_start = window.prepaint_index();
         let result = window.with_rendered_view(self.entity_id(), |window| {
             if let Some(mut element) = element.take() {
                 element.prepaint(window, cx);
@@ -261,6 +332,19 @@ impl Element for AnyView {
                 },
             )
         });
+        let prepaint_end = window.prepaint_index();
+
+        if let Some(fiber_id) = window.fiber_tree.get_view_root(self.entity_id()) {
+            let existing_prepaint_state = window
+                .fiber_tree
+                .get(fiber_id)
+                .and_then(|fiber| fiber.prepaint_state);
+            let prepaint_state =
+                window.store_prepaint_state(prepaint_start..prepaint_end, existing_prepaint_state);
+            if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
+                fiber.prepaint_state = Some(prepaint_state);
+            }
+        }
         result
     }
 
@@ -274,6 +358,17 @@ impl Element for AnyView {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if element.is_none() && self.cached_style.is_none() && !window.refreshing {
+            if let Some(fiber_id) = window.fiber_tree.get_view_root(self.entity_id())
+                && let Some(fiber) = window.fiber_tree.get(fiber_id)
+                && !fiber.dirty.any()
+                && let Some(paint_list) = fiber.paint_list
+            {
+                window.replay_paint_list(paint_list);
+                return;
+            }
+        }
+        let paint_start = window.paint_index();
         window.with_rendered_view(self.entity_id(), |window| {
             let caching_disabled = window.is_inspector_picking(cx);
             if self.cached_style.is_some() && !caching_disabled {
@@ -302,10 +397,23 @@ impl Element for AnyView {
                 element.as_mut().unwrap().paint(window, cx);
             }
         });
+        let paint_end = window.paint_index();
+        if let Some(fiber_id) = window.fiber_tree.get_view_root(self.entity_id()) {
+            let existing_paint_list =
+                window.fiber_tree.get(fiber_id).and_then(|fiber| fiber.paint_list);
+            let paint_list = window.store_paint_list(paint_start..paint_end, existing_paint_list);
+            if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
+                fiber.paint_list = Some(paint_list);
+            }
+        }
         // Clear the view's fiber dirty flags after paint
         if let Some(fiber_id) = window.fiber_tree.get_view_root(self.entity_id()) {
             window.fiber_tree.clear_dirty(fiber_id);
         }
+    }
+
+    fn build_descriptor(&mut self, _window: &mut Window, _cx: &mut App) -> AnyDescriptor {
+        AnyDescriptor::View(ViewDescriptor::new(self.entity_id()))
     }
 }
 
@@ -341,6 +449,7 @@ impl<V: 'static + Render> crate::IntoDescriptor for Entity<V> {
 pub struct AnyWeakView {
     entity: AnyWeakEntity,
     render: fn(&AnyView, &mut Window, &mut App) -> AnyElement,
+    render_descriptor: fn(&AnyView, &mut Window, &mut App) -> AnyDescriptor,
 }
 
 impl AnyWeakView {
@@ -350,6 +459,7 @@ impl AnyWeakView {
         Some(AnyView {
             entity,
             render: self.render,
+            render_descriptor: self.render_descriptor,
             cached_style: None,
         })
     }
@@ -360,6 +470,7 @@ impl<V: 'static + Render> From<WeakEntity<V>> for AnyWeakView {
         AnyWeakView {
             entity: view.into(),
             render: any_view::render::<V>,
+            render_descriptor: any_view::render_descriptor::<V>,
         }
     }
 }
@@ -379,7 +490,7 @@ impl std::fmt::Debug for AnyWeakView {
 }
 
 mod any_view {
-    use crate::{AnyElement, AnyView, App, IntoElement, Render, Window};
+    use crate::{AnyDescriptor, AnyElement, AnyView, App, IntoElement, Render, Window};
 
     pub(crate) fn render<V: 'static + Render>(
         view: &AnyView,
@@ -388,6 +499,15 @@ mod any_view {
     ) -> AnyElement {
         let view = view.clone().downcast::<V>().unwrap();
         view.update(cx, |view, cx| view.render(window, cx).into_any_element())
+    }
+
+    pub(crate) fn render_descriptor<V: 'static + Render>(
+        view: &AnyView,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyDescriptor {
+        let view = view.clone().downcast::<V>().unwrap();
+        view.update(cx, |view, cx| view.render_descriptor(window, cx))
     }
 }
 
