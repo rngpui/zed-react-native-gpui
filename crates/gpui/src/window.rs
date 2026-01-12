@@ -982,7 +982,7 @@ pub struct Window {
     next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>>,
     render_layers: FxHashMap<ElementId, RenderLayerRegistration>,
     next_render_layer_seq: usize,
-    pub(crate) dirty_views: FxHashSet<EntityId>,
+    pending_dirty_views: FxHashSet<EntityId>,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
     default_prevented: bool,
@@ -1471,7 +1471,7 @@ impl Window {
             tooltip_bounds: None,
             render_layers: FxHashMap::default(),
             next_render_layer_seq: 0,
-            dirty_views: FxHashSet::default(),
+            pending_dirty_views: FxHashSet::default(),
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
             default_prevented: true,
@@ -1544,17 +1544,22 @@ impl ContentMask<Pixels> {
 
 impl Window {
     fn mark_view_dirty(&mut self, view_id: EntityId) {
-        // Mark ancestor views as dirty. If already in the `dirty_views` set, then all its ancestors
-        // should already be dirty.
-        for view_id in self
-            .rendered_frame
-            .dispatch_tree
-            .view_path_reversed(view_id)
-        {
-            if !self.dirty_views.insert(view_id) {
-                break;
-            }
+        if let Some(fiber_id) = self.fiber_tree.get_view_root(view_id) {
+            self.fiber_tree.mark_dirty(
+                fiber_id,
+                DirtyFlags::STRUCTURE_CHANGED | DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT,
+            );
+        } else {
+            self.pending_dirty_views.insert(view_id);
         }
+    }
+
+    pub(crate) fn view_is_dirty(&self, view_id: EntityId) -> bool {
+        self.fiber_tree
+            .get_view_root(view_id)
+            .and_then(|fiber_id| self.fiber_tree.get(fiber_id))
+            .map(|fiber| fiber.dirty.any())
+            .unwrap_or(true)
     }
 
     /// Registers a callback to be invoked when the window appearance changes.
@@ -2278,7 +2283,6 @@ impl Window {
         if !cx.mode.skip_drawing() {
             self.draw_roots(cx);
         }
-        self.dirty_views.clear();
         self.next_frame.window_active = self.active.get();
 
         // Register requested input handler with the platform window.
@@ -2287,17 +2291,28 @@ impl Window {
                 .set_input_handler(input_handler.unwrap());
         }
 
-        // Clean up unused layout nodes from previous frame.
+        // Clean up unused layout nodes and fibers from previous frame.
         // Keep nodes that were used this frame for position-based caching.
+        let mut fibers_to_remove = Vec::new();
         self.layout_path_cache.retain(|path, cached| {
             if self.used_layout_paths.contains(path) {
                 true
             } else {
                 // Remove the unused node from taffy
                 self.layout_engine.as_mut().unwrap().remove(cached.layout_id);
+                // Also track the fiber to remove
+                if let Some(fiber_id) = self.fiber_path_cache.get(path).copied() {
+                    fibers_to_remove.push(fiber_id);
+                }
                 false
             }
         });
+        // Remove unused fibers from the fiber tree
+        for fiber_id in fibers_to_remove {
+            self.fiber_tree.remove(fiber_id);
+        }
+        self.fiber_path_cache
+            .retain(|path, _| self.used_layout_paths.contains(path));
         self.used_layout_paths.clear();
         self.layout_path.clear();
 
@@ -2460,11 +2475,17 @@ impl Window {
     ) {
         self.fiber_path_cache.insert(path.clone(), fiber_id);
 
-        if let AnyDescriptor::View(view_desc) = descriptor
-            && (self.dirty_views.contains(&view_desc.entity_id) || self.refreshing)
-        {
+        if let AnyDescriptor::View(view_desc) = descriptor {
             self.fiber_tree
-                .mark_dirty(fiber_id, DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT);
+                .set_view_root(view_desc.entity_id, fiber_id);
+            if self.pending_dirty_views.remove(&view_desc.entity_id) || self.refreshing {
+                self.fiber_tree.mark_dirty(
+                    fiber_id,
+                    DirtyFlags::STRUCTURE_CHANGED
+                        | DirtyFlags::NEEDS_LAYOUT
+                        | DirtyFlags::NEEDS_PAINT,
+                );
+            }
         }
 
         let child_fibers: Vec<FiberId> = self.fiber_tree.children(fiber_id).collect();
@@ -2505,12 +2526,11 @@ impl Window {
 
                 if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
                     fiber.bounds = Some(new_bounds);
-                    if bounds_changed {
-                        fiber.dirty.insert(DirtyFlags::BOUNDS_CHANGED);
-                    }
                 }
 
                 if bounds_changed {
+                    self.fiber_tree
+                        .mark_dirty(fiber_id, DirtyFlags::BOUNDS_CHANGED);
                     self.fiber_tree.propagate_bounds_changed(fiber_id);
                 }
             }
@@ -2540,36 +2560,35 @@ impl Window {
         };
 
         let mut root_element = self.root.as_ref().unwrap().clone().into_any();
-        let t0 = std::time::Instant::now();
-        let descriptor = root_element.build_descriptor(self, cx);
-        let t1 = std::time::Instant::now();
-        let root_fiber = self.reconcile_descriptor_tree(&descriptor);
-        let t2 = std::time::Instant::now();
+
+        // Mark root fiber dirty if viewport size changed
         if self
             .last_layout_viewport_size
             .is_none_or(|size| size != root_size)
         {
-            self.fiber_tree
-                .mark_dirty(root_fiber, DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT);
+            // Root fiber will be created during layout if it doesn't exist
+            if let Some(root_fiber) = self.fiber_tree.root {
+                self.fiber_tree
+                    .mark_dirty(root_fiber, DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT);
+            }
             self.last_layout_viewport_size = Some(root_size);
         }
 
+        // Handle pending dirty views - mark their fibers dirty
+        for entity_id in std::mem::take(&mut self.pending_dirty_views) {
+            if let Some(fiber_id) = self.fiber_tree.view_roots.get(&entity_id).copied() {
+                self.fiber_tree.mark_dirty(
+                    fiber_id,
+                    DirtyFlags::STRUCTURE_CHANGED | DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT,
+                );
+            }
+        }
+
         root_element.layout_as_root(root_size.into(), self, cx);
-        let t3 = std::time::Instant::now();
         self.finalize_dirty_flags();
-        let t4 = std::time::Instant::now();
         self.with_absolute_element_offset(Point::default(), |window| {
             root_element.prepaint(window, cx)
         });
-        let t5 = std::time::Instant::now();
-        eprintln!(
-            "Timing: desc={:.2}ms reconcile={:.2}ms layout={:.2}ms finalize={:.2}ms prepaint={:.2}ms",
-            (t1 - t0).as_secs_f64() * 1000.0,
-            (t2 - t1).as_secs_f64() * 1000.0,
-            (t3 - t2).as_secs_f64() * 1000.0,
-            (t4 - t3).as_secs_f64() * 1000.0,
-            (t5 - t4).as_secs_f64() * 1000.0
-        );
 
         let mut render_layer_elements = self.prepaint_render_layers(root_size, cx);
 
@@ -4264,6 +4283,82 @@ impl Window {
 
     pub(crate) fn fiber_for_current_path(&self) -> Option<FiberId> {
         self.fiber_path_cache.get(&self.layout_path).copied()
+    }
+
+    /// Ensure a fiber exists for the current layout path, creating one if necessary.
+    /// This enables fibers to be created on-demand during layout traversal,
+    /// which is needed because views don't have children in the descriptor tree.
+    pub(crate) fn ensure_fiber_for_current_path(&mut self) -> FiberId {
+        if let Some(fiber_id) = self.fiber_path_cache.get(&self.layout_path).copied() {
+            return fiber_id;
+        }
+
+        // Create a new fiber with placeholder values
+        let fiber_id = self.fiber_tree.fibers.insert_with_key(|id| {
+            crate::Fiber::new(id, 0, 0, 0, 0)
+        });
+
+        // Set up parent relationship if we have a parent path
+        if !self.layout_path.is_empty() {
+            let mut parent_path = self.layout_path.clone();
+            parent_path.pop();
+            if let Some(&parent_id) = self.fiber_path_cache.get(&parent_path) {
+                self.fiber_tree.add_child(parent_id, fiber_id);
+            }
+        } else if self.fiber_tree.root.is_none() {
+            self.fiber_tree.root = Some(fiber_id);
+        }
+
+        self.fiber_path_cache.insert(self.layout_path.clone(), fiber_id);
+        fiber_id
+    }
+
+    /// Register a view's entity ID with the current fiber.
+    /// This enables view-level dirty tracking.
+    /// Call ensure_fiber_for_current_path() before this to ensure the fiber exists.
+    pub(crate) fn register_view_fiber(&mut self, entity_id: EntityId) {
+        let fiber_id = self.ensure_fiber_for_current_path();
+        self.fiber_tree.view_roots.insert(entity_id, fiber_id);
+    }
+
+    /// Reconcile a fiber with new hash values, setting dirty flags if changed.
+    /// Call this after children are processed to update the fiber's cached state.
+    pub(crate) fn reconcile_fiber(
+        &mut self,
+        fiber_id: FiberId,
+        layout_hash: u64,
+        paint_hash: u64,
+        child_count: usize,
+    ) {
+        let mut dirty_flags = DirtyFlags::NONE;
+
+        if let Some(fiber) = self.fiber_tree.fibers.get(fiber_id) {
+            if fiber.child_count != child_count {
+                dirty_flags |= DirtyFlags::STRUCTURE_CHANGED
+                    | DirtyFlags::NEEDS_LAYOUT
+                    | DirtyFlags::NEEDS_PAINT;
+            }
+            if fiber.layout_hash != layout_hash {
+                dirty_flags |= DirtyFlags::STYLE_CHANGED
+                    | DirtyFlags::NEEDS_LAYOUT
+                    | DirtyFlags::NEEDS_PAINT;
+            } else if fiber.paint_hash != paint_hash {
+                dirty_flags |= DirtyFlags::STYLE_CHANGED | DirtyFlags::NEEDS_PAINT;
+            }
+        }
+
+        if let Some(fiber) = self.fiber_tree.fibers.get_mut(fiber_id) {
+            fiber.layout_hash = layout_hash;
+            fiber.paint_hash = paint_hash;
+            fiber.child_count = child_count;
+            if dirty_flags.any() {
+                fiber.dirty |= dirty_flags;
+            }
+        }
+
+        if dirty_flags.any() {
+            self.fiber_tree.propagate_has_dirty_descendant(fiber_id);
+        }
     }
 
     pub(crate) fn cached_layout_node_for_current_path(&self) -> Option<&CachedLayoutNode> {

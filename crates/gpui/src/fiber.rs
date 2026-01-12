@@ -30,9 +30,15 @@ impl DirtyFlags {
     /// Bounds changed due to ancestor layout updates
     pub const BOUNDS_CHANGED: DirtyFlags = DirtyFlags(0b0100);
     /// A descendant has dirty flags set
+    pub const HAS_DIRTY_DESCENDANT: DirtyFlags = DirtyFlags(0b1000);
+    /// Structure changed (children added/removed/reordered)
+    pub const STRUCTURE_CHANGED: DirtyFlags = DirtyFlags(0b0001_0000);
+    /// Style changed (layout-affecting or paint-only)
+    pub const STYLE_CHANGED: DirtyFlags = DirtyFlags(0b0010_0000);
+    /// Backwards-compatible alias for HAS_DIRTY_DESCENDANT
     pub const SUBTREE_DIRTY: DirtyFlags = DirtyFlags(0b1000);
     /// All flags set (for initial/full render)
-    pub const ALL: DirtyFlags = DirtyFlags(0b1111);
+    pub const ALL: DirtyFlags = DirtyFlags(0b0011_1111);
 
     /// Check if any flags are set
     pub fn any(self) -> bool {
@@ -88,6 +94,15 @@ pub struct Fiber {
     /// Used to detect changes between frames.
     pub descriptor_hash: u64,
 
+    /// Hash of layout-affecting descriptor properties.
+    pub layout_hash: u64,
+
+    /// Hash of paint-affecting descriptor properties.
+    pub paint_hash: u64,
+
+    /// Cached child count for structure-change detection.
+    pub child_count: usize,
+
     /// Cached style snapshot for this fiber, if applicable.
     pub cached_style: Option<StyleRefinement>,
 
@@ -124,10 +139,19 @@ pub struct Fiber {
 
 impl Fiber {
     /// Create a new fiber with the given ID and descriptor hash
-    pub fn new(id: FiberId, descriptor_hash: u64) -> Self {
+    pub fn new(
+        id: FiberId,
+        descriptor_hash: u64,
+        layout_hash: u64,
+        paint_hash: u64,
+        child_count: usize,
+    ) -> Self {
         Self {
             id,
             descriptor_hash,
+            layout_hash,
+            paint_hash,
+            child_count,
             cached_style: None,
             cached_text: None,
             cached_hitbox: None,
@@ -177,9 +201,14 @@ impl FiberTree {
     }
 
     /// Create a new fiber and return its ID
-    pub fn create_fiber(&mut self, descriptor_hash: u64) -> FiberId {
-        self.fibers
-            .insert_with_key(|id| Fiber::new(id, descriptor_hash))
+    pub fn create_fiber_for(&mut self, descriptor: &AnyDescriptor) -> FiberId {
+        let descriptor_hash = descriptor.content_hash();
+        let layout_hash = descriptor.layout_hash();
+        let paint_hash = descriptor.paint_hash();
+        let child_count = descriptor.child_count();
+        self.fibers.insert_with_key(|id| {
+            Fiber::new(id, descriptor_hash, layout_hash, paint_hash, child_count)
+        })
     }
 
     /// Get a fiber by ID
@@ -246,24 +275,48 @@ impl FiberTree {
             fiber.dirty |= flags;
         }
 
-        self.propagate_subtree_dirty(fiber_id);
+        self.propagate_has_dirty_descendant(fiber_id);
+        if flags.intersects(DirtyFlags::NEEDS_LAYOUT) {
+            self.propagate_needs_layout(fiber_id);
+        }
     }
 
     /// Propagate SUBTREE_DIRTY flag up to ancestors
-    pub fn propagate_subtree_dirty(&mut self, fiber_id: FiberId) {
+    pub fn propagate_has_dirty_descendant(&mut self, fiber_id: FiberId) {
         let mut current = self.fibers.get(fiber_id).and_then(|f| f.parent);
 
         while let Some(parent_id) = current {
             if let Some(parent) = self.fibers.get_mut(parent_id) {
-                if parent.dirty.contains(DirtyFlags::SUBTREE_DIRTY) {
+                if parent.dirty.contains(DirtyFlags::HAS_DIRTY_DESCENDANT) {
                     break;
                 }
-                parent.dirty.insert(DirtyFlags::SUBTREE_DIRTY);
+                parent.dirty.insert(DirtyFlags::HAS_DIRTY_DESCENDANT);
                 current = parent.parent;
             } else {
                 break;
             }
         }
+    }
+
+    /// Propagate NEEDS_LAYOUT up to ancestors.
+    pub fn propagate_needs_layout(&mut self, fiber_id: FiberId) {
+        let mut current = self.fibers.get(fiber_id).and_then(|f| f.parent);
+
+        while let Some(parent_id) = current {
+            let Some(parent) = self.fibers.get_mut(parent_id) else {
+                break;
+            };
+            if parent.dirty.contains(DirtyFlags::NEEDS_LAYOUT) {
+                break;
+            }
+            parent.dirty.insert(DirtyFlags::NEEDS_LAYOUT);
+            current = parent.parent;
+        }
+    }
+
+    /// Backwards-compatible alias for propagate_has_dirty_descendant.
+    pub fn propagate_subtree_dirty(&mut self, fiber_id: FiberId) {
+        self.propagate_has_dirty_descendant(fiber_id);
     }
 
     /// Propagate BOUNDS_CHANGED flag down to descendants.
@@ -300,6 +353,36 @@ impl FiberTree {
         }
     }
 
+    /// Returns true if any ancestor of the given fiber is layout-dirty.
+    pub fn has_layout_dirty_ancestor(&self, fiber_id: FiberId) -> bool {
+        let mut current = self.fibers.get(fiber_id).and_then(|f| f.parent);
+        while let Some(parent_id) = current {
+            let Some(parent) = self.fibers.get(parent_id) else {
+                break;
+            };
+            if parent.dirty.contains(DirtyFlags::NEEDS_LAYOUT) {
+                return true;
+            }
+            current = parent.parent;
+        }
+        false
+    }
+
+    /// Returns true if any ancestor of the given fiber has any dirty flag set.
+    pub fn has_any_dirty_ancestor(&self, fiber_id: FiberId) -> bool {
+        let mut current = self.fibers.get(fiber_id).and_then(|f| f.parent);
+        while let Some(parent_id) = current {
+            let Some(parent) = self.fibers.get(parent_id) else {
+                break;
+            };
+            if parent.dirty.any() {
+                return true;
+            }
+            current = parent.parent;
+        }
+        false
+    }
+
     /// Get the root fiber for a view entity
     pub fn get_view_root(&self, entity_id: EntityId) -> Option<FiberId> {
         self.view_roots.get(&entity_id).copied()
@@ -333,13 +416,39 @@ impl FiberTree {
         descriptor: &AnyDescriptor,
         _taffy: &mut TaffyLayoutEngine,
     ) -> bool {
-        let new_hash = descriptor.content_hash();
-        let changed = if let Some(fiber) = self.fibers.get_mut(fiber_id) {
-            let changed = fiber.descriptor_hash != new_hash;
-            if changed {
-                fiber.descriptor_hash = new_hash;
-                fiber.dirty.insert(DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT);
+        let new_descriptor_hash = descriptor.content_hash();
+        let new_layout_hash = descriptor.layout_hash();
+        let new_paint_hash = descriptor.paint_hash();
+        let new_child_count = descriptor.child_count();
+
+        let mut changed = false;
+        let mut dirty_flags = DirtyFlags::NONE;
+        if let Some(fiber) = self.fibers.get_mut(fiber_id) {
+
+            if fiber.child_count != new_child_count {
+                dirty_flags |= DirtyFlags::STRUCTURE_CHANGED;
+                dirty_flags |= DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT;
+            }
+
+            if fiber.layout_hash != new_layout_hash {
+                dirty_flags |= DirtyFlags::STYLE_CHANGED;
+                dirty_flags |= DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT;
+            } else if fiber.paint_hash != new_paint_hash {
+                dirty_flags |= DirtyFlags::STYLE_CHANGED;
+                dirty_flags |= DirtyFlags::NEEDS_PAINT;
+            }
+
+            if fiber.descriptor_hash != new_descriptor_hash && dirty_flags == DirtyFlags::NONE {
+                dirty_flags |= DirtyFlags::NEEDS_LAYOUT | DirtyFlags::NEEDS_PAINT;
+            }
+
+            if dirty_flags != DirtyFlags::NONE {
+                fiber.descriptor_hash = new_descriptor_hash;
+                fiber.layout_hash = new_layout_hash;
+                fiber.paint_hash = new_paint_hash;
+                fiber.child_count = new_child_count;
                 Self::update_cached_props(fiber, descriptor);
+                changed = true;
             } else {
                 match descriptor {
                     AnyDescriptor::Div(_) if fiber.cached_style.is_none() => {
@@ -351,10 +460,10 @@ impl FiberTree {
                     _ => {}
                 }
             }
-            changed
-        } else {
-            false
-        };
+        }
+        if dirty_flags != DirtyFlags::NONE {
+            self.mark_dirty(fiber_id, dirty_flags);
+        }
 
         // Reconcile children by position
         let children = descriptor.children();
@@ -367,10 +476,6 @@ impl FiberTree {
                     child.dirty.insert(DirtyFlags::BOUNDS_CHANGED);
                 }
             }
-        }
-
-        if changed {
-            self.propagate_subtree_dirty(fiber_id);
         }
 
         changed
@@ -397,8 +502,7 @@ impl FiberTree {
                 self.reconcile(child_fiber_id, child_desc, taffy);
             } else {
                 // No fiber at this position - create new one
-                let new_hash = child_desc.content_hash();
-                let new_fiber_id = self.create_fiber(new_hash);
+                let new_fiber_id = self.create_fiber_for(child_desc);
                 self.add_child(parent_id, new_fiber_id);
                 if let Some(fiber) = self.fibers.get_mut(new_fiber_id) {
                     Self::update_cached_props(fiber, child_desc);
@@ -408,7 +512,7 @@ impl FiberTree {
                 self.reconcile_children(new_fiber_id, child_desc.children(), taffy);
 
                 // Mark parent as having subtree dirty
-                self.propagate_subtree_dirty(new_fiber_id);
+                self.propagate_has_dirty_descendant(new_fiber_id);
             }
         }
 
@@ -484,8 +588,7 @@ impl FiberTree {
         if let Some(root_id) = self.root {
             root_id
         } else {
-            let hash = descriptor.content_hash();
-            let root_id = self.create_fiber(hash);
+            let root_id = self.create_fiber_for(descriptor);
             if let Some(fiber) = self.fibers.get_mut(root_id) {
                 Self::update_cached_props(fiber, descriptor);
             }

@@ -59,6 +59,34 @@ impl AnyDescriptor {
         hasher.finish()
     }
 
+    /// Hash layout-affecting properties for dirty tracking.
+    pub fn layout_hash(&self) -> u64 {
+        let mut hasher = FxHasher::default();
+        std::mem::discriminant(self).hash(&mut hasher);
+        match self {
+            AnyDescriptor::Div(desc) => desc.layout_hash_into(&mut hasher),
+            AnyDescriptor::Text(desc) => desc.layout_hash_into(&mut hasher),
+            AnyDescriptor::Deferred(desc) => desc.layout_hash_into(&mut hasher),
+            AnyDescriptor::View(desc) => desc.layout_hash_into(&mut hasher),
+            AnyDescriptor::Empty => {}
+        }
+        hasher.finish()
+    }
+
+    /// Hash paint-affecting properties for dirty tracking.
+    pub fn paint_hash(&self) -> u64 {
+        let mut hasher = FxHasher::default();
+        std::mem::discriminant(self).hash(&mut hasher);
+        match self {
+            AnyDescriptor::Div(desc) => desc.paint_hash_into(&mut hasher),
+            AnyDescriptor::Text(desc) => desc.paint_hash_into(&mut hasher),
+            AnyDescriptor::Deferred(desc) => desc.paint_hash_into(&mut hasher),
+            AnyDescriptor::View(desc) => desc.paint_hash_into(&mut hasher),
+            AnyDescriptor::Empty => {}
+        }
+        hasher.finish()
+    }
+
     /// Legacy method - use content_hash() instead
     #[deprecated(note = "Use content_hash() instead")]
     pub fn descriptor_hash(&self) -> u64 {
@@ -120,6 +148,16 @@ impl DivDescriptor {
         self.element_id.hash(state);
         self.children.len().hash(state);
         self.style.layout_hash().hash(state);
+        self.style.paint_hash().hash(state);
+    }
+
+    fn layout_hash_into<H: Hasher>(&self, state: &mut H) {
+        self.style.layout_hash().hash(state);
+    }
+
+    fn paint_hash_into<H: Hasher>(&self, state: &mut H) {
+        self.element_id.hash(state);
+        self.style.paint_hash().hash(state);
     }
 }
 
@@ -161,6 +199,12 @@ impl DeferredDescriptor {
         self.priority.hash(state);
         self.children.len().hash(state);
     }
+
+    fn layout_hash_into<H: Hasher>(&self, _state: &mut H) {}
+
+    fn paint_hash_into<H: Hasher>(&self, state: &mut H) {
+        self.priority.hash(state);
+    }
 }
 
 impl TextDescriptor {
@@ -189,6 +233,17 @@ impl TextDescriptor {
     fn content_hash_into<H: Hasher>(&self, state: &mut H) {
         self.text.hash(state);
         self.style.layout_hash().hash(state);
+        self.style.paint_hash().hash(state);
+    }
+
+    fn layout_hash_into<H: Hasher>(&self, state: &mut H) {
+        self.text.hash(state);
+        self.style.layout_hash().hash(state);
+    }
+
+    fn paint_hash_into<H: Hasher>(&self, state: &mut H) {
+        self.text.hash(state);
+        self.style.paint_hash().hash(state);
     }
 }
 
@@ -215,6 +270,14 @@ impl ViewDescriptor {
     }
 
     fn content_hash_into<H: Hasher>(&self, state: &mut H) {
+        self.entity_id.hash(state);
+    }
+
+    fn layout_hash_into<H: Hasher>(&self, state: &mut H) {
+        self.entity_id.hash(state);
+    }
+
+    fn paint_hash_into<H: Hasher>(&self, state: &mut H) {
         self.entity_id.hash(state);
     }
 }

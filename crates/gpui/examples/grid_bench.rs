@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use gpui::{
     App, Application, Bounds, Context, ElementId, Entity, PAINT_FULL_COUNT, PAINT_SKIP_COUNT,
-    PREPAINT_DIRTY, PREPAINT_FULL_COUNT, PREPAINT_NO_CACHE, PREPAINT_NO_FIBER, PREPAINT_REPLAY_FAIL,
-    PREPAINT_SKIP_COUNT, Window, WindowBounds, WindowOptions, deferred, div, prelude::*, px, rgb,
-    size,
+    PREPAINT_DIRTY, PREPAINT_FULL_COUNT, PREPAINT_NO_CACHE, PREPAINT_NO_FIBER, PREPAINT_REFRESHING,
+    PREPAINT_REPLAY_FAIL, PREPAINT_SKIP_COUNT, PREPAINT_STORED, Window, WindowBounds,
+    WindowOptions, deferred, div, prelude::*, px, rgb, size,
 };
 use std::sync::atomic::Ordering;
 
@@ -147,11 +147,13 @@ impl Render for GridBench {
         let dirty = PREPAINT_DIRTY.swap(0, Ordering::Relaxed);
         let no_cache = PREPAINT_NO_CACHE.swap(0, Ordering::Relaxed);
         let replay_fail = PREPAINT_REPLAY_FAIL.swap(0, Ordering::Relaxed);
+        let stored = PREPAINT_STORED.swap(0, Ordering::Relaxed);
+        let refreshing = PREPAINT_REFRESHING.swap(0, Ordering::Relaxed);
 
         if prepaint_skip > 0 || prepaint_full > 0 {
             println!(
-                "Prepaint: skip={} full={} (fib={} dirty={} cache={} replay={}) | Paint: skip={} full={}",
-                prepaint_skip, prepaint_full, no_fiber, dirty, no_cache, replay_fail,
+                "Prepaint: skip={} full={} (fib={} dirty={} cache={} replay={} stored={} refresh={}) | Paint: skip={} full={}",
+                prepaint_skip, prepaint_full, no_fiber, dirty, no_cache, replay_fail, stored, refreshing,
                 paint_skip, paint_full
             );
         }
@@ -210,8 +212,8 @@ impl Render for GridBench {
                                     .text_color(rgb(0x888888))
                                     .text_xs()
                                     .child(format!(
-                                        "Why full: fib={} dirty={} cache={} replay={}",
-                                        no_fiber, dirty, no_cache, replay_fail
+                                        "Why: fib={} dirty={} cache={} replay={} refresh={} | stored={}",
+                                        no_fiber, dirty, no_cache, replay_fail, refreshing, stored
                                     )),
                             ),
                     )

@@ -44,6 +44,7 @@ impl<V: Render> Element for Entity<V> {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        window.register_view_fiber(self.entity_id());
         let mut element = self.update(cx, |view, cx| view.render(window, cx).into_any_element());
         let layout_id = window.with_rendered_view(self.entity_id(), |window| {
             element.request_layout(window, cx)
@@ -75,6 +76,10 @@ impl<V: Render> Element for Entity<V> {
         cx: &mut App,
     ) {
         window.with_rendered_view(self.entity_id(), |window| element.paint(window, cx));
+        // Clear the view's fiber dirty flags after paint
+        if let Some(fiber_id) = window.fiber_tree.get_view_root(self.entity_id()) {
+            window.fiber_tree.clear_dirty(fiber_id);
+        }
     }
 }
 
@@ -168,6 +173,9 @@ impl Element for AnyView {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        // Register this view's fiber for dirty tracking
+        window.register_view_fiber(self.entity_id());
+
         window.with_rendered_view(self.entity_id(), |window| {
             // Disable caching when inspecting so that mouse_hit_test has all hitboxes.
             let caching_disabled = window.is_inspector_picking(cx);
@@ -197,7 +205,7 @@ impl Element for AnyView {
         cx: &mut App,
     ) -> Option<AnyElement> {
         window.set_view_id(self.entity_id());
-        window.with_rendered_view(self.entity_id(), |window| {
+        let result = window.with_rendered_view(self.entity_id(), |window| {
             if let Some(mut element) = element.take() {
                 element.prepaint(window, cx);
                 return Some(element);
@@ -213,7 +221,7 @@ impl Element for AnyView {
                         && element_state.cache_key.bounds == bounds
                         && element_state.cache_key.content_mask == content_mask
                         && element_state.cache_key.text_style == text_style
-                        && !window.dirty_views.contains(&self.entity_id())
+                        && !window.view_is_dirty(self.entity_id())
                         && !window.refreshing
                     {
                         let prepaint_start = window.prepaint_index();
@@ -253,7 +261,8 @@ impl Element for AnyView {
                     )
                 },
             )
-        })
+        });
+        result
     }
 
     fn paint(
@@ -294,6 +303,10 @@ impl Element for AnyView {
                 element.as_mut().unwrap().paint(window, cx);
             }
         });
+        // Clear the view's fiber dirty flags after paint
+        if let Some(fiber_id) = window.fiber_tree.get_view_root(self.entity_id()) {
+            window.fiber_tree.clear_dirty(fiber_id);
+        }
     }
 }
 

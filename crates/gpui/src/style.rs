@@ -302,7 +302,6 @@ impl StyleRefinement {
         let mut hasher = FxHasher::default();
 
         hash_option_with(&mut hasher, &self.display, |state, value| hash_enum(state, value));
-        hash_option_with(&mut hasher, &self.visibility, |state, value| hash_enum(state, value));
         hash_point_refinement(&mut hasher, &self.overflow, |state, value| hash_enum(state, value));
         hash_option_with(&mut hasher, &self.scrollbar_width, |state, value| {
             hash_absolute_length(state, value);
@@ -371,6 +370,28 @@ impl StyleRefinement {
             hash_f32(state, *value);
         });
 
+        self.text.layout_hash().hash(&mut hasher);
+        hash_option_with(&mut hasher, &self.grid_cols, |state, value| {
+            value.hash(state);
+        });
+        hash_option_with(&mut hasher, &self.grid_cols_min_content, |state, value| {
+            value.hash(state);
+        });
+        hash_option_with(&mut hasher, &self.grid_rows, |state, value| {
+            value.hash(state);
+        });
+        hash_option_with(&mut hasher, &self.grid_location, |state, value| {
+            hash_grid_location(state, value);
+        });
+
+        hasher.finish()
+    }
+
+    /// Hash paint-affecting style refinements for change detection.
+    pub fn paint_hash(&self) -> u64 {
+        let mut hasher = FxHasher::default();
+
+        hash_option_with(&mut hasher, &self.visibility, |state, value| hash_enum(state, value));
         hash_option_with(&mut hasher, &self.background, |state, value| {
             hash_fill(state, value);
         });
@@ -385,25 +406,13 @@ impl StyleRefinement {
         });
         hash_box_shadows(&mut hasher, &self.box_shadow);
 
-        self.text.layout_hash().hash(&mut hasher);
+        self.text.paint_hash().hash(&mut hasher);
 
         hash_option_with(&mut hasher, &self.mouse_cursor, |state, value| {
             value.hash(state);
         });
         hash_option_with(&mut hasher, &self.opacity, |state, value| {
             hash_f32(state, *value);
-        });
-        hash_option_with(&mut hasher, &self.grid_cols, |state, value| {
-            value.hash(state);
-        });
-        hash_option_with(&mut hasher, &self.grid_cols_min_content, |state, value| {
-            value.hash(state);
-        });
-        hash_option_with(&mut hasher, &self.grid_rows, |state, value| {
-            value.hash(state);
-        });
-        hash_option_with(&mut hasher, &self.grid_location, |state, value| {
-            hash_grid_location(state, value);
         });
 
         #[cfg(debug_assertions)]
@@ -864,7 +873,6 @@ impl TextStyleRefinement {
     pub fn layout_hash(&self) -> u64 {
         let mut hasher = FxHasher::default();
 
-        hash_option_with(&mut hasher, &self.color, |state, value| value.hash(state));
         hash_option_with(&mut hasher, &self.font_family, |state, value| {
             value.hash(state);
         });
@@ -886,15 +894,6 @@ impl TextStyleRefinement {
         hash_option_with(&mut hasher, &self.font_style, |state, value| {
             value.hash(state);
         });
-        hash_option_with(&mut hasher, &self.background_color, |state, value| {
-            value.hash(state);
-        });
-        hash_option_with(&mut hasher, &self.underline, |state, value| {
-            value.hash(state);
-        });
-        hash_option_with(&mut hasher, &self.strikethrough, |state, value| {
-            value.hash(state);
-        });
         hash_option_with(&mut hasher, &self.white_space, |state, value| {
             hash_enum(state, value);
         });
@@ -905,6 +904,24 @@ impl TextStyleRefinement {
             hash_enum(state, value);
         });
         hash_option_with(&mut hasher, &self.line_clamp, |state, value| {
+            value.hash(state);
+        });
+
+        hasher.finish()
+    }
+
+    /// Hash paint-affecting text style refinements for change detection.
+    pub fn paint_hash(&self) -> u64 {
+        let mut hasher = FxHasher::default();
+
+        hash_option_with(&mut hasher, &self.color, |state, value| value.hash(state));
+        hash_option_with(&mut hasher, &self.background_color, |state, value| {
+            value.hash(state);
+        });
+        hash_option_with(&mut hasher, &self.underline, |state, value| {
+            value.hash(state);
+        });
+        hash_option_with(&mut hasher, &self.strikethrough, |state, value| {
             value.hash(state);
         });
 
@@ -967,7 +984,6 @@ impl Style {
         let mut hasher = FxHasher::default();
 
         hash_enum(&mut hasher, &self.display);
-        hash_enum(&mut hasher, &self.visibility);
         hash_point(&mut hasher, &self.overflow, |state, value| hash_enum(state, value));
         hash_absolute_length(&mut hasher, &self.scrollbar_width);
         self.allow_concurrent_scroll.hash(&mut hasher);
@@ -1010,6 +1026,28 @@ impl Style {
         hash_f32(&mut hasher, self.flex_grow);
         hash_f32(&mut hasher, self.flex_shrink);
 
+        self.text.layout_hash().hash(&mut hasher);
+        self.grid_cols.hash(&mut hasher);
+        self.grid_cols_min_content.hash(&mut hasher);
+        self.grid_rows.hash(&mut hasher);
+        hash_option_with(&mut hasher, &self.grid_location, |state, value| {
+            hash_grid_location(state, value);
+        });
+
+        #[cfg(debug_assertions)]
+        {
+            self.debug.hash(&mut hasher);
+            self.debug_below.hash(&mut hasher);
+        }
+
+        hasher.finish()
+    }
+
+    /// Hash paint-affecting style values for change detection.
+    pub fn paint_hash(&self) -> u64 {
+        let mut hasher = FxHasher::default();
+
+        hash_enum(&mut hasher, &self.visibility);
         hash_option_with(&mut hasher, &self.background, |state, value| {
             hash_fill(state, value);
         });
@@ -1020,17 +1058,11 @@ impl Style {
         });
         hash_box_shadow_list(&mut hasher, &self.box_shadow);
 
-        self.text.layout_hash().hash(&mut hasher);
+        self.text.paint_hash().hash(&mut hasher);
 
         self.mouse_cursor.hash(&mut hasher);
         hash_option_with(&mut hasher, &self.opacity, |state, value| {
             hash_f32(state, *value);
-        });
-        self.grid_cols.hash(&mut hasher);
-        self.grid_cols_min_content.hash(&mut hasher);
-        self.grid_rows.hash(&mut hasher);
-        hash_option_with(&mut hasher, &self.grid_location, |state, value| {
-            hash_grid_location(state, value);
         });
 
         #[cfg(debug_assertions)]
