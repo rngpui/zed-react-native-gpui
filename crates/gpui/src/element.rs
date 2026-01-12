@@ -539,10 +539,13 @@ impl<E: Element> Drawable<E> {
         window: &mut Window,
         cx: &mut App,
     ) -> Size<Pixels> {
+        let t0 = std::time::Instant::now();
         if matches!(&self.phase, ElementDrawPhase::Start) {
             self.request_layout(window, cx);
         }
+        let request_layout_time = t0.elapsed();
 
+        let t1 = std::time::Instant::now();
         let layout_id = match mem::take(&mut self.phase) {
             ElementDrawPhase::RequestLayout {
                 layout_id,
@@ -551,6 +554,13 @@ impl<E: Element> Drawable<E> {
                 request_layout,
             } => {
                 window.compute_layout(layout_id, available_space, cx);
+                let compute_time = t1.elapsed();
+                if request_layout_time.as_micros() > 500 || compute_time.as_micros() > 500 {
+                    println!(
+                        "  layout_as_root: request_layout={:?} compute_layout={:?}",
+                        request_layout_time, compute_time
+                    );
+                }
                 self.phase = ElementDrawPhase::LayoutComputed {
                     layout_id,
                     global_id,

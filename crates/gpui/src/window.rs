@@ -932,7 +932,21 @@ pub(crate) struct CachedLayoutNode {
     /// The child layout IDs from the previous frame.
     /// Used to detect when children have changed.
     pub(crate) children: SmallVec<[LayoutId; 8]>,
+    /// Hash of measured layout content (text, etc). Only used for measured nodes.
+    /// If this matches, the measure function doesn't need updating.
+    pub(crate) measure_hash: Option<u64>,
 }
+
+/// Debug counter for set_style calls per frame.
+pub static LAYOUT_SET_STYLE: AtomicUsize = AtomicUsize::new(0);
+/// Debug counter for set_children calls per frame.
+pub static LAYOUT_SET_CHILDREN: AtomicUsize = AtomicUsize::new(0);
+/// Debug counter for new layout node creations per frame.
+pub static LAYOUT_NEW_NODE: AtomicUsize = AtomicUsize::new(0);
+/// Debug counter for layout node reuses per frame.
+pub static LAYOUT_REUSE: AtomicUsize = AtomicUsize::new(0);
+/// Debug counter for measured layout cache hits.
+pub static MEASURED_CACHE_HIT: AtomicUsize = AtomicUsize::new(0);
 
 /// Holds the state for a specific window.
 pub struct Window {
@@ -960,6 +974,9 @@ pub struct Window {
     layout_path_cache: FxHashMap<SmallVec<[u32; 16]>, CachedLayoutNode>,
     /// Tracks which paths were used this frame for cleanup.
     used_layout_paths: FxHashSet<SmallVec<[u32; 16]>>,
+    /// Measure functions to call after compute_layout for cache-hit measured nodes.
+    /// These need to be called to populate per-frame element state.
+    pending_measure_calls: Vec<(LayoutId, Box<dyn FnOnce(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>>)>,
     /// Maps layout paths to fiber IDs for quick lookup during element traversal.
     fiber_path_cache: FxHashMap<SmallVec<[u32; 16]>, FiberId>,
     last_layout_viewport_size: Option<Size<Pixels>>,
@@ -1451,6 +1468,7 @@ impl Window {
             layout_path: SmallVec::new(),
             layout_path_cache: FxHashMap::default(),
             used_layout_paths: FxHashSet::default(),
+            pending_measure_calls: Vec::new(),
             fiber_path_cache: FxHashMap::default(),
             last_layout_viewport_size: None,
             root: None,
@@ -2597,7 +2615,14 @@ impl Window {
         let prepaint_time = t1.elapsed();
 
         if layout_time.as_micros() > 1000 || prepaint_time.as_micros() > 1000 {
-            println!("Timing: layout={:?} prepaint={:?}", layout_time, prepaint_time);
+            let reuse = LAYOUT_REUSE.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let new_node = LAYOUT_NEW_NODE.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let set_style = LAYOUT_SET_STYLE.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let set_children = LAYOUT_SET_CHILDREN.swap(0, std::sync::atomic::Ordering::Relaxed);
+            println!(
+                "Timing: layout={:?} prepaint={:?} | Taffy: reuse={} new={} set_style={} set_children={}",
+                layout_time, prepaint_time, reuse, new_node, set_style, set_children
+            );
         }
 
         let mut render_layer_elements = self.prepaint_render_layers(root_size, cx);
@@ -4407,15 +4432,18 @@ impl Window {
         let layout_id = if let Some(cached) = self.layout_path_cache.get_mut(&path) {
             // Reuse existing taffy node
             let layout_engine = self.layout_engine.as_mut().unwrap();
+            LAYOUT_REUSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
             // Update style only when it has changed.
             if cached.style_hash != style_hash {
+                LAYOUT_SET_STYLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 layout_engine.set_style(cached.layout_id, style, rem_size, scale_factor);
                 cached.style_hash = style_hash;
             }
 
             // Only update children if they've changed
             if cached.children.as_slice() != cx.layout_id_buffer.as_slice() {
+                LAYOUT_SET_CHILDREN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 layout_engine.set_children(cached.layout_id, &cx.layout_id_buffer);
                 cached.children.clear();
                 cached.children.extend(cx.layout_id_buffer.iter().copied());
@@ -4423,6 +4451,7 @@ impl Window {
 
             cached.layout_id
         } else {
+            LAYOUT_NEW_NODE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // Create new taffy node
             let layout_id = self.layout_engine.as_mut().unwrap().request_layout(
                 style,
@@ -4436,6 +4465,7 @@ impl Window {
                     layout_id,
                     style_hash,
                     children: cx.layout_id_buffer.iter().copied().collect(),
+                    measure_hash: None,
                 },
             );
             layout_id
@@ -4458,11 +4488,13 @@ impl Window {
     /// returns a `Size`.
     ///
     /// This method should only be called as part of the request_layout or prepaint phase of element drawing.
+    /// For better performance with caching, use `request_measured_layout_cached` instead.
     pub fn request_measured_layout<F>(&mut self, style: Style, measure: F) -> LayoutId
     where
         F: Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
             + 'static,
     {
+        // No caching - always creates a new node (backward compatible behavior)
         self.invalidator.debug_assert_prepaint();
 
         let rem_size = self.rem_size();
@@ -4471,8 +4503,88 @@ impl Window {
             .layout_engine
             .as_mut()
             .unwrap()
-            .request_measured_layout(style, rem_size, scale_factor, measure)
-            ;
+            .request_measured_layout(style, rem_size, scale_factor, measure);
+        if let Some(fiber_id) = self.fiber_for_current_path() {
+            if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
+                fiber.layout_id = Some(layout_id);
+            }
+        }
+        layout_id
+    }
+
+    /// Request a measured layout with caching support.
+    /// The `content_hash` should be a hash of all inputs that affect the measure function's output
+    /// (e.g., text content, text style). If the hash matches the previous frame, the cached
+    /// layout node is reused without calling Taffy, enabling O(1) layout for unchanged content.
+    ///
+    /// This method should only be called as part of the request_layout or prepaint phase of element drawing.
+    pub fn request_measured_layout_cached<F>(
+        &mut self,
+        style: Style,
+        content_hash: u64,
+        measure: F,
+    ) -> LayoutId
+    where
+        F: Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
+            + 'static,
+    {
+        self.invalidator.debug_assert_prepaint();
+
+        let rem_size = self.rem_size();
+        let scale_factor = self.scale_factor();
+        let path = self.layout_path.clone();
+        let style_hash = style.layout_hash();
+
+        let layout_id = if let Some(cached) = self.layout_path_cache.get_mut(&path) {
+            // Reuse existing taffy node
+            let layout_engine = self.layout_engine.as_mut().unwrap();
+            LAYOUT_REUSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            // Check if content has changed (style or measure content)
+            let style_changed = cached.style_hash != style_hash;
+
+            if style_changed {
+                LAYOUT_SET_STYLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                layout_engine.set_style(cached.layout_id, style, rem_size, scale_factor);
+                cached.style_hash = style_hash;
+            }
+
+            // Check if content has changed
+            let content_changed = cached.measure_hash != Some(content_hash);
+
+            if content_changed {
+                // Content changed - update the measure function (marks Taffy node dirty)
+                layout_engine.set_measure(cached.layout_id, measure);
+                cached.measure_hash = Some(content_hash);
+            } else {
+                // Content unchanged - keep Taffy node clean.
+                // Store the measure function to call after compute_layout to populate element_state.
+                MEASURED_CACHE_HIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.pending_measure_calls.push((cached.layout_id, Box::new(measure)));
+            }
+
+            cached.layout_id
+        } else {
+            LAYOUT_NEW_NODE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Create new taffy node
+            let layout_id = self
+                .layout_engine
+                .as_mut()
+                .unwrap()
+                .request_measured_layout(style, rem_size, scale_factor, measure);
+            self.layout_path_cache.insert(
+                path.clone(),
+                CachedLayoutNode {
+                    layout_id,
+                    style_hash,
+                    children: SmallVec::new(),
+                    measure_hash: Some(content_hash),
+                },
+            );
+            layout_id
+        };
+
+        self.used_layout_paths.insert(path);
         if let Some(fiber_id) = self.fiber_for_current_path() {
             if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
                 fiber.layout_id = Some(layout_id);
@@ -4497,6 +4609,31 @@ impl Window {
         let mut layout_engine = self.layout_engine.take().unwrap();
         layout_engine.compute_layout(layout_id, available_space, self, cx);
         self.layout_engine = Some(layout_engine);
+
+        // Process pending measure calls for cache-hit measured nodes.
+        // We need to call these to populate per-frame element state (e.g., TextLayout).
+        let pending_calls = std::mem::take(&mut self.pending_measure_calls);
+        for (layout_id, measure) in pending_calls {
+            let scale_factor = self.scale_factor();
+            let bounds = self
+                .layout_engine
+                .as_mut()
+                .unwrap()
+                .layout_bounds(layout_id, scale_factor);
+            let size: Size<Pixels> = bounds.size.map(Into::into);
+            measure(
+                Size {
+                    width: Some(size.width),
+                    height: Some(size.height),
+                },
+                Size {
+                    width: AvailableSpace::Definite(size.width),
+                    height: AvailableSpace::Definite(size.height),
+                },
+                self,
+                cx,
+            );
+        }
     }
 
     /// Obtain the bounds computed for the given LayoutId relative to the window. This method will usually be invoked by

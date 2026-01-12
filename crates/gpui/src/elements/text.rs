@@ -11,6 +11,7 @@ use smallvec::SmallVec;
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
+    hash::{Hash, Hasher},
     mem,
     ops::Range,
     rc::Rc,
@@ -341,7 +342,18 @@ impl TextLayout {
         } else {
             vec![text_style.to_run(text.len())]
         };
-        window.request_measured_layout(Default::default(), {
+
+        // Compute content hash for caching - includes text content and style
+        let content_hash = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut hasher);
+            // Hash key style properties that affect layout
+            font_size.0.to_bits().hash(&mut hasher);
+            line_height.0.to_bits().hash(&mut hasher);
+            hasher.finish()
+        };
+
+        window.request_measured_layout_cached(Default::default(), content_hash, {
             let element_state = self.clone();
 
             move |known_dimensions, available_space, window, cx| {

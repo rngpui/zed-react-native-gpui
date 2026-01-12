@@ -126,6 +126,29 @@ impl TaffyLayoutEngine {
         self.invalidate_layout_bounds(id);
     }
 
+    /// Update an existing measured node's measure context
+    pub fn set_measure(
+        &mut self,
+        id: LayoutId,
+        measure: impl FnMut(
+            Size<Option<Pixels>>,
+            Size<AvailableSpace>,
+            &mut Window,
+            &mut App,
+        ) -> Size<Pixels>
+        + 'static,
+    ) {
+        self.taffy
+            .set_node_context(
+                id.into(),
+                Some(NodeContext {
+                    measure: StackSafe::new(Box::new(measure)),
+                }),
+            )
+            .expect(EXPECT_MESSAGE);
+        self.invalidate_layout_bounds(id);
+    }
+
     /// Mark a node as dirty, which will propagate to ancestors.
     /// This clears the node's cache and forces relayout on next compute.
     pub fn mark_dirty(&mut self, id: LayoutId) {
