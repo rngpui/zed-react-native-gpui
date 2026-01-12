@@ -2584,11 +2584,21 @@ impl Window {
             }
         }
 
+        let t0 = std::time::Instant::now();
         root_element.layout_as_root(root_size.into(), self, cx);
+        let layout_time = t0.elapsed();
+
         self.finalize_dirty_flags();
+
+        let t1 = std::time::Instant::now();
         self.with_absolute_element_offset(Point::default(), |window| {
             root_element.prepaint(window, cx)
         });
+        let prepaint_time = t1.elapsed();
+
+        if layout_time.as_micros() > 1000 || prepaint_time.as_micros() > 1000 {
+            println!("Timing: layout={:?} prepaint={:?}", layout_time, prepaint_time);
+        }
 
         let mut render_layer_elements = self.prepaint_render_layers(root_size, cx);
 
