@@ -1,7 +1,7 @@
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::Inspector;
 use crate::{
-    Action, AnyDescriptor, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App,
+    Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App,
     AppContext, Arena, Asset, AsyncWindowContext, AvailableSpace, Background, BackdropBlur,
     BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorStyle, Decorations,
     DevicePixels, DirtyFlags, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId,
@@ -16,11 +16,12 @@ use crate::{
     RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X,
     SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle,
     Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController,
-    TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
+    TabStopMap, Task, TextRenderingMode, TextStyle,
     TextStyleRefinement, TransformationMatrix, Underline, UnderlineStyle, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
     WindowParams, WindowTextSystem, point, prelude::*, px, rems, size, transparent_black,
 };
+use crate::taffy::ToTaffy;
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
 #[cfg(target_os = "macos")]
@@ -52,6 +53,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use taffy::{compute_root_layout, round_layout};
 use util::post_inc;
 use util::{ResultExt, measure};
 use uuid::Uuid;
@@ -922,21 +924,6 @@ enum InputModality {
     Keyboard,
 }
 
-/// Cached layout information for a node at a specific position in the element tree.
-/// Used to skip redundant set_style/set_children calls when nothing has changed.
-pub(crate) struct CachedLayoutNode {
-    /// The taffy layout node ID.
-    pub(crate) layout_id: LayoutId,
-    /// Hash of the style used to create this layout node.
-    pub(crate) style_hash: u64,
-    /// The child layout IDs from the previous frame.
-    /// Used to detect when children have changed.
-    pub(crate) children: SmallVec<[LayoutId; 8]>,
-    /// Hash of measured layout content (text, etc). Only used for measured nodes.
-    /// If this matches, the measure function doesn't need updating.
-    pub(crate) measure_hash: Option<u64>,
-}
-
 /// Debug counter for set_style calls per frame.
 pub static LAYOUT_SET_STYLE: AtomicUsize = AtomicUsize::new(0);
 /// Debug counter for set_children calls per frame.
@@ -947,6 +934,8 @@ pub static LAYOUT_NEW_NODE: AtomicUsize = AtomicUsize::new(0);
 pub static LAYOUT_REUSE: AtomicUsize = AtomicUsize::new(0);
 /// Debug counter for measured layout cache hits.
 pub static MEASURED_CACHE_HIT: AtomicUsize = AtomicUsize::new(0);
+
+const DETACHED_LAYOUT_PATH_SENTINEL: u32 = u32::MAX;
 
 /// Holds the state for a specific window.
 pub struct Window {
@@ -965,18 +954,16 @@ pub struct Window {
     /// a given rem size.
     rem_size_override_stack: SmallVec<[Pixels; 8]>,
     pub(crate) viewport_size: Size<Pixels>,
-    layout_engine: Option<TaffyLayoutEngine>,
     pub(crate) fiber_tree: FiberTree,
     /// Current position in the element tree, as a path of child indices.
     /// Used for position-based fiber matching.
     layout_path: SmallVec<[u32; 16]>,
-    /// Maps layout paths to cached layout nodes for reuse across frames.
-    layout_path_cache: FxHashMap<SmallVec<[u32; 16]>, CachedLayoutNode>,
-    /// Tracks which paths were used this frame for cleanup.
-    used_layout_paths: FxHashSet<SmallVec<[u32; 16]>>,
-    /// Measure functions to call after compute_layout for cache-hit measured nodes.
-    /// These need to be called to populate per-frame element state.
-    pending_measure_calls: Vec<(LayoutId, Box<dyn FnOnce(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>>)>,
+    /// Counter for detached layout scopes (e.g. layout_as_root).
+    detached_layout_counter: u32,
+    /// Tracks which fibers were used this frame for cleanup.
+    used_fiber_ids: FxHashSet<FiberId>,
+    /// Fibers to re-measure after layout when measured content was cached.
+    pending_measure_calls: Vec<FiberId>,
     /// Maps layout paths to fiber IDs for quick lookup during element traversal.
     fiber_path_cache: FxHashMap<SmallVec<[u32; 16]>, FiberId>,
     last_layout_viewport_size: Option<Size<Pixels>>,
@@ -1463,11 +1450,10 @@ impl Window {
             rem_size: px(16.),
             rem_size_override_stack: SmallVec::new(),
             viewport_size: content_size,
-            layout_engine: Some(TaffyLayoutEngine::new()),
             fiber_tree: FiberTree::new(),
             layout_path: SmallVec::new(),
-            layout_path_cache: FxHashMap::default(),
-            used_layout_paths: FxHashSet::default(),
+            detached_layout_counter: 0,
+            used_fiber_ids: FxHashSet::default(),
             pending_measure_calls: Vec::new(),
             fiber_path_cache: FxHashMap::default(),
             last_layout_viewport_size: None,
@@ -2309,30 +2295,22 @@ impl Window {
                 .set_input_handler(input_handler.unwrap());
         }
 
-        // Clean up unused layout nodes and fibers from previous frame.
-        // Keep nodes that were used this frame for position-based caching.
+        // Clean up unused fibers from previous frame.
         let mut fibers_to_remove = Vec::new();
-        self.layout_path_cache.retain(|path, cached| {
-            if self.used_layout_paths.contains(path) {
+        self.fiber_path_cache.retain(|_path, fiber_id| {
+            if self.used_fiber_ids.contains(fiber_id) {
                 true
             } else {
-                // Remove the unused node from taffy
-                self.layout_engine.as_mut().unwrap().remove(cached.layout_id);
-                // Also track the fiber to remove
-                if let Some(fiber_id) = self.fiber_path_cache.get(path).copied() {
-                    fibers_to_remove.push(fiber_id);
-                }
+                fibers_to_remove.push(*fiber_id);
                 false
             }
         });
-        // Remove unused fibers from the fiber tree
         for fiber_id in fibers_to_remove {
             self.fiber_tree.remove(fiber_id);
         }
-        self.fiber_path_cache
-            .retain(|path, _| self.used_layout_paths.contains(path));
-        self.used_layout_paths.clear();
+        self.used_fiber_ids.clear();
         self.layout_path.clear();
+        self.detached_layout_counter = 0;
 
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
@@ -2436,7 +2414,9 @@ impl Window {
                 for (key, _order, _seq, build) in layers {
                     let mut element = (&*build)(window, cx);
                     window.element_id_stack.push(key.clone());
-                    element.prepaint_as_root(Point::default(), root_size.into(), window, cx);
+                    window.with_detached_layout_path(|window| {
+                        element.prepaint_as_root(Point::default(), root_size.into(), window, cx);
+                    });
                     window.element_id_stack.pop();
                     elements.push((key, element));
                 }
@@ -2445,7 +2425,9 @@ impl Window {
             for (key, _order, _seq, build) in layers {
                 let mut element = (&*build)(self, cx);
                 self.element_id_stack.push(key.clone());
-                element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
+                self.with_detached_layout_path(|window| {
+                    element.prepaint_as_root(Point::default(), root_size.into(), window, cx);
+                });
                 self.element_id_stack.pop();
                 elements.push((key, element));
             }
@@ -2474,83 +2456,26 @@ impl Window {
         }
     }
 
-    fn reconcile_descriptor_tree(&mut self, descriptor: &AnyDescriptor) -> FiberId {
-        let layout_engine = self.layout_engine.as_mut().unwrap();
-        let root_id = self.fiber_tree.ensure_root(descriptor);
-        self.fiber_tree.reconcile(root_id, descriptor, layout_engine);
-
-        self.fiber_path_cache.clear();
-        let mut path = SmallVec::new();
-        self.populate_fiber_paths(root_id, descriptor, &mut path);
-        root_id
-    }
-
-    fn populate_fiber_paths(
-        &mut self,
-        fiber_id: FiberId,
-        descriptor: &AnyDescriptor,
-        path: &mut SmallVec<[u32; 16]>,
-    ) {
-        self.fiber_path_cache.insert(path.clone(), fiber_id);
-
-        if let AnyDescriptor::View(view_desc) = descriptor {
-            self.fiber_tree
-                .set_view_root(view_desc.entity_id, fiber_id);
-            if self.pending_dirty_views.remove(&view_desc.entity_id) || self.refreshing {
-                self.fiber_tree.mark_dirty(
-                    fiber_id,
-                    DirtyFlags::STRUCTURE_CHANGED
-                        | DirtyFlags::NEEDS_LAYOUT
-                        | DirtyFlags::NEEDS_PAINT,
-                );
-            }
-        }
-
-        let child_fibers: Vec<FiberId> = self.fiber_tree.children(fiber_id).collect();
-        for (index, (child_fiber_id, child_desc)) in
-            child_fibers.into_iter().zip(descriptor.children()).enumerate()
-        {
-            path.push(index as u32);
-            self.populate_fiber_paths(child_fiber_id, child_desc, path);
-            path.pop();
-        }
-    }
-
-    fn layout_bounds_for_finalize(&mut self, layout_id: LayoutId) -> Bounds<Pixels> {
-        let scale_factor = self.scale_factor();
-        self.layout_engine
-            .as_mut()
-            .unwrap()
-            .layout_bounds(layout_id, scale_factor)
-    }
-
     fn finalize_dirty_flags(&mut self) {
         let fiber_ids: Vec<FiberId> = self.fiber_tree.fibers.keys().collect();
+        let scale_factor = self.scale_factor();
+        let mut cache = FxHashMap::default();
 
         for fiber_id in fiber_ids {
-            let (layout_id, cached_bounds) = {
-                let fiber = match self.fiber_tree.get(fiber_id) {
-                    Some(f) => f,
-                    None => continue,
-                };
-                (fiber.layout_id, fiber.bounds)
-            };
+            let cached_bounds = self.fiber_tree.get(fiber_id).and_then(|f| f.bounds);
+            let new_bounds = self.layout_bounds_for_fiber(fiber_id, scale_factor, &mut cache);
+            let bounds_changed = cached_bounds
+                .map(|cached| cached != new_bounds)
+                .unwrap_or(true);
 
-            if let Some(layout_id) = layout_id {
-                let new_bounds = self.layout_bounds_for_finalize(layout_id);
-                let bounds_changed = cached_bounds
-                    .map(|cached| cached != new_bounds)
-                    .unwrap_or(true);
+            if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
+                fiber.bounds = Some(new_bounds);
+            }
 
-                if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
-                    fiber.bounds = Some(new_bounds);
-                }
-
-                if bounds_changed {
-                    self.fiber_tree
-                        .mark_dirty(fiber_id, DirtyFlags::BOUNDS_CHANGED);
-                    self.fiber_tree.propagate_bounds_changed(fiber_id);
-                }
+            if bounds_changed {
+                self.fiber_tree
+                    .mark_dirty(fiber_id, DirtyFlags::BOUNDS_CHANGED);
+                self.fiber_tree.propagate_bounds_changed(fiber_id);
             }
         }
     }
@@ -2640,13 +2565,17 @@ impl Window {
         let mut tooltip_element = None;
         if let Some(prompt) = self.prompt.take() {
             let mut element = prompt.view.any_view().into_any();
-            element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
+            self.with_detached_layout_path(|window| {
+                element.prepaint_as_root(Point::default(), root_size.into(), window, cx);
+            });
             prompt_element = Some(element);
             self.prompt = Some(prompt);
         } else if let Some(active_drag) = cx.active_drag.take() {
             let mut element = active_drag.view.clone().into_any();
             let offset = self.mouse_position() - active_drag.cursor_offset;
-            element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
+            self.with_detached_layout_path(|window| {
+                element.prepaint_as_root(offset, AvailableSpace::min_size(), window, cx);
+            });
             active_drag_element = Some(element);
             cx.active_drag = Some(active_drag);
         } else {
@@ -2694,7 +2623,9 @@ impl Window {
             };
             let mut element = tooltip_request.tooltip.view.clone().into_any();
             let mouse_position = tooltip_request.tooltip.mouse_position;
-            let tooltip_size = element.layout_as_root(AvailableSpace::min_size(), self, cx);
+            let tooltip_size = self.with_detached_layout_path(|window| {
+                element.layout_as_root(AvailableSpace::min_size(), window, cx)
+            });
 
             let mut tooltip_bounds =
                 Bounds::new(mouse_position + point(px(1.), px(1.)), tooltip_size);
@@ -4316,8 +4247,19 @@ impl Window {
         self.layout_path.pop();
     }
 
-    pub(crate) fn fiber_for_current_path(&self) -> Option<FiberId> {
-        self.fiber_path_cache.get(&self.layout_path).copied()
+    pub(crate) fn with_detached_layout_path<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved_path = std::mem::take(&mut self.layout_path);
+        let counter = self.detached_layout_counter;
+        self.detached_layout_counter = self.detached_layout_counter.wrapping_add(1);
+
+        let mut detached_path = SmallVec::new();
+        detached_path.push(DETACHED_LAYOUT_PATH_SENTINEL);
+        detached_path.push(counter);
+        self.layout_path = detached_path;
+
+        let result = f(self);
+        self.layout_path = saved_path;
+        result
     }
 
     /// Ensure a fiber exists for the current layout path, creating one if necessary.
@@ -4325,10 +4267,13 @@ impl Window {
     /// which is needed because views don't have children in the descriptor tree.
     pub(crate) fn ensure_fiber_for_current_path(&mut self) -> FiberId {
         if let Some(fiber_id) = self.fiber_path_cache.get(&self.layout_path).copied() {
+            LAYOUT_REUSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.used_fiber_ids.insert(fiber_id);
             return fiber_id;
         }
 
         // Create a new fiber with placeholder values
+        LAYOUT_NEW_NODE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let fiber_id = self.fiber_tree.fibers.insert_with_key(|id| {
             crate::Fiber::new(id, 0, 0, 0, 0)
         });
@@ -4345,7 +4290,18 @@ impl Window {
         }
 
         self.fiber_path_cache.insert(self.layout_path.clone(), fiber_id);
+        self.used_fiber_ids.insert(fiber_id);
         fiber_id
+    }
+
+    pub(crate) fn mark_fiber_subtree_used(&mut self, fiber_id: FiberId) {
+        let mut stack = vec![fiber_id];
+        while let Some(current_id) = stack.pop() {
+            if !self.used_fiber_ids.insert(current_id) {
+                continue;
+            }
+            stack.extend(self.fiber_tree.children(current_id));
+        }
     }
 
     /// Register a view's entity ID with the current fiber.
@@ -4394,90 +4350,94 @@ impl Window {
         if dirty_flags.any() {
             self.fiber_tree.propagate_has_dirty_descendant(fiber_id);
         }
+        if dirty_flags.intersects(DirtyFlags::NEEDS_LAYOUT) {
+            self.fiber_tree.invalidate_layout_cache_upwards(fiber_id);
+        }
     }
 
-    pub(crate) fn cached_layout_node_for_current_path(&self) -> Option<&CachedLayoutNode> {
-        self.layout_path_cache.get(&self.layout_path)
+    pub(crate) fn update_fiber_style(
+        &mut self,
+        fiber_id: FiberId,
+        new_style: taffy::Style,
+    ) -> bool {
+        let mut updated = false;
+        if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
+            if fiber.taffy_style != new_style {
+                fiber.taffy_style = new_style;
+                self.fiber_tree.invalidate_layout_cache_upwards(fiber_id);
+                LAYOUT_SET_STYLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                updated = true;
+            }
+        }
+        updated
     }
 
-    pub(crate) fn mark_layout_path_used(&mut self) {
-        self.used_layout_paths.insert(self.layout_path.clone());
+    fn clear_fiber_measure_func(&mut self, fiber_id: FiberId) {
+        if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
+            if fiber.measure_func.is_some() || fiber.measure_hash.is_some() {
+                fiber.measure_func = None;
+                fiber.measure_hash = None;
+                self.fiber_tree.invalidate_layout_cache_upwards(fiber_id);
+            }
+        }
     }
 
-    /// Add a node to the layout tree for the current frame. Takes the `Style` of the element for which
-    /// layout is being requested, along with the layout ids of any children. This method is called during
-    /// calls to the [`Element::request_layout`] trait method and enables any element to participate in layout.
+    fn layout_bounds_for_fiber(
+        &self,
+        fiber_id: FiberId,
+        scale_factor: f32,
+        cache: &mut FxHashMap<FiberId, Bounds<Pixels>>,
+    ) -> Bounds<Pixels> {
+        if let Some(bounds) = cache.get(&fiber_id) {
+            return *bounds;
+        }
+
+        let fiber = self
+            .fiber_tree
+            .get(fiber_id)
+            .unwrap_or_else(|| panic!("missing fiber {fiber_id:?}"));
+        let mut bounds = Bounds {
+            origin: point(
+                Pixels(fiber.final_layout.location.x / scale_factor),
+                Pixels(fiber.final_layout.location.y / scale_factor),
+            ),
+            size: size(
+                Pixels(fiber.final_layout.size.width / scale_factor),
+                Pixels(fiber.final_layout.size.height / scale_factor),
+            ),
+        };
+
+        if let Some(parent_id) = fiber.parent {
+            let parent_bounds = self.layout_bounds_for_fiber(parent_id, scale_factor, cache);
+            bounds.origin += parent_bounds.origin;
+        }
+
+        cache.insert(fiber_id, bounds);
+        bounds
+    }
+
+    /// Add a node to the layout tree for the current frame, using the current layout path.
+    /// This method is called during [`Element::request_layout`] and enables any element
+    /// to participate in layout. Children are implicit in the fiber tree.
     ///
-    /// Uses position-based caching: if a layout node exists at the current path from a previous frame,
-    /// it is reused and updated rather than creating a new node. This enables taffy's internal caching
-    /// to skip layout computation for unchanged subtrees.
-    ///
-    /// This method should only be called as part of the request_layout or prepaint phase of element drawing.
+    /// This method should only be called as part of the request_layout or prepaint phase
+    /// of element drawing.
     #[must_use]
     pub fn request_layout(
         &mut self,
         style: Style,
-        children: impl IntoIterator<Item = LayoutId>,
-        cx: &mut App,
+        _children: impl IntoIterator<Item = LayoutId>,
+        _cx: &mut App,
     ) -> LayoutId {
         self.invalidator.debug_assert_prepaint();
 
-        cx.layout_id_buffer.clear();
-        cx.layout_id_buffer.extend(children);
+        let fiber_id = self.ensure_fiber_for_current_path();
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
-        let path = self.layout_path.clone();
-        let style_hash = style.layout_hash();
-
-        let layout_id = if let Some(cached) = self.layout_path_cache.get_mut(&path) {
-            // Reuse existing taffy node
-            let layout_engine = self.layout_engine.as_mut().unwrap();
-            LAYOUT_REUSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-            // Update style only when it has changed.
-            if cached.style_hash != style_hash {
-                LAYOUT_SET_STYLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                layout_engine.set_style(cached.layout_id, style, rem_size, scale_factor);
-                cached.style_hash = style_hash;
-            }
-
-            // Only update children if they've changed
-            if cached.children.as_slice() != cx.layout_id_buffer.as_slice() {
-                LAYOUT_SET_CHILDREN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                layout_engine.set_children(cached.layout_id, &cx.layout_id_buffer);
-                cached.children.clear();
-                cached.children.extend(cx.layout_id_buffer.iter().copied());
-            }
-
-            cached.layout_id
-        } else {
-            LAYOUT_NEW_NODE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // Create new taffy node
-            let layout_id = self.layout_engine.as_mut().unwrap().request_layout(
-                style,
-                rem_size,
-                scale_factor,
-                &cx.layout_id_buffer,
-            );
-            self.layout_path_cache.insert(
-                path.clone(),
-                CachedLayoutNode {
-                    layout_id,
-                    style_hash,
-                    children: cx.layout_id_buffer.iter().copied().collect(),
-                    measure_hash: None,
-                },
-            );
-            layout_id
-        };
-
-        self.used_layout_paths.insert(path);
-        if let Some(fiber_id) = self.fiber_for_current_path() {
-            if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
-                fiber.layout_id = Some(layout_id);
-            }
-        }
-        layout_id
+        let taffy_style = style.to_taffy(rem_size, scale_factor);
+        let _ = self.update_fiber_style(fiber_id, taffy_style);
+        self.clear_fiber_measure_func(fiber_id);
+        LayoutId::from(fiber_id)
     }
 
     /// Add a node to the layout tree for the current frame. Instead of taking a `Style` and children,
@@ -4494,22 +4454,19 @@ impl Window {
         F: Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
             + 'static,
     {
-        // No caching - always creates a new node (backward compatible behavior)
         self.invalidator.debug_assert_prepaint();
 
+        let fiber_id = self.ensure_fiber_for_current_path();
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
-        let layout_id = self
-            .layout_engine
-            .as_mut()
-            .unwrap()
-            .request_measured_layout(style, rem_size, scale_factor, measure);
-        if let Some(fiber_id) = self.fiber_for_current_path() {
-            if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
-                fiber.layout_id = Some(layout_id);
-            }
+        let taffy_style = style.to_taffy(rem_size, scale_factor);
+        let _ = self.update_fiber_style(fiber_id, taffy_style);
+        if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
+            fiber.measure_func = Some(Box::new(measure));
+            fiber.measure_hash = None;
         }
-        layout_id
+        self.fiber_tree.invalidate_layout_cache_upwards(fiber_id);
+        LayoutId::from(fiber_id)
     }
 
     /// Request a measured layout with caching support.
@@ -4530,67 +4487,27 @@ impl Window {
     {
         self.invalidator.debug_assert_prepaint();
 
+        let fiber_id = self.ensure_fiber_for_current_path();
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
-        let path = self.layout_path.clone();
-        let style_hash = style.layout_hash();
+        let taffy_style = style.to_taffy(rem_size, scale_factor);
+        let style_changed = self.update_fiber_style(fiber_id, taffy_style);
 
-        let layout_id = if let Some(cached) = self.layout_path_cache.get_mut(&path) {
-            // Reuse existing taffy node
-            let layout_engine = self.layout_engine.as_mut().unwrap();
-            LAYOUT_REUSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-            // Check if content has changed (style or measure content)
-            let style_changed = cached.style_hash != style_hash;
-
-            if style_changed {
-                LAYOUT_SET_STYLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                layout_engine.set_style(cached.layout_id, style, rem_size, scale_factor);
-                cached.style_hash = style_hash;
-            }
-
-            // Check if content has changed
-            let content_changed = cached.measure_hash != Some(content_hash);
-
-            if content_changed {
-                // Content changed - update the measure function (marks Taffy node dirty)
-                layout_engine.set_measure(cached.layout_id, measure);
-                cached.measure_hash = Some(content_hash);
-            } else {
-                // Content unchanged - keep Taffy node clean.
-                // Store the measure function to call after compute_layout to populate element_state.
-                MEASURED_CACHE_HIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.pending_measure_calls.push((cached.layout_id, Box::new(measure)));
-            }
-
-            cached.layout_id
-        } else {
-            LAYOUT_NEW_NODE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // Create new taffy node
-            let layout_id = self
-                .layout_engine
-                .as_mut()
-                .unwrap()
-                .request_measured_layout(style, rem_size, scale_factor, measure);
-            self.layout_path_cache.insert(
-                path.clone(),
-                CachedLayoutNode {
-                    layout_id,
-                    style_hash,
-                    children: SmallVec::new(),
-                    measure_hash: Some(content_hash),
-                },
-            );
-            layout_id
-        };
-
-        self.used_layout_paths.insert(path);
-        if let Some(fiber_id) = self.fiber_for_current_path() {
-            if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
-                fiber.layout_id = Some(layout_id);
-            }
+        let mut content_changed = true;
+        if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
+            content_changed = fiber.measure_hash != Some(content_hash);
+            fiber.measure_hash = Some(content_hash);
+            fiber.measure_func = Some(Box::new(measure));
         }
-        layout_id
+
+        if content_changed || style_changed {
+            self.fiber_tree.invalidate_layout_cache_upwards(fiber_id);
+        } else {
+            MEASURED_CACHE_HIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.pending_measure_calls.push(fiber_id);
+        }
+
+        LayoutId::from(fiber_id)
     }
 
     /// Compute the layout for the given id within the given available space.
@@ -4606,33 +4523,52 @@ impl Window {
     ) {
         self.invalidator.debug_assert_prepaint();
 
-        let mut layout_engine = self.layout_engine.take().unwrap();
-        layout_engine.compute_layout(layout_id, available_space, self, cx);
-        self.layout_engine = Some(layout_engine);
+        let scale_factor = self.scale_factor();
+        let transform = |space: AvailableSpace| match space {
+            AvailableSpace::Definite(pixels) => {
+                AvailableSpace::Definite(Pixels(pixels.0 * scale_factor))
+            }
+            AvailableSpace::MinContent => AvailableSpace::MinContent,
+            AvailableSpace::MaxContent => AvailableSpace::MaxContent,
+        };
+        let available_space = size(
+            transform(available_space.width),
+            transform(available_space.height),
+        );
 
-        // Process pending measure calls for cache-hit measured nodes.
-        // We need to call these to populate per-frame element state (e.g., TextLayout).
+        let mut fiber_tree = std::mem::take(&mut self.fiber_tree);
+        fiber_tree.set_layout_context(self as *mut Window, cx as *mut App, scale_factor);
+        compute_root_layout(&mut fiber_tree, layout_id.into(), available_space.into());
+        round_layout(&mut fiber_tree, layout_id.into());
+        fiber_tree.clear_layout_context();
+        self.fiber_tree = fiber_tree;
+
         let pending_calls = std::mem::take(&mut self.pending_measure_calls);
-        for (layout_id, measure) in pending_calls {
-            let scale_factor = self.scale_factor();
-            let bounds = self
-                .layout_engine
-                .as_mut()
-                .unwrap()
-                .layout_bounds(layout_id, scale_factor);
-            let size: Size<Pixels> = bounds.size.map(Into::into);
-            measure(
-                Size {
-                    width: Some(size.width),
-                    height: Some(size.height),
-                },
-                Size {
-                    width: AvailableSpace::Definite(size.width),
-                    height: AvailableSpace::Definite(size.height),
-                },
-                self,
-                cx,
-            );
+        let mut bounds_cache = FxHashMap::default();
+        for fiber_id in pending_calls {
+            let bounds = self.layout_bounds_for_fiber(fiber_id, scale_factor, &mut bounds_cache);
+            let size: Size<Pixels> = bounds.size;
+            let mut measure = self
+                .fiber_tree
+                .get_mut(fiber_id)
+                .and_then(|fiber| fiber.measure_func.take());
+            if let Some(measure) = measure.as_mut() {
+                measure(
+                    Size {
+                        width: Some(size.width),
+                        height: Some(size.height),
+                    },
+                    Size {
+                        width: AvailableSpace::Definite(size.width),
+                        height: AvailableSpace::Definite(size.height),
+                    },
+                    self,
+                    cx,
+                );
+            }
+            if let Some(fiber) = self.fiber_tree.get_mut(fiber_id) {
+                fiber.measure_func = measure;
+            }
         }
     }
 
@@ -4644,12 +4580,9 @@ impl Window {
         self.invalidator.debug_assert_prepaint();
 
         let scale_factor = self.scale_factor();
-        let mut bounds = self
-            .layout_engine
-            .as_mut()
-            .unwrap()
-            .layout_bounds(layout_id, scale_factor)
-            .map(Into::into);
+        let mut cache = FxHashMap::default();
+        let mut bounds =
+            self.layout_bounds_for_fiber(FiberId::from(layout_id), scale_factor, &mut cache);
         bounds.origin += self.element_offset();
         bounds
     }
@@ -5934,12 +5867,14 @@ impl Window {
     fn prepaint_inspector(&mut self, inspector_width: Pixels, cx: &mut App) -> Option<AnyElement> {
         if let Some(inspector) = self.inspector.take() {
             let mut inspector_element = AnyView::from(inspector.clone()).into_any_element();
-            inspector_element.prepaint_as_root(
-                point(self.viewport_size.width - inspector_width, px(0.0)),
-                size(inspector_width, self.viewport_size.height).into(),
-                self,
-                cx,
-            );
+            self.with_detached_layout_path(|window| {
+                inspector_element.prepaint_as_root(
+                    point(window.viewport_size.width - inspector_width, px(0.0)),
+                    size(inspector_width, window.viewport_size.height).into(),
+                    window,
+                    cx,
+                );
+            });
             self.inspector = Some(inspector);
             Some(inspector_element)
         } else {

@@ -493,7 +493,9 @@ impl Element for UniformList {
                                 AvailableSpace::Definite(available_width),
                                 AvailableSpace::Definite(item_height),
                             );
-                            item.layout_as_root(available_space, window, cx);
+                            window.with_detached_layout_path(|window| {
+                                item.layout_as_root(available_space, window, cx);
+                            });
                             item.prepaint_at(item_origin, window, cx);
                             frame_state.items.push(item);
                         }
@@ -514,7 +516,9 @@ impl Element for UniformList {
                                 AvailableSpace::Definite(bounds.size.width),
                                 AvailableSpace::Definite(bounds.size.height),
                             );
-                            decoration.layout_as_root(available_space, window, cx);
+                            window.with_detached_layout_path(|window| {
+                                decoration.layout_as_root(available_space, window, cx);
+                            });
                             decoration.prepaint_at(bounds.origin, window, cx);
                             frame_state.decorations.push(decoration);
                         }
@@ -664,7 +668,9 @@ impl UniformList {
             }),
             AvailableSpace::MinContent,
         );
-        item_to_measure.layout_as_root(available_space, window, cx)
+        window.with_detached_layout_path(|window| {
+            item_to_measure.layout_as_root(available_space, window, cx)
+        })
     }
 
     /// Track and render scroll state of this list with reference to the given scroll handle.

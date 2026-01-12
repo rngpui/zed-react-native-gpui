@@ -1449,29 +1449,6 @@ impl Element for Div {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut child_layout_ids = SmallVec::new();
         let fiber_id = window.ensure_fiber_for_current_path();
-        if !window.refreshing
-            && let Some(fiber) = window.fiber_tree.get(fiber_id)
-            && !fiber.dirty.any()
-            && !window.fiber_tree.has_layout_dirty_ancestor(fiber_id)
-            && fiber.prepaint_state.is_some()
-            && fiber.paint_list.is_some()
-            && let Some((cached_layout_id, cached_children)) = window
-                .cached_layout_node_for_current_path()
-                .map(|cached| (cached.layout_id, cached.children.clone()))
-        {
-            child_layout_ids = cached_children.iter().copied().collect();
-            window.mark_layout_path_used();
-            if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
-                fiber.layout_id = Some(cached_layout_id);
-            }
-            return (
-                cached_layout_id,
-                DivFrameState {
-                    child_layout_ids,
-                    fiber_id: Some(fiber_id),
-                },
-            );
-        }
         let image_cache = self
             .image_cache
             .as_mut()
@@ -1501,11 +1478,6 @@ impl Element for Div {
                 },
             )
         });
-
-        // Update fiber with layout_id and reconcile with current state
-        if let Some(fiber) = window.fiber_tree.get_mut(fiber_id) {
-            fiber.layout_id = Some(layout_id);
-        }
 
         // Reconcile fiber with current style and child count
         let layout_hash = self.interactivity.base_style.layout_hash();

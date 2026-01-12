@@ -639,7 +639,9 @@ impl StateInner {
         for (ix, item) in cursor.enumerate() {
             let size = item.size().unwrap_or_else(|| {
                 let mut element = render_item(ix, window, cx);
-                element.layout_as_root(available_item_space, window, cx)
+                window.with_detached_layout_path(|window| {
+                    element.layout_as_root(available_item_space, window, cx)
+                })
             });
 
             measured_items.push(ListItem::Measured {
@@ -692,7 +694,9 @@ impl StateInner {
             if visible_height < available_height || size.is_none() {
                 let item_index = scroll_top.item_ix + ix;
                 let mut element = render_item(item_index, window, cx);
-                let element_size = element.layout_as_root(available_item_space, window, cx);
+                let element_size = window.with_detached_layout_path(|window| {
+                    element.layout_as_root(available_item_space, window, cx)
+                });
                 size = Some(element_size);
 
                 // If there's a pending scroll adjustment for the scroll-top
@@ -741,7 +745,9 @@ impl StateInner {
                 if let Some(item) = cursor.item() {
                     let item_index = cursor.start().0;
                     let mut element = render_item(item_index, window, cx);
-                    let element_size = element.layout_as_root(available_item_space, window, cx);
+                    let element_size = window.with_detached_layout_path(|window| {
+                        element.layout_as_root(available_item_space, window, cx)
+                    });
                     let focus_handle = item.focus_handle();
                     rendered_height += element_size.height;
                     measured_items.push_front(ListItem::Measured {
@@ -790,7 +796,9 @@ impl StateInner {
                     *size
                 } else {
                     let mut element = render_item(cursor.start().0, window, cx);
-                    element.layout_as_root(available_item_space, window, cx)
+                    window.with_detached_layout_path(|window| {
+                        element.layout_as_root(available_item_space, window, cx)
+                    })
                 };
 
                 leading_overdraw += size.height;
@@ -823,7 +831,9 @@ impl StateInner {
                 if item.contains_focused(window, cx) {
                     let item_index = cursor.start().0;
                     let mut element = render_item(cursor.start().0, window, cx);
-                    let size = element.layout_as_root(available_item_space, window, cx);
+                    let size = window.with_detached_layout_path(|window| {
+                        element.layout_as_root(available_item_space, window, cx)
+                    });
                     item_layouts.push_back(ItemLayout {
                         index: item_index,
                         element,
@@ -905,7 +915,9 @@ impl StateInner {
                                     let mut item = render_item(cursor.start().0, window, cx);
                                     let item_available_size =
                                         size(bounds.size.width.into(), AvailableSpace::MinContent);
-                                    item.layout_as_root(item_available_size, window, cx)
+                                    window.with_detached_layout_path(|window| {
+                                        item.layout_as_root(item_available_size, window, cx)
+                                    })
                                 });
                                 height -= size.height;
                             }

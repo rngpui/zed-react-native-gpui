@@ -1,9 +1,24 @@
 use crate::{
-    AnyDescriptor, Bounds, EntityId, Hitbox, LayoutId, Pixels, SharedString, StyleRefinement,
-    TaffyLayoutEngine,
+    AnyDescriptor, App, AvailableSpace, Bounds, EntityId, Hitbox, Pixels, SharedString, Size,
+    StyleRefinement, Window,
 };
 use collections::FxHashMap;
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{KeyData, new_key_type, SlotMap};
+use taffy::{
+    Cache, CacheTree, Layout, LayoutInput, LayoutOutput, LayoutPartialTree, NodeId, RoundTree,
+    TraversePartialTree, TraverseTree,
+    compute_cached_layout, compute_hidden_layout, compute_leaf_layout,
+    LayoutBlockContainer, compute_block_layout,
+    LayoutFlexboxContainer, compute_flexbox_layout,
+    LayoutGridContainer, compute_grid_layout,
+};
+use taffy::style::{AvailableSpace as TaffyAvailableSpace, Display, Style as TaffyStyle};
+use taffy::tree::RunMode;
+
+/// A function that measures the size of a leaf node during layout.
+/// Called with known dimensions (if any), available space, and the window/app context.
+pub type MeasureFunc =
+    Box<dyn FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>>;
 
 new_key_type! {
     /// A unique identifier for a fiber in the fiber tree
@@ -14,6 +29,31 @@ new_key_type! {
 
     /// A unique identifier for cached prepaint state
     pub struct PrepaintStateId;
+}
+
+impl FiberId {
+    /// Convert this FiberId to a u64 for interop with Taffy's NodeId.
+    pub fn as_u64(self) -> u64 {
+        self.0.as_ffi()
+    }
+}
+
+impl From<u64> for FiberId {
+    fn from(value: u64) -> Self {
+        FiberId(KeyData::from_ffi(value))
+    }
+}
+
+impl From<NodeId> for FiberId {
+    fn from(node_id: NodeId) -> Self {
+        FiberId::from(u64::from(node_id))
+    }
+}
+
+impl From<FiberId> for NodeId {
+    fn from(fiber_id: FiberId) -> Self {
+        NodeId::from(fiber_id.as_u64())
+    }
 }
 
 /// Dirty flags for tracking what needs to be recomputed
@@ -112,9 +152,6 @@ pub struct Fiber {
     /// Cached hitbox from the last prepaint, if any.
     pub cached_hitbox: Option<Hitbox>,
 
-    /// The taffy layout node for this fiber
-    pub layout_id: Option<LayoutId>,
-
     /// Cached layout bounds from the last frame
     pub bounds: Option<Bounds<Pixels>>,
 
@@ -135,6 +172,24 @@ pub struct Fiber {
 
     /// Dirty tracking flags
     pub dirty: DirtyFlags,
+
+    /// Taffy cache for constraint combinations
+    pub taffy_cache: Cache,
+
+    /// Taffy style for this node
+    pub taffy_style: TaffyStyle,
+
+    /// Unrounded layout from Taffy
+    pub unrounded_layout: Layout,
+
+    /// Final rounded layout from Taffy
+    pub final_layout: Layout,
+
+    /// Optional measure function for leaf nodes
+    pub measure_func: Option<MeasureFunc>,
+
+    /// Cached hash for measured content
+    pub measure_hash: Option<u64>,
 }
 
 impl Fiber {
@@ -155,7 +210,6 @@ impl Fiber {
             cached_style: None,
             cached_text: None,
             cached_hitbox: None,
-            layout_id: None,
             bounds: None,
             prepaint_state: None,
             paint_list: None,
@@ -163,6 +217,12 @@ impl Fiber {
             first_child: None,
             next_sibling: None,
             dirty: DirtyFlags::ALL,
+            taffy_cache: Cache::new(),
+            taffy_style: TaffyStyle::default(),
+            unrounded_layout: Layout::new(),
+            final_layout: Layout::new(),
+            measure_func: None,
+            measure_hash: None,
         }
     }
 
@@ -182,6 +242,15 @@ pub struct FiberTree {
 
     /// Maps view entity IDs to their fiber roots
     pub view_roots: FxHashMap<EntityId, FiberId>,
+
+    /// Layout context for measured nodes (set during layout computation)
+    layout_context: Option<LayoutContext>,
+}
+
+struct LayoutContext {
+    window: *mut Window,
+    app: *mut App,
+    scale_factor: f32,
 }
 
 impl Default for FiberTree {
@@ -197,6 +266,7 @@ impl FiberTree {
             fibers: SlotMap::with_key(),
             root: None,
             view_roots: FxHashMap::default(),
+            layout_context: None,
         }
     }
 
@@ -223,6 +293,9 @@ impl FiberTree {
 
     /// Remove a fiber and all its descendants
     pub fn remove(&mut self, id: FiberId) {
+        if let Some(parent_id) = self.fibers.get(id).and_then(|fiber| fiber.parent) {
+            self.unlink_child(parent_id, id);
+        }
         let mut to_remove = vec![id];
 
         while let Some(fiber_id) = to_remove.pop() {
@@ -267,6 +340,8 @@ impl FiberTree {
                 }
             }
         }
+
+        self.invalidate_layout_cache_upwards(parent_id);
     }
 
     /// Mark a fiber as dirty and propagate SUBTREE_DIRTY to ancestors
@@ -278,6 +353,7 @@ impl FiberTree {
         self.propagate_has_dirty_descendant(fiber_id);
         if flags.intersects(DirtyFlags::NEEDS_LAYOUT) {
             self.propagate_needs_layout(fiber_id);
+            self.invalidate_layout_cache_upwards(fiber_id);
         }
     }
 
@@ -407,6 +483,36 @@ impl FiberTree {
         }
     }
 
+    pub(crate) fn set_layout_context(
+        &mut self,
+        window: *mut Window,
+        app: *mut App,
+        scale_factor: f32,
+    ) {
+        self.layout_context = Some(LayoutContext {
+            window,
+            app,
+            scale_factor,
+        });
+    }
+
+    pub(crate) fn clear_layout_context(&mut self) {
+        self.layout_context = None;
+    }
+
+    /// Invalidate the layout cache for a fiber and all its ancestors.
+    /// Called when a fiber's style changes to ensure layout is recomputed.
+    pub fn invalidate_layout_cache_upwards(&mut self, fiber_id: FiberId) {
+        let mut current = Some(fiber_id);
+        while let Some(id) = current {
+            let Some(fiber) = self.fibers.get_mut(id) else {
+                break;
+            };
+            fiber.taffy_cache.clear();
+            current = fiber.parent;
+        }
+    }
+
     /// Reconcile a descriptor against a fiber, returning whether it changed.
     /// If the descriptor's content hash differs from the fiber's stored hash,
     /// the fiber is marked as needing layout and its hash is updated.
@@ -414,7 +520,6 @@ impl FiberTree {
         &mut self,
         fiber_id: FiberId,
         descriptor: &AnyDescriptor,
-        _taffy: &mut TaffyLayoutEngine,
     ) -> bool {
         let new_descriptor_hash = descriptor.content_hash();
         let new_layout_hash = descriptor.layout_hash();
@@ -467,7 +572,7 @@ impl FiberTree {
 
         // Reconcile children by position
         let children = descriptor.children();
-        self.reconcile_children(fiber_id, children, _taffy);
+        self.reconcile_children(fiber_id, children);
 
         if changed {
             let child_ids: Vec<FiberId> = self.children(fiber_id).collect();
@@ -489,17 +594,16 @@ impl FiberTree {
         &mut self,
         parent_id: FiberId,
         children: &[AnyDescriptor],
-        taffy: &mut TaffyLayoutEngine,
     ) {
         // Collect existing children
-        let mut existing_children: Vec<FiberId> = self.children(parent_id).collect();
+        let existing_children: Vec<FiberId> = self.children(parent_id).collect();
 
         // Reconcile or create children
         for (i, child_desc) in children.iter().enumerate() {
             if i < existing_children.len() {
                 // Existing fiber at this position - reconcile it
                 let child_fiber_id = existing_children[i];
-                self.reconcile(child_fiber_id, child_desc, taffy);
+                self.reconcile(child_fiber_id, child_desc);
             } else {
                 // No fiber at this position - create new one
                 let new_fiber_id = self.create_fiber_for(child_desc);
@@ -509,7 +613,7 @@ impl FiberTree {
                 }
 
                 // Recursively create fibers for descendants
-                self.reconcile_children(new_fiber_id, child_desc.children(), taffy);
+                self.reconcile_children(new_fiber_id, child_desc.children());
 
                 // Mark parent as having subtree dirty
                 self.propagate_has_dirty_descendant(new_fiber_id);
@@ -518,15 +622,13 @@ impl FiberTree {
 
         // Remove excess fibers (children that no longer exist)
         for excess_fiber_id in existing_children.into_iter().skip(children.len()) {
-            // Unlink from parent
-            self.unlink_child(parent_id, excess_fiber_id);
-            // Remove the fiber and its descendants (this also removes taffy nodes)
-            self.remove_with_taffy(excess_fiber_id, taffy);
+            self.remove(excess_fiber_id);
         }
     }
 
     /// Unlink a child from its parent's linked list
     fn unlink_child(&mut self, parent_id: FiberId, child_id: FiberId) {
+        self.invalidate_layout_cache_upwards(parent_id);
         let parent = match self.fibers.get_mut(parent_id) {
             Some(p) => p,
             None => return,
@@ -559,27 +661,6 @@ impl FiberTree {
         if let Some(child) = self.fibers.get_mut(child_id) {
             child.parent = None;
             child.next_sibling = None;
-        }
-    }
-
-    /// Remove a fiber and all its descendants, also removing their taffy nodes
-    pub fn remove_with_taffy(&mut self, id: FiberId, taffy: &mut TaffyLayoutEngine) {
-        let mut to_remove = vec![id];
-
-        while let Some(fiber_id) = to_remove.pop() {
-            if let Some(fiber) = self.fibers.remove(fiber_id) {
-                // Remove the taffy node if it exists
-                if let Some(layout_id) = fiber.layout_id {
-                    taffy.remove(layout_id);
-                }
-
-                // Queue children for removal
-                let mut child = fiber.first_child;
-                while let Some(child_id) = child {
-                    to_remove.push(child_id);
-                    child = self.fibers.get(child_id).and_then(|f| f.next_sibling);
-                }
-            }
         }
     }
 
@@ -628,5 +709,249 @@ impl<'a> Iterator for FiberChildIter<'a> {
         let current = self.current?;
         self.current = self.tree.fibers.get(current).and_then(|f| f.next_sibling);
         Some(current)
+    }
+}
+
+fn fiber_to_node_id(fiber_id: FiberId) -> NodeId {
+    fiber_id.into()
+}
+
+impl TraversePartialTree for FiberTree {
+    type ChildIter<'a> = std::iter::Map<FiberChildIter<'a>, fn(FiberId) -> NodeId>
+    where
+        Self: 'a;
+
+    fn child_ids(&self, node_id: NodeId) -> Self::ChildIter<'_> {
+        self.children(node_id.into()).map(fiber_to_node_id)
+    }
+
+    fn child_count(&self, node_id: NodeId) -> usize {
+        self.children(node_id.into()).count()
+    }
+
+    fn get_child_id(&self, node_id: NodeId, index: usize) -> NodeId {
+        self.children(node_id.into())
+            .nth(index)
+            .unwrap_or_else(|| panic!("missing child {index} for node {node_id:?}"))
+            .into()
+    }
+}
+
+impl TraverseTree for FiberTree {}
+
+impl LayoutPartialTree for FiberTree {
+    type CoreContainerStyle<'a>
+        = &'a TaffyStyle
+    where
+        Self: 'a;
+
+    type CustomIdent = String;
+
+    fn get_core_container_style(&self, node_id: NodeId) -> Self::CoreContainerStyle<'_> {
+        &self
+            .get(node_id.into())
+            .unwrap_or_else(|| panic!("missing fiber for node {node_id:?}"))
+            .taffy_style
+    }
+
+    fn set_unrounded_layout(&mut self, node_id: NodeId, layout: &Layout) {
+        if let Some(fiber) = self.get_mut(node_id.into()) {
+            fiber.unrounded_layout = *layout;
+        }
+    }
+
+    fn compute_child_layout(&mut self, node_id: NodeId, inputs: LayoutInput) -> LayoutOutput {
+        if inputs.run_mode == RunMode::PerformHiddenLayout {
+            return compute_hidden_layout(self, node_id);
+        }
+
+        compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
+            let (display_mode, has_children) = {
+                let fiber = tree
+                    .get(node_id.into())
+                    .unwrap_or_else(|| panic!("missing fiber for node {node_id:?}"));
+                (fiber.taffy_style.display, tree.child_count(node_id) > 0)
+            };
+
+            match (display_mode, has_children) {
+                (Display::None, _) => compute_hidden_layout(tree, node_id),
+                (Display::Block, true) => compute_block_layout(tree, node_id, inputs),
+                (Display::Flex, true) => compute_flexbox_layout(tree, node_id, inputs),
+                (Display::Grid, true) => compute_grid_layout(tree, node_id, inputs),
+                (_, false) => {
+                    let (window_ptr, app_ptr, scale_factor) = {
+                        let context = tree
+                            .layout_context
+                            .as_ref()
+                            .expect("layout context is not set");
+                        (context.window, context.app, context.scale_factor)
+                    };
+                    let (style_ptr, measure_ptr) = {
+                        let fiber = tree
+                            .get_mut(node_id.into())
+                            .unwrap_or_else(|| panic!("missing fiber for node {node_id:?}"));
+                        let style_ptr = &fiber.taffy_style as *const TaffyStyle;
+                        let measure_ptr =
+                            fiber.measure_func.as_mut().map(|measure| measure as *mut MeasureFunc);
+                        (style_ptr, measure_ptr)
+                    };
+
+                    let style = unsafe { &*style_ptr };
+                    let measure_fn = |known_dimensions: taffy::geometry::Size<Option<f32>>,
+                                      available_space: taffy::geometry::Size<TaffyAvailableSpace>| {
+                        let Some(measure_ptr) = measure_ptr else {
+                            return taffy::geometry::Size {
+                                width: 0.0,
+                                height: 0.0,
+                            };
+                        };
+
+                        let to_available_space = |space: TaffyAvailableSpace| match space {
+                            TaffyAvailableSpace::Definite(value) => {
+                                AvailableSpace::Definite(Pixels(value / scale_factor))
+                            }
+                            TaffyAvailableSpace::MinContent => AvailableSpace::MinContent,
+                            TaffyAvailableSpace::MaxContent => AvailableSpace::MaxContent,
+                        };
+
+                        let known_dimensions = Size {
+                            width: known_dimensions
+                                .width
+                                .map(|value| Pixels(value / scale_factor)),
+                            height: known_dimensions
+                                .height
+                                .map(|value| Pixels(value / scale_factor)),
+                        };
+                        let available_space = Size {
+                            width: to_available_space(available_space.width),
+                            height: to_available_space(available_space.height),
+                        };
+                        let measured = unsafe {
+                            (&mut *measure_ptr)(
+                                known_dimensions,
+                                available_space,
+                                &mut *window_ptr,
+                                &mut *app_ptr,
+                            )
+                        };
+                        taffy::geometry::Size {
+                            width: measured.width.0 * scale_factor,
+                            height: measured.height.0 * scale_factor,
+                        }
+                    };
+
+                    let resolve_calc_value = |val, basis| tree.resolve_calc_value(val, basis);
+                    compute_leaf_layout(inputs, style, resolve_calc_value, measure_fn)
+                }
+            }
+        })
+    }
+}
+
+impl CacheTree for FiberTree {
+    fn cache_get(
+        &self,
+        node_id: NodeId,
+        known_dimensions: taffy::geometry::Size<Option<f32>>,
+        available_space: taffy::geometry::Size<TaffyAvailableSpace>,
+        run_mode: RunMode,
+    ) -> Option<LayoutOutput> {
+        self.get(node_id.into())?.taffy_cache.get(
+            known_dimensions,
+            available_space,
+            run_mode,
+        )
+    }
+
+    fn cache_store(
+        &mut self,
+        node_id: NodeId,
+        known_dimensions: taffy::geometry::Size<Option<f32>>,
+        available_space: taffy::geometry::Size<TaffyAvailableSpace>,
+        run_mode: RunMode,
+        output: LayoutOutput,
+    ) {
+        if let Some(fiber) = self.get_mut(node_id.into()) {
+            fiber
+                .taffy_cache
+                .store(known_dimensions, available_space, run_mode, output);
+        }
+    }
+
+    fn cache_clear(&mut self, node_id: NodeId) {
+        if let Some(fiber) = self.get_mut(node_id.into()) {
+            fiber.taffy_cache.clear();
+        }
+    }
+}
+
+impl LayoutBlockContainer for FiberTree {
+    type BlockContainerStyle<'a>
+        = &'a TaffyStyle
+    where
+        Self: 'a;
+    type BlockItemStyle<'a>
+        = &'a TaffyStyle
+    where
+        Self: 'a;
+
+    fn get_block_container_style(&self, node_id: NodeId) -> Self::BlockContainerStyle<'_> {
+        self.get_core_container_style(node_id)
+    }
+
+    fn get_block_child_style(&self, child_node_id: NodeId) -> Self::BlockItemStyle<'_> {
+        self.get_core_container_style(child_node_id)
+    }
+}
+
+impl LayoutFlexboxContainer for FiberTree {
+    type FlexboxContainerStyle<'a>
+        = &'a TaffyStyle
+    where
+        Self: 'a;
+    type FlexboxItemStyle<'a>
+        = &'a TaffyStyle
+    where
+        Self: 'a;
+
+    fn get_flexbox_container_style(&self, node_id: NodeId) -> Self::FlexboxContainerStyle<'_> {
+        self.get_core_container_style(node_id)
+    }
+
+    fn get_flexbox_child_style(&self, child_node_id: NodeId) -> Self::FlexboxItemStyle<'_> {
+        self.get_core_container_style(child_node_id)
+    }
+}
+
+impl LayoutGridContainer for FiberTree {
+    type GridContainerStyle<'a>
+        = &'a TaffyStyle
+    where
+        Self: 'a;
+    type GridItemStyle<'a>
+        = &'a TaffyStyle
+    where
+        Self: 'a;
+
+    fn get_grid_container_style(&self, node_id: NodeId) -> Self::GridContainerStyle<'_> {
+        self.get_core_container_style(node_id)
+    }
+
+    fn get_grid_child_style(&self, child_node_id: NodeId) -> Self::GridItemStyle<'_> {
+        self.get_core_container_style(child_node_id)
+    }
+}
+
+impl RoundTree for FiberTree {
+    fn get_unrounded_layout(&self, node_id: NodeId) -> Layout {
+        self.get(node_id.into())
+            .unwrap_or_else(|| panic!("missing fiber for node {node_id:?}"))
+            .unrounded_layout
+    }
+
+    fn set_final_layout(&mut self, node_id: NodeId, layout: &Layout) {
+        if let Some(fiber) = self.get_mut(node_id.into()) {
+            fiber.final_layout = *layout;
+        }
     }
 }

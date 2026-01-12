@@ -27,6 +27,7 @@ impl Deferred {
         self
     }
 
+    #[allow(dead_code)] // Used via downcast in AnyElement::build_descriptor
     pub(crate) fn build_descriptor(
         &mut self,
         window: &mut Window,

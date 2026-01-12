@@ -140,10 +140,6 @@ impl AnyView {
     pub fn entity_id(&self) -> EntityId {
         self.entity.entity_id()
     }
-
-    pub(crate) fn render_element(&self, window: &mut Window, cx: &mut App) -> AnyElement {
-        (self.render)(self, window, cx)
-    }
 }
 
 impl PartialEq for AnyView {
@@ -184,6 +180,7 @@ impl Element for AnyView {
                     let mut root_style = Style::default();
                     root_style.refine(style);
                     let layout_id = window.request_layout(root_style, None, cx);
+                    window.mark_fiber_subtree_used(layout_id.into());
                     (layout_id, None)
                 }
                 _ => {
@@ -238,7 +235,9 @@ impl Element for AnyView {
                     let prepaint_start = window.prepaint_index();
                     let (mut element, accessed_entities) = cx.detect_accessed_entities(|cx| {
                         let mut element = (self.render)(self, window, cx);
-                        element.layout_as_root(bounds.size.into(), window, cx);
+                        window.with_detached_layout_path(|window| {
+                            element.layout_as_root(bounds.size.into(), window, cx);
+                        });
                         element.prepaint_at(bounds.origin, window, cx);
                         element
                     });
