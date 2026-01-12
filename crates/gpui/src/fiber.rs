@@ -412,8 +412,18 @@ impl FiberTree {
 
     /// Clear dirty flags for a fiber (call after processing)
     pub fn clear_dirty(&mut self, fiber_id: FiberId) {
-        if let Some(fiber) = self.fibers.get_mut(fiber_id) {
-            fiber.dirty.clear();
+        // Clear this fiber and all descendants recursively
+        let mut stack = vec![fiber_id];
+        while let Some(current_id) = stack.pop() {
+            if let Some(fiber) = self.fibers.get_mut(current_id) {
+                fiber.dirty.clear();
+                // Add children to stack
+                let mut child = fiber.first_child;
+                while let Some(child_id) = child {
+                    stack.push(child_id);
+                    child = self.fibers.get(child_id).and_then(|f| f.next_sibling);
+                }
+            }
         }
     }
 
