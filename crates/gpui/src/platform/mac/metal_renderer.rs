@@ -1,8 +1,8 @@
 use super::metal_atlas::MetalAtlas;
 use crate::{
-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite, PaintSurface,
-    Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size,
-    Surface, Underline, point, size,
+    AtlasTextureId, BackdropBlur, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite,
+    PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow,
+    Size, Surface, TransformationMatrix, Underline, point, size,
 };
 use anyhow::Result;
 use block::ConcreteBlock;
@@ -21,7 +21,7 @@ use core_video::{
 };
 use foreign_types::{ForeignType, ForeignTypeRef};
 use metal::{
-    CAMetalLayer, CommandQueue, MTLPixelFormat, MTLResourceOptions, NSRange,
+    CAMetalLayer, CommandQueue, MTLOrigin, MTLPixelFormat, MTLResourceOptions, MTLSize, NSRange,
     RenderPassColorAttachmentDescriptorRef,
 };
 use objc::{self, msg_send, sel, sel_impl};
@@ -107,6 +107,7 @@ pub(crate) struct MetalRenderer {
     path_sprites_pipeline_state: metal::RenderPipelineState,
     shadows_pipeline_state: metal::RenderPipelineState,
     quads_pipeline_state: metal::RenderPipelineState,
+    backdrop_blurs_pipeline_state: metal::RenderPipelineState,
     underlines_pipeline_state: metal::RenderPipelineState,
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
@@ -118,6 +119,7 @@ pub(crate) struct MetalRenderer {
     core_video_texture_cache: core_video::metal_texture_cache::CVMetalTextureCache,
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
+    backdrop_texture: Option<metal::Texture>,
     path_sample_count: u32,
 }
 
@@ -233,6 +235,14 @@ impl MetalRenderer {
             "quad_fragment",
             MTLPixelFormat::BGRA8Unorm,
         );
+        let backdrop_blurs_pipeline_state = build_pipeline_state(
+            &device,
+            &library,
+            "backdrop_blurs",
+            "backdrop_blur_vertex",
+            "backdrop_blur_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        );
         let underlines_pipeline_state = build_pipeline_state(
             &device,
             &library,
@@ -280,6 +290,7 @@ impl MetalRenderer {
             path_sprites_pipeline_state,
             shadows_pipeline_state,
             quads_pipeline_state,
+            backdrop_blurs_pipeline_state,
             underlines_pipeline_state,
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
@@ -290,6 +301,7 @@ impl MetalRenderer {
             core_video_texture_cache,
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
+            backdrop_texture: None,
             path_sample_count: PATH_SAMPLE_COUNT,
         }
     }
@@ -328,6 +340,7 @@ impl MetalRenderer {
             height: DevicePixels(size.height as i32),
         };
         self.update_path_intermediate_textures(device_pixels_size);
+        self.update_backdrop_texture(device_pixels_size);
     }
 
     fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) {
@@ -359,6 +372,23 @@ impl MetalRenderer {
         }
     }
 
+    fn update_backdrop_texture(&mut self, size: Size<DevicePixels>) {
+        // Avoid zero-sized texture creation (can SIGABRT).
+        if size.width.0 <= 0 || size.height.0 <= 0 {
+            self.backdrop_texture = None;
+            return;
+        }
+
+        let texture_descriptor = metal::TextureDescriptor::new();
+        texture_descriptor.set_width(size.width.0 as u64);
+        texture_descriptor.set_height(size.height.0 as u64);
+        texture_descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+        texture_descriptor.set_storage_mode(metal::MTLStorageMode::Private);
+        texture_descriptor
+            .set_usage(metal::MTLTextureUsage::ShaderRead | metal::MTLTextureUsage::RenderTarget);
+        self.backdrop_texture = Some(self.device.new_texture(&texture_descriptor));
+    }
+
     pub fn update_transparency(&self, transparent: bool) {
         self.layer.set_opaque(!transparent);
     }
@@ -374,6 +404,18 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
+
+        let needs_backdrop_texture = match &self.backdrop_texture {
+            Some(t) => {
+                t.width() != viewport_size.width.0 as u64
+                    || t.height() != viewport_size.height.0 as u64
+            }
+            None => true,
+        };
+        if needs_backdrop_texture {
+            self.update_backdrop_texture(viewport_size);
+        }
+
         let drawable = if let Some(drawable) = layer.next_drawable() {
             drawable
         } else {
@@ -524,6 +566,43 @@ impl MetalRenderer {
         }
     }
 
+    fn copy_drawable_to_backdrop(
+        &self,
+        drawable: &metal::MetalDrawableRef,
+        viewport_size: Size<DevicePixels>,
+        command_buffer: &metal::CommandBufferRef,
+    ) -> bool {
+        let Some(backdrop_texture) = &self.backdrop_texture else {
+            return false;
+        };
+
+        if viewport_size.width.0 <= 0 || viewport_size.height.0 <= 0 {
+            return false;
+        }
+
+        let blit = command_buffer.new_blit_command_encoder();
+        let origin = MTLOrigin { x: 0, y: 0, z: 0 };
+        let size = MTLSize {
+            width: viewport_size.width.0 as u64,
+            height: viewport_size.height.0 as u64,
+            depth: 1,
+        };
+
+        blit.copy_from_texture(
+            drawable.texture(),
+            0,
+            0,
+            origin,
+            size,
+            backdrop_texture,
+            0,
+            0,
+            origin,
+        );
+        blit.end_encoding();
+        true
+    }
+
     fn draw_primitives(
         &mut self,
         scene: &Scene,
@@ -548,20 +627,50 @@ impl MetalRenderer {
 
         for batch in scene.batches() {
             let ok = match batch {
-                PrimitiveBatch::Shadows(shadows) => self.draw_shadows(
+                PrimitiveBatch::Shadows(shadows, transforms) => self.draw_shadows(
                     shadows,
+                    transforms,
                     instance_buffer,
                     &mut instance_offset,
                     viewport_size,
                     command_encoder,
                 ),
-                PrimitiveBatch::Quads(quads) => self.draw_quads(
+                PrimitiveBatch::Quads(quads, transforms) => self.draw_quads(
                     quads,
+                    transforms,
                     instance_buffer,
                     &mut instance_offset,
                     viewport_size,
                     command_encoder,
                 ),
+                PrimitiveBatch::BackdropBlurs(blurs, transforms) => {
+                    command_encoder.end_encoding();
+
+                    let did_copy =
+                        self.copy_drawable_to_backdrop(drawable, viewport_size, command_buffer);
+
+                    command_encoder = new_command_encoder(
+                        command_buffer,
+                        drawable,
+                        viewport_size,
+                        |color_attachment| {
+                            color_attachment.set_load_action(metal::MTLLoadAction::Load);
+                        },
+                    );
+
+                    if did_copy {
+                        self.draw_backdrop_blurs(
+                            blurs,
+                            transforms,
+                            instance_buffer,
+                            &mut instance_offset,
+                            viewport_size,
+                            command_encoder,
+                        )
+                    } else {
+                        false
+                    }
+                }
                 PrimitiveBatch::Paths(paths) => {
                     command_encoder.end_encoding();
 
@@ -594,8 +703,9 @@ impl MetalRenderer {
                         false
                     }
                 }
-                PrimitiveBatch::Underlines(underlines) => self.draw_underlines(
+                PrimitiveBatch::Underlines(underlines, transforms) => self.draw_underlines(
                     underlines,
+                    transforms,
                     instance_buffer,
                     &mut instance_offset,
                     viewport_size,
@@ -615,9 +725,11 @@ impl MetalRenderer {
                 PrimitiveBatch::PolychromeSprites {
                     texture_id,
                     sprites,
+                    transforms,
                 } => self.draw_polychrome_sprites(
                     texture_id,
                     sprites,
+                    transforms,
                     instance_buffer,
                     &mut instance_offset,
                     viewport_size,
@@ -635,10 +747,11 @@ impl MetalRenderer {
             if !ok {
                 command_encoder.end_encoding();
                 anyhow::bail!(
-                    "scene too large: {} paths, {} shadows, {} quads, {} underlines, {} mono, {} poly, {} surfaces",
+                    "scene too large: {} paths, {} shadows, {} quads, {} blurs, {} underlines, {} mono, {} poly, {} surfaces",
                     scene.paths.len(),
                     scene.shadows.len(),
                     scene.quads.len(),
+                    scene.backdrop_blurs.len(),
                     scene.underlines.len(),
                     scene.monochrome_sprites.len(),
                     scene.polychrome_sprites.len(),
@@ -745,6 +858,7 @@ impl MetalRenderer {
     fn draw_shadows(
         &self,
         shadows: &[Shadow],
+        shadow_transforms: &[TransformationMatrix],
         instance_buffer: &mut InstanceBuffer,
         instance_offset: &mut usize,
         viewport_size: Size<DevicePixels>,
@@ -753,6 +867,7 @@ impl MetalRenderer {
         if shadows.is_empty() {
             return true;
         }
+        debug_assert_eq!(shadows.len(), shadow_transforms.len());
         align_offset(instance_offset);
 
         command_encoder.set_render_pipeline_state(&self.shadows_pipeline_state);
@@ -761,16 +876,7 @@ impl MetalRenderer {
             Some(&self.unit_vertices),
             0,
         );
-        command_encoder.set_vertex_buffer(
-            ShadowInputIndex::Shadows as u64,
-            Some(&instance_buffer.metal_buffer),
-            *instance_offset as u64,
-        );
-        command_encoder.set_fragment_buffer(
-            ShadowInputIndex::Shadows as u64,
-            Some(&instance_buffer.metal_buffer),
-            *instance_offset as u64,
-        );
+        let shadows_offset = *instance_offset;
 
         command_encoder.set_vertex_bytes(
             ShadowInputIndex::ViewportSize as u64,
@@ -779,19 +885,52 @@ impl MetalRenderer {
         );
 
         let shadow_bytes_len = mem::size_of_val(shadows);
-        let buffer_contents =
-            unsafe { (instance_buffer.metal_buffer.contents() as *mut u8).add(*instance_offset) };
-
-        let next_offset = *instance_offset + shadow_bytes_len;
+        let mut transforms_offset = shadows_offset + shadow_bytes_len;
+        align_offset(&mut transforms_offset);
+        let transform_bytes_len = mem::size_of_val(shadow_transforms);
+        let next_offset = transforms_offset + transform_bytes_len;
         if next_offset > instance_buffer.size {
             return false;
         }
 
+        command_encoder.set_vertex_buffer(
+            ShadowInputIndex::Shadows as u64,
+            Some(&instance_buffer.metal_buffer),
+            shadows_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            ShadowInputIndex::Shadows as u64,
+            Some(&instance_buffer.metal_buffer),
+            shadows_offset as u64,
+        );
+        command_encoder.set_vertex_buffer(
+            ShadowInputIndex::Transforms as u64,
+            Some(&instance_buffer.metal_buffer),
+            transforms_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            ShadowInputIndex::Transforms as u64,
+            Some(&instance_buffer.metal_buffer),
+            transforms_offset as u64,
+        );
+
+        let shadow_contents = unsafe {
+            (instance_buffer.metal_buffer.contents() as *mut u8).add(shadows_offset)
+        };
+        let transform_contents = unsafe {
+            (instance_buffer.metal_buffer.contents() as *mut u8).add(transforms_offset)
+        };
+
         unsafe {
             ptr::copy_nonoverlapping(
                 shadows.as_ptr() as *const u8,
-                buffer_contents,
+                shadow_contents,
                 shadow_bytes_len,
+            );
+            ptr::copy_nonoverlapping(
+                shadow_transforms.as_ptr() as *const u8,
+                transform_contents,
+                transform_bytes_len,
             );
         }
 
@@ -808,6 +947,7 @@ impl MetalRenderer {
     fn draw_quads(
         &self,
         quads: &[Quad],
+        quad_transforms: &[TransformationMatrix],
         instance_buffer: &mut InstanceBuffer,
         instance_offset: &mut usize,
         viewport_size: Size<DevicePixels>,
@@ -816,6 +956,7 @@ impl MetalRenderer {
         if quads.is_empty() {
             return true;
         }
+        debug_assert_eq!(quads.len(), quad_transforms.len());
         align_offset(instance_offset);
 
         command_encoder.set_render_pipeline_state(&self.quads_pipeline_state);
@@ -824,16 +965,7 @@ impl MetalRenderer {
             Some(&self.unit_vertices),
             0,
         );
-        command_encoder.set_vertex_buffer(
-            QuadInputIndex::Quads as u64,
-            Some(&instance_buffer.metal_buffer),
-            *instance_offset as u64,
-        );
-        command_encoder.set_fragment_buffer(
-            QuadInputIndex::Quads as u64,
-            Some(&instance_buffer.metal_buffer),
-            *instance_offset as u64,
-        );
+        let quads_offset = *instance_offset;
 
         command_encoder.set_vertex_bytes(
             QuadInputIndex::ViewportSize as u64,
@@ -842,16 +974,47 @@ impl MetalRenderer {
         );
 
         let quad_bytes_len = mem::size_of_val(quads);
-        let buffer_contents =
-            unsafe { (instance_buffer.metal_buffer.contents() as *mut u8).add(*instance_offset) };
-
-        let next_offset = *instance_offset + quad_bytes_len;
+        let mut transforms_offset = quads_offset + quad_bytes_len;
+        align_offset(&mut transforms_offset);
+        let transform_bytes_len = mem::size_of_val(quad_transforms);
+        let next_offset = transforms_offset + transform_bytes_len;
         if next_offset > instance_buffer.size {
             return false;
         }
 
+        command_encoder.set_vertex_buffer(
+            QuadInputIndex::Quads as u64,
+            Some(&instance_buffer.metal_buffer),
+            quads_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            QuadInputIndex::Quads as u64,
+            Some(&instance_buffer.metal_buffer),
+            quads_offset as u64,
+        );
+        command_encoder.set_vertex_buffer(
+            QuadInputIndex::Transforms as u64,
+            Some(&instance_buffer.metal_buffer),
+            transforms_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            QuadInputIndex::Transforms as u64,
+            Some(&instance_buffer.metal_buffer),
+            transforms_offset as u64,
+        );
+
         unsafe {
-            ptr::copy_nonoverlapping(quads.as_ptr() as *const u8, buffer_contents, quad_bytes_len);
+            let quad_contents =
+                (instance_buffer.metal_buffer.contents() as *mut u8).add(quads_offset);
+            ptr::copy_nonoverlapping(quads.as_ptr() as *const u8, quad_contents, quad_bytes_len);
+
+            let transform_contents =
+                (instance_buffer.metal_buffer.contents() as *mut u8).add(transforms_offset);
+            ptr::copy_nonoverlapping(
+                quad_transforms.as_ptr() as *const u8,
+                transform_contents,
+                transform_bytes_len,
+            );
         }
 
         command_encoder.draw_primitives_instanced(
@@ -859,6 +1022,103 @@ impl MetalRenderer {
             0,
             6,
             quads.len() as u64,
+        );
+        *instance_offset = next_offset;
+        true
+    }
+
+    fn draw_backdrop_blurs(
+        &self,
+        blurs: &[BackdropBlur],
+        blur_transforms: &[TransformationMatrix],
+        instance_buffer: &mut InstanceBuffer,
+        instance_offset: &mut usize,
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+    ) -> bool {
+        if blurs.is_empty() {
+            return true;
+        }
+        debug_assert_eq!(blurs.len(), blur_transforms.len());
+        align_offset(instance_offset);
+
+        let Some(backdrop_texture) = &self.backdrop_texture else {
+            return false;
+        };
+
+        command_encoder.set_render_pipeline_state(&self.backdrop_blurs_pipeline_state);
+        command_encoder.set_vertex_buffer(
+            BackdropBlurInputIndex::Vertices as u64,
+            Some(&self.unit_vertices),
+            0,
+        );
+        let blurs_offset = *instance_offset;
+
+        command_encoder.set_vertex_bytes(
+            BackdropBlurInputIndex::ViewportSize as u64,
+            mem::size_of_val(&viewport_size) as u64,
+            &viewport_size as *const Size<DevicePixels> as *const _,
+        );
+        command_encoder.set_fragment_bytes(
+            BackdropBlurInputIndex::ViewportSize as u64,
+            mem::size_of_val(&viewport_size) as u64,
+            &viewport_size as *const Size<DevicePixels> as *const _,
+        );
+
+        command_encoder.set_fragment_texture(
+            BackdropBlurInputIndex::BackdropTexture as u64,
+            Some(backdrop_texture),
+        );
+
+        let blur_bytes_len = mem::size_of_val(blurs);
+        let mut transforms_offset = blurs_offset + blur_bytes_len;
+        align_offset(&mut transforms_offset);
+        let transform_bytes_len = mem::size_of_val(blur_transforms);
+        let next_offset = transforms_offset + transform_bytes_len;
+        if next_offset > instance_buffer.size {
+            return false;
+        }
+
+        command_encoder.set_vertex_buffer(
+            BackdropBlurInputIndex::BackdropBlurs as u64,
+            Some(&instance_buffer.metal_buffer),
+            blurs_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            BackdropBlurInputIndex::BackdropBlurs as u64,
+            Some(&instance_buffer.metal_buffer),
+            blurs_offset as u64,
+        );
+        command_encoder.set_vertex_buffer(
+            BackdropBlurInputIndex::Transforms as u64,
+            Some(&instance_buffer.metal_buffer),
+            transforms_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            BackdropBlurInputIndex::Transforms as u64,
+            Some(&instance_buffer.metal_buffer),
+            transforms_offset as u64,
+        );
+
+        unsafe {
+            let blur_contents =
+                (instance_buffer.metal_buffer.contents() as *mut u8).add(blurs_offset);
+            ptr::copy_nonoverlapping(blurs.as_ptr() as *const u8, blur_contents, blur_bytes_len);
+
+            let transform_contents =
+                (instance_buffer.metal_buffer.contents() as *mut u8).add(transforms_offset);
+            ptr::copy_nonoverlapping(
+                blur_transforms.as_ptr() as *const u8,
+                transform_contents,
+                transform_bytes_len,
+            );
+        }
+
+        command_encoder.draw_primitives_instanced(
+            metal::MTLPrimitiveType::Triangle,
+            0,
+            6,
+            blurs.len() as u64,
         );
         *instance_offset = next_offset;
         true
@@ -957,6 +1217,7 @@ impl MetalRenderer {
     fn draw_underlines(
         &self,
         underlines: &[Underline],
+        underline_transforms: &[TransformationMatrix],
         instance_buffer: &mut InstanceBuffer,
         instance_offset: &mut usize,
         viewport_size: Size<DevicePixels>,
@@ -965,6 +1226,7 @@ impl MetalRenderer {
         if underlines.is_empty() {
             return true;
         }
+        debug_assert_eq!(underlines.len(), underline_transforms.len());
         align_offset(instance_offset);
 
         command_encoder.set_render_pipeline_state(&self.underlines_pipeline_state);
@@ -973,16 +1235,7 @@ impl MetalRenderer {
             Some(&self.unit_vertices),
             0,
         );
-        command_encoder.set_vertex_buffer(
-            UnderlineInputIndex::Underlines as u64,
-            Some(&instance_buffer.metal_buffer),
-            *instance_offset as u64,
-        );
-        command_encoder.set_fragment_buffer(
-            UnderlineInputIndex::Underlines as u64,
-            Some(&instance_buffer.metal_buffer),
-            *instance_offset as u64,
-        );
+        let underlines_offset = *instance_offset;
 
         command_encoder.set_vertex_bytes(
             UnderlineInputIndex::ViewportSize as u64,
@@ -991,19 +1244,50 @@ impl MetalRenderer {
         );
 
         let underline_bytes_len = mem::size_of_val(underlines);
-        let buffer_contents =
-            unsafe { (instance_buffer.metal_buffer.contents() as *mut u8).add(*instance_offset) };
-
-        let next_offset = *instance_offset + underline_bytes_len;
+        let mut transforms_offset = underlines_offset + underline_bytes_len;
+        align_offset(&mut transforms_offset);
+        let transform_bytes_len = mem::size_of_val(underline_transforms);
+        let next_offset = transforms_offset + transform_bytes_len;
         if next_offset > instance_buffer.size {
             return false;
         }
 
+        command_encoder.set_vertex_buffer(
+            UnderlineInputIndex::Underlines as u64,
+            Some(&instance_buffer.metal_buffer),
+            underlines_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            UnderlineInputIndex::Underlines as u64,
+            Some(&instance_buffer.metal_buffer),
+            underlines_offset as u64,
+        );
+        command_encoder.set_vertex_buffer(
+            UnderlineInputIndex::Transforms as u64,
+            Some(&instance_buffer.metal_buffer),
+            transforms_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            UnderlineInputIndex::Transforms as u64,
+            Some(&instance_buffer.metal_buffer),
+            transforms_offset as u64,
+        );
+
         unsafe {
+            let underline_contents =
+                (instance_buffer.metal_buffer.contents() as *mut u8).add(underlines_offset);
             ptr::copy_nonoverlapping(
                 underlines.as_ptr() as *const u8,
-                buffer_contents,
+                underline_contents,
                 underline_bytes_len,
+            );
+
+            let transform_contents =
+                (instance_buffer.metal_buffer.contents() as *mut u8).add(transforms_offset);
+            ptr::copy_nonoverlapping(
+                underline_transforms.as_ptr() as *const u8,
+                transform_contents,
+                transform_bytes_len,
             );
         }
 
@@ -1095,6 +1379,7 @@ impl MetalRenderer {
         &self,
         texture_id: AtlasTextureId,
         sprites: &[PolychromeSprite],
+        sprite_transforms: &[TransformationMatrix],
         instance_buffer: &mut InstanceBuffer,
         instance_offset: &mut usize,
         viewport_size: Size<DevicePixels>,
@@ -1103,6 +1388,7 @@ impl MetalRenderer {
         if sprites.is_empty() {
             return true;
         }
+        debug_assert_eq!(sprites.len(), sprite_transforms.len());
         align_offset(instance_offset);
 
         let texture = self.sprite_atlas.metal_texture(texture_id);
@@ -1139,19 +1425,41 @@ impl MetalRenderer {
         command_encoder.set_fragment_texture(SpriteInputIndex::AtlasTexture as u64, Some(&texture));
 
         let sprite_bytes_len = mem::size_of_val(sprites);
-        let buffer_contents =
-            unsafe { (instance_buffer.metal_buffer.contents() as *mut u8).add(*instance_offset) };
-
-        let next_offset = *instance_offset + sprite_bytes_len;
+        let sprites_offset = *instance_offset;
+        let mut transforms_offset = sprites_offset + sprite_bytes_len;
+        align_offset(&mut transforms_offset);
+        let transform_bytes_len = mem::size_of_val(sprite_transforms);
+        let next_offset = transforms_offset + transform_bytes_len;
         if next_offset > instance_buffer.size {
             return false;
         }
 
+        command_encoder.set_vertex_buffer(
+            SpriteInputIndex::Transforms as u64,
+            Some(&instance_buffer.metal_buffer),
+            transforms_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            SpriteInputIndex::Transforms as u64,
+            Some(&instance_buffer.metal_buffer),
+            transforms_offset as u64,
+        );
+
         unsafe {
+            let sprite_contents =
+                (instance_buffer.metal_buffer.contents() as *mut u8).add(sprites_offset);
             ptr::copy_nonoverlapping(
                 sprites.as_ptr() as *const u8,
-                buffer_contents,
+                sprite_contents,
                 sprite_bytes_len,
+            );
+
+            let transform_contents =
+                (instance_buffer.metal_buffer.contents() as *mut u8).add(transforms_offset);
+            ptr::copy_nonoverlapping(
+                sprite_transforms.as_ptr() as *const u8,
+                transform_contents,
+                transform_bytes_len,
             );
         }
 
@@ -1409,6 +1717,7 @@ enum ShadowInputIndex {
     Vertices = 0,
     Shadows = 1,
     ViewportSize = 2,
+    Transforms = 3,
 }
 
 #[repr(C)]
@@ -1416,6 +1725,16 @@ enum QuadInputIndex {
     Vertices = 0,
     Quads = 1,
     ViewportSize = 2,
+    Transforms = 3,
+}
+
+#[repr(C)]
+enum BackdropBlurInputIndex {
+    Vertices = 0,
+    BackdropBlurs = 1,
+    ViewportSize = 2,
+    BackdropTexture = 3,
+    Transforms = 4,
 }
 
 #[repr(C)]
@@ -1423,6 +1742,7 @@ enum UnderlineInputIndex {
     Vertices = 0,
     Underlines = 1,
     ViewportSize = 2,
+    Transforms = 3,
 }
 
 #[repr(C)]
@@ -1432,6 +1752,7 @@ enum SpriteInputIndex {
     ViewportSize = 2,
     AtlasTextureSize = 3,
     AtlasTexture = 4,
+    Transforms = 5,
 }
 
 #[repr(C)]

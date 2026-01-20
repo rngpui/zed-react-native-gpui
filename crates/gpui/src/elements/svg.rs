@@ -248,13 +248,13 @@ impl Transformation {
         self
     }
 
-    fn into_matrix(self, center: Point<Pixels>, scale_factor: f32) -> TransformationMatrix {
+    fn into_matrix(self, center: Point<Pixels>, _scale_factor: f32) -> TransformationMatrix {
         //Note: if you read this as a sequence of matrix multiplications, start from the bottom
         TransformationMatrix::unit()
-            .translate(center.scale(scale_factor) + self.translate.scale(scale_factor))
+            .translate(center + self.translate)
             .rotate(self.rotate)
             .scale(self.scale)
-            .translate(center.scale(scale_factor).negate())
+            .translate(center.negate())
     }
 }
 

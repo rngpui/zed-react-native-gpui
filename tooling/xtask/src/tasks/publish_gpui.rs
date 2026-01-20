@@ -18,7 +18,7 @@ pub struct PublishGpuiArgs {
 
 pub fn run_publish_gpui(args: PublishGpuiArgs) -> Result<()> {
     println!(
-        "Starting GPUI publish process{}...",
+        "Starting gpui_rn publish process{}...",
         if args.dry_run { " (with dry-run)" } else { "" }
     );
 
@@ -35,7 +35,7 @@ pub fn run_publish_gpui(args: PublishGpuiArgs) -> Result<()> {
     println!("Updating GPUI to version: {}", version);
     publish_dependencies(&version, args.dry_run, args.skip_to.as_deref())?;
     publish_gpui(&version, args.dry_run)?;
-    println!("GPUI published in {}s", start_time.elapsed().as_secs_f32());
+    println!("gpui_rn published in {}s", start_time.elapsed().as_secs_f32());
     Ok(())
 }
 
@@ -57,22 +57,22 @@ fn read_gpui_version() -> Result<String> {
 }
 
 fn publish_dependencies(new_version: &str, dry_run: bool, skip_to: Option<&str>) -> Result<()> {
+    // Publish as gpui_rn_* for React Native GPUI fork
     let gpui_dependencies = vec![
-        ("collections", "gpui_collections", "crates"),
-        ("perf", "gpui_perf", "tooling"),
-        ("util_macros", "gpui_util_macros", "crates"),
-        ("util", "gpui_util", "crates"),
-        ("gpui_macros", "gpui-macros", "crates"),
-        ("http_client", "gpui_http_client", "crates"),
+        ("collections", "gpui_rn_collections", "crates"),
+        ("perf", "gpui_rn_perf", "tooling"),
+        ("util_macros", "gpui_rn_util_macros", "crates"),
+        ("util", "gpui_rn_util", "crates"),
+        ("gpui_macros", "gpui_rn_macros", "crates"),
+        ("http_client", "gpui_rn_http_client", "crates"),
         (
             "derive_refineable",
-            "gpui_derive_refineable",
+            "gpui_rn_derive_refineable",
             "crates/refineable",
         ),
-        ("refineable", "gpui_refineable", "crates"),
-        ("semantic_version", "gpui_semantic_version", "crates"),
-        ("sum_tree", "gpui_sum_tree", "crates"),
-        ("media", "gpui_media", "crates"),
+        ("refineable", "gpui_rn_refineable", "crates"),
+        ("sum_tree", "gpui_rn_sum_tree", "crates"),
+        ("media", "gpui_rn_media", "crates"),
     ];
 
     let mut should_skip = skip_to.is_some();
@@ -110,9 +110,10 @@ fn publish_dependencies(new_version: &str, dry_run: bool, skip_to: Option<&str>)
 }
 
 fn publish_gpui(new_version: &str, dry_run: bool) -> Result<()> {
-    update_crate_cargo_toml("gpui", "gpui", "crates", new_version)?;
+    // Publish as gpui_rn for React Native GPUI fork
+    update_crate_cargo_toml("gpui", "gpui_rn", "crates", new_version)?;
 
-    publish_crate("gpui", dry_run)?;
+    publish_crate("gpui_rn", dry_run)?;
 
     Ok(())
 }
@@ -355,7 +356,7 @@ mod tests {
 
         let mut doc = input.parse::<toml_edit::DocumentMut>().unwrap();
 
-        update_dependency_version_in_doc(&mut doc, "collections", "gpui_collections", "0.2.0")
+        update_dependency_version_in_doc(&mut doc, "collections", "gpui_rn_collections", "0.2.0")
             .unwrap();
 
         let result = doc.to_string();
@@ -366,7 +367,7 @@ mod tests {
 
             [workspace.dependencies]
             # here's a comment
-            collections = { path = "crates/collections" , version = "0.2.0", package = "gpui_collections" }
+            collections = { path = "crates/collections" , version = "0.2.0", package = "gpui_rn_collections" }
 
             util = { path = "crates/util", package = "zed-util", version = "0.1.0" }
         "#};
@@ -389,11 +390,11 @@ mod tests {
             serde = "1.0"
         "#};
 
-        let result = update_crate_package_fields(input, "gpui_collections", "0.2.0").unwrap();
+        let result = update_crate_package_fields(input, "gpui_rn_collections", "0.2.0").unwrap();
 
         let output = indoc! {r#"
             [package]
-            name = "gpui_collections"
+            name = "gpui_rn_collections"
             version = "0.2.0"
             edition = "2021"
             publish = true
@@ -422,7 +423,7 @@ mod tests {
 
         let mut doc = input.parse::<toml_edit::DocumentMut>().unwrap();
 
-        update_profile_override_in_doc(&mut doc, "collections", "gpui_collections").unwrap();
+        update_profile_override_in_doc(&mut doc, "collections", "gpui_rn_collections").unwrap();
 
         let result = doc.to_string();
 
@@ -434,7 +435,7 @@ mod tests {
             taffy = { opt-level = 3 }
             refineable = { codegen-units = 256 }
             util = { codegen-units = 256 }
-            gpui_collections = { codegen-units = 256 }
+            gpui_rn_collections = { codegen-units = 256 }
         "#};
 
         assert_eq!(result, output);

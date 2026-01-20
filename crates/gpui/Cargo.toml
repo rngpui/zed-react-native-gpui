@@ -1,10 +1,10 @@
 [package]
-name = "gpui"
-version = "0.2.2"
+name = "gpui_rn"
+version = "0.1.1"
 edition.workspace = true
-authors = ["Nathan Sobo <nathan@zed.dev>"]
-description = "Zed's GPU-accelerated UI framework"
-repository = "https://github.com/zed-industries/zed"
+authors = ["Nathan Sobo <nathan@zed.dev>", "Madeline Lane <maddythewisp@gmail.com>"]
+description = "Zed's GPU-accelerated UI framework (fork for React Native GPUI)"
+repository = "https://github.com/rngpui/zed-react-native-gpui"
 publish = true
 license = "Apache-2.0"
 homepage = "https://gpui.rs"
@@ -18,6 +18,7 @@ workspace = true
 
 [features]
 default = ["font-kit", "wayland", "x11", "windows-manifest"]
+diagnostics = []
 test-support = [
     "leak-detection",
     "collections/test-support",
@@ -80,6 +81,7 @@ screen-capture = [
 windows-manifest = []
 
 [lib]
+name = "gpui"
 path = "src/gpui.rs"
 doctest = false
 
@@ -87,11 +89,12 @@ doctest = false
 anyhow.workspace = true
 async-task = "4.7"
 backtrace = { workspace = true, optional = true }
+base64.workspace = true
 bitflags = { workspace = true, optional = true }
 blade-graphics = { workspace = true, optional = true }
 blade-macros = { workspace = true, optional = true }
 blade-util = { workspace = true, optional = true }
-bytemuck = { version = "1", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
 collections.workspace = true
 ctor.workspace = true
 derive_more.workspace = true
@@ -181,7 +184,6 @@ ashpd = { workspace = true, optional = true }
 blade-graphics = { workspace = true, optional = true }
 blade-macros = { workspace = true, optional = true }
 blade-util = { workspace = true, optional = true }
-bytemuck = { version = "1", optional = true }
 cosmic-text = { version = "0.14.0", optional = true }
 swash = { version = "0.2.6" }
 # WARNING: If you change this, you must also publish a new version of zed-font-kit to crates.io

@@ -13,12 +13,13 @@ dependencies = [
  "base64 0.22.1",
  "buffer_diff",
  "chrono",
- "collections",
  "editor",
  "env_logger 0.11.8",
  "file_icons",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "image",
  "indoc",
  "itertools 0.14.0",
@@ -41,7 +42,6 @@ dependencies = [
  "ui",
  "url",
  "urlencoding",
- "util",
  "uuid",
  "watch",
  "zlog",
@@ -52,8 +52,9 @@ name = "acp_tools"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
- "collections",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "markdown",
  "project",
@@ -62,7 +63,6 @@ dependencies = [
  "settings",
  "theme",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -73,10 +73,11 @@ dependencies = [
  "anyhow",
  "buffer_diff",
  "clock",
- "collections",
  "ctor",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "language",
  "log",
@@ -87,7 +88,6 @@ dependencies = [
  "settings",
  "telemetry",
  "text",
- "util",
  "watch",
  "zlog",
 ]
@@ -102,7 +102,8 @@ dependencies = [
  "extension_host",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "language",
  "project",
  "proto",
@@ -110,7 +111,6 @@ dependencies = [
  "semver",
  "smallvec",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -164,7 +164,6 @@ dependencies = [
  "client",
  "clock",
  "cloud_llm_client",
- "collections",
  "context_server",
  "ctor",
  "db",
@@ -176,11 +175,13 @@ dependencies = [
  "fs",
  "futures 0.3.31",
  "git",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
  "handlebars 4.5.0",
  "html_to_markdown",
- "http_client",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -218,7 +219,6 @@ dependencies = [
  "ui",
  "unindent",
  "url",
- "util",
  "uuid",
  "watch",
  "web_search",
@@ -271,14 +271,15 @@ dependencies = [
  "async-trait",
  "chrono",
  "client",
- "collections",
  "env_logger 0.11.8",
  "feature_flags",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "indoc",
  "language",
  "language_model",
@@ -297,7 +298,6 @@ dependencies = [
  "terminal",
  "thiserror 2.0.17",
  "ui",
- "util",
  "uuid",
  "watch",
 ]
@@ -308,10 +308,11 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
- "collections",
  "convert_case 0.8.0",
  "fs",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language_model",
  "log",
  "paths",
@@ -322,7 +323,6 @@ dependencies = [
  "serde_json",
  "serde_json_lenient",
  "settings",
- "util",
 ]
 
 [[package]]
@@ -349,7 +349,6 @@ dependencies = [
  "client",
  "clock",
  "cloud_llm_client",
- "collections",
  "command_palette_hooks",
  "component",
  "context_server",
@@ -364,10 +363,12 @@ dependencies = [
  "futures 0.3.31",
  "fuzzy",
  "git_ui",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
  "html_to_markdown",
- "http_client",
  "image",
  "indoc",
  "itertools 0.14.0",
@@ -420,7 +421,6 @@ dependencies = [
  "ui_input",
  "unindent",
  "url",
- "util",
  "uuid",
  "watch",
  "workspace",
@@ -441,7 +441,8 @@ dependencies = [
  "db",
  "feature_flags",
  "fs",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "log",
  "project",
  "prompt_store",
@@ -449,7 +450,6 @@ dependencies = [
  "serde_json",
  "settings",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -495,7 +495,7 @@ dependencies = [
  "client",
  "cloud_llm_client",
  "component",
- "gpui",
+ "gpui_rn",
  "language_model",
  "serde",
  "smallvec",
@@ -678,7 +678,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "schemars",
  "serde",
  "serde_json",
@@ -808,12 +808,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "log",
  "net",
  "smol",
  "tempfile",
- "util",
  "windows 0.61.3",
  "zeroize",
 ]
@@ -823,7 +823,7 @@ name = "assets"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "gpui",
+ "gpui_rn",
  "rust-embed",
 ]
 
@@ -833,11 +833,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "collections",
  "derive_more 0.99.20",
  "extension",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "language_model",
  "parking_lot",
@@ -845,7 +846,6 @@ dependencies = [
  "serde",
  "serde_json",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -856,16 +856,17 @@ dependencies = [
  "anyhow",
  "assistant_slash_command",
  "chrono",
- "collections",
  "context_server",
  "editor",
  "feature_flags",
  "fs",
  "futures 0.3.31",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "html_to_markdown",
- "http_client",
  "language",
  "pretty_assertions",
  "project",
@@ -877,7 +878,6 @@ dependencies = [
  "smol",
  "text",
  "ui",
- "util",
  "workspace",
  "worktree",
  "zlog",
@@ -895,12 +895,13 @@ dependencies = [
  "client",
  "clock",
  "cloud_llm_client",
- "collections",
  "context_server",
  "fs",
  "futures 0.3.31",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -925,7 +926,6 @@ dependencies = [
  "text",
  "ui",
  "unindent",
- "util",
  "uuid",
  "workspace",
  "zed_env_vars",
@@ -1309,10 +1309,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-tar",
- "collections",
  "crossbeam",
  "denoise",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "libwebrtc",
  "log",
  "parking_lot",
@@ -1321,7 +1322,6 @@ dependencies = [
  "settings",
  "smol",
  "thiserror 2.0.17",
- "util",
 ]
 
 [[package]]
@@ -1346,8 +1346,9 @@ dependencies = [
  "ctor",
  "db",
  "futures 0.3.31",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "log",
  "parking_lot",
  "paths",
@@ -1358,7 +1359,6 @@ dependencies = [
  "settings",
  "smol",
  "tempfile",
- "util",
  "which 6.0.3",
  "workspace",
  "zlog",
@@ -1384,14 +1384,14 @@ dependencies = [
  "auto_update",
  "client",
  "editor",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "markdown_preview",
  "release_channel",
  "semver",
  "serde",
  "serde_json",
  "smol",
- "util",
  "workspace",
 ]
 
@@ -1910,7 +1910,7 @@ version = "0.1.0"
 dependencies = [
  "aws-smithy-runtime-api",
  "aws-smithy-types",
- "http_client",
+ "gpui_rn_http_client",
 ]
 
 [[package]]
@@ -2317,7 +2317,7 @@ name = "breadcrumbs"
 version = "0.1.0"
 dependencies = [
  "editor",
- "gpui",
+ "gpui_rn",
  "theme",
  "ui",
  "workspace",
@@ -2363,7 +2363,9 @@ dependencies = [
  "ctor",
  "futures 0.3.31",
  "git2",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "language",
  "log",
  "pretty_assertions",
@@ -2371,11 +2373,9 @@ dependencies = [
  "rope",
  "serde_json",
  "settings",
- "sum_tree",
  "text",
  "tracing",
  "unindent",
- "util",
  "zlog",
  "ztracing",
 ]
@@ -2547,13 +2547,14 @@ dependencies = [
  "anyhow",
  "audio",
  "client",
- "collections",
  "feature_flags",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "language",
  "livekit_client",
  "log",
@@ -2562,7 +2563,6 @@ dependencies = [
  "serde",
  "settings",
  "telemetry",
- "util",
 ]
 
 [[package]]
@@ -2860,10 +2860,11 @@ dependencies = [
  "anyhow",
  "client",
  "clock",
- "collections",
  "futures 0.3.31",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "language",
  "log",
  "postage",
@@ -2873,7 +2874,6 @@ dependencies = [
  "settings",
  "text",
  "time",
- "util",
 ]
 
 [[package]]
@@ -3019,11 +3019,12 @@ dependencies = [
  "anyhow",
  "askpass",
  "clap",
- "collections",
  "core-foundation 0.10.0",
  "core-services",
  "exec",
  "fork",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "ipc-channel",
  "parking_lot",
  "paths",
@@ -3033,7 +3034,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "util",
  "windows 0.61.3",
 ]
 
@@ -3048,15 +3048,16 @@ dependencies = [
  "clock",
  "cloud_api_client",
  "cloud_llm_client",
- "collections",
  "credentials_provider",
  "derive_more 0.99.20",
  "feature_flags",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "http_client_tls",
  "httparse",
  "log",
@@ -3087,7 +3088,6 @@ dependencies = [
  "tokio-rustls 0.26.2",
  "tokio-socks",
  "url",
- "util",
  "windows 0.61.3",
  "worktree",
 ]
@@ -3108,9 +3108,9 @@ dependencies = [
  "anyhow",
  "cloud_api_types",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_http_client",
  "gpui_tokio",
- "http_client",
  "parking_lot",
  "serde_json",
  "yawc",
@@ -3251,8 +3251,8 @@ dependencies = [
  "edit_prediction",
  "edit_prediction_types",
  "futures 0.3.31",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_http_client",
  "language",
  "language_models",
  "log",
@@ -3289,7 +3289,6 @@ dependencies = [
  "client",
  "clock",
  "collab_ui",
- "collections",
  "command_palette_hooks",
  "context_server",
  "ctor",
@@ -3307,10 +3306,12 @@ dependencies = [
  "git",
  "git_hosting_providers",
  "git_ui",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
  "hex",
- "http_client",
  "hyper 0.14.32",
  "indoc",
  "language",
@@ -3363,7 +3364,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unindent",
- "util",
  "uuid",
  "workspace",
  "worktree",
@@ -3379,13 +3379,14 @@ dependencies = [
  "channel",
  "chrono",
  "client",
- "collections",
  "db",
  "editor",
  "futures 0.3.31",
  "fuzzy",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "log",
  "menu",
  "notifications",
@@ -3406,16 +3407,7 @@ dependencies = [
  "title_bar",
  "tree-sitter-md",
  "ui",
- "util",
  "workspace",
-]
-
-[[package]]
-name = "collections"
-version = "0.1.0"
-dependencies = [
- "indexmap",
- "rustc-hash 2.1.1",
 ]
 
 [[package]]
@@ -3456,7 +3448,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "collections",
  "command_palette_hooks",
  "ctor",
  "db",
@@ -3464,7 +3455,9 @@ dependencies = [
  "env_logger 0.11.8",
  "fuzzy",
  "go_to_line",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "log",
  "menu",
@@ -3478,7 +3471,6 @@ dependencies = [
  "theme",
  "time",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -3487,9 +3479,9 @@ dependencies = [
 name = "command_palette_hooks"
 version = "0.1.0"
 dependencies = [
- "collections",
  "derive_more 0.99.20",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
  "workspace",
 ]
 
@@ -3497,9 +3489,9 @@ dependencies = [
 name = "component"
 version = "0.1.0"
 dependencies = [
- "collections",
  "documented",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
  "inventory",
  "parking_lot",
  "strum 0.27.2",
@@ -3512,11 +3504,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "collections",
  "component",
  "db",
  "fs",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
  "language",
  "log",
  "node_runtime",
@@ -3631,10 +3623,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "collections",
  "futures 0.3.31",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "log",
  "net",
  "parking_lot",
@@ -3648,7 +3641,6 @@ dependencies = [
  "tempfile",
  "terminal",
  "url",
- "util",
 ]
 
 [[package]]
@@ -3674,7 +3666,6 @@ dependencies = [
  "async-std",
  "client",
  "clock",
- "collections",
  "command_palette_hooks",
  "copilot_chat",
  "ctor",
@@ -3682,8 +3673,11 @@ dependencies = [
  "editor",
  "fs",
  "futures 0.3.31",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "indoc",
  "language",
  "log",
@@ -3697,9 +3691,7 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
- "sum_tree",
  "theme",
- "util",
  "zlog",
 ]
 
@@ -3709,12 +3701,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "collections",
  "dirs 4.0.0",
  "fs",
  "futures 0.3.31",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
  "itertools 0.14.0",
  "log",
  "paths",
@@ -3729,13 +3721,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "copilot",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "log",
  "lsp",
  "menu",
  "serde_json",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -4211,7 +4203,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
  "paths",
  "release_channel",
  "serde",
@@ -4477,12 +4469,13 @@ dependencies = [
  "async-tar",
  "async-trait",
  "client",
- "collections",
  "dap-types",
  "fs",
  "futures 0.3.31",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "language",
  "libc",
  "log",
@@ -4500,7 +4493,6 @@ dependencies = [
  "telemetry",
  "tree-sitter",
  "tree-sitter-go",
- "util",
  "zlog",
 ]
 
@@ -4520,13 +4512,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "collections",
  "dap",
  "dotenvy",
  "fs",
  "futures 0.3.31",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "json_dotpath",
  "language",
  "log",
@@ -4537,7 +4530,6 @@ dependencies = [
  "settings",
  "smol",
  "task",
- "util",
 ]
 
 [[package]]
@@ -4625,7 +4617,8 @@ name = "db"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "indoc",
  "log",
  "paths",
@@ -4634,7 +4627,6 @@ dependencies = [
  "sqlez",
  "sqlez_macros",
  "tempfile",
- "util",
  "zed_env_vars",
 ]
 
@@ -4655,13 +4647,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "collections",
  "dap",
  "extension",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "serde_json",
  "task",
- "util",
 ]
 
 [[package]]
@@ -4672,12 +4664,12 @@ dependencies = [
  "dap",
  "editor",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "project",
  "serde_json",
  "settings",
  "smol",
- "util",
  "workspace",
 ]
 
@@ -4689,7 +4681,6 @@ dependencies = [
  "anyhow",
  "bitflags 2.9.4",
  "client",
- "collections",
  "command_palette_hooks",
  "dap",
  "dap_adapters",
@@ -4700,7 +4691,9 @@ dependencies = [
  "file_icons",
  "futures 0.3.31",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "hex",
  "indoc",
  "itertools 0.14.0",
@@ -4733,7 +4726,6 @@ dependencies = [
  "ui",
  "ui_input",
  "unindent",
- "util",
  "workspace",
  "zed_actions",
  "zlog",
@@ -4754,7 +4746,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "schemars",
  "serde",
  "serde_json",
@@ -4856,15 +4848,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive_refineable"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.106",
-]
-
-[[package]]
 name = "derive_setters"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4887,9 +4870,10 @@ name = "dev_container"
 version = "0.1.0"
 dependencies = [
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "http 1.3.1",
- "http_client",
  "log",
  "menu",
  "node_runtime",
@@ -4900,7 +4884,6 @@ dependencies = [
  "settings",
  "smol",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -4910,11 +4893,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "collections",
  "component",
  "ctor",
  "editor",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -4932,7 +4916,6 @@ dependencies = [
  "theme",
  "ui",
  "unindent",
- "util",
  "workspace",
  "zed_actions",
  "zlog",
@@ -5082,6 +5065,7 @@ name = "docs_preprocessor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "gpui_rn_util",
  "mdbook",
  "regex",
  "serde",
@@ -5089,7 +5073,6 @@ dependencies = [
  "settings",
  "task",
  "theme",
- "util",
  "zlog",
 ]
 
@@ -5251,7 +5234,6 @@ dependencies = [
  "clock",
  "cloud_api_types",
  "cloud_llm_client",
- "collections",
  "copilot",
  "copilot_ui",
  "ctor",
@@ -5261,7 +5243,9 @@ dependencies = [
  "feature_flags",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -5290,7 +5274,6 @@ dependencies = [
  "time",
  "toml 0.8.23",
  "ui",
- "util",
  "uuid",
  "workspace",
  "worktree",
@@ -5309,7 +5292,6 @@ dependencies = [
  "clap",
  "client",
  "cloud_llm_client",
- "collections",
  "debug_adapter_extension",
  "dirs 4.0.0",
  "edit_prediction",
@@ -5317,9 +5299,11 @@ dependencies = [
  "flate2",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "indoc",
  "language",
  "language_extension",
@@ -5346,7 +5330,6 @@ dependencies = [
  "sqlez_macros",
  "tempfile",
  "terminal_view",
- "util",
  "wasmtime",
  "watch",
  "workspace",
@@ -5359,10 +5342,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clock",
- "collections",
  "env_logger 0.11.8",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "language",
  "log",
@@ -5376,7 +5360,6 @@ dependencies = [
  "smallvec",
  "text",
  "tree-sitter",
- "util",
  "zeta_prompt",
  "zlog",
 ]
@@ -5386,7 +5369,7 @@ name = "edit_prediction_types"
 version = "0.1.0"
 dependencies = [
  "client",
- "gpui",
+ "gpui_rn",
  "language",
  "text",
 ]
@@ -5401,7 +5384,6 @@ dependencies = [
  "clock",
  "cloud_llm_client",
  "codestral",
- "collections",
  "command_palette_hooks",
  "copilot",
  "copilot_chat",
@@ -5412,7 +5394,9 @@ dependencies = [
  "feature_flags",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "language",
  "language_model",
@@ -5434,7 +5418,6 @@ dependencies = [
  "theme",
  "time",
  "ui",
- "util",
  "workspace",
  "zed_actions",
  "zeta_prompt",
@@ -5451,7 +5434,6 @@ dependencies = [
  "buffer_diff",
  "client",
  "clock",
- "collections",
  "convert_case 0.8.0",
  "criterion",
  "ctor",
@@ -5465,8 +5447,11 @@ dependencies = [
  "futures 0.3.31",
  "fuzzy",
  "git",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -5494,7 +5479,6 @@ dependencies = [
  "smallvec",
  "smol",
  "snippet",
- "sum_tree",
  "task",
  "telemetry",
  "tempfile",
@@ -5515,7 +5499,6 @@ dependencies = [
  "unicode-segmentation",
  "unindent",
  "url",
- "util",
  "uuid",
  "vim_mode_setting",
  "workspace",
@@ -5630,7 +5613,7 @@ version = "0.1.0"
 dependencies = [
  "editor",
  "encoding_rs",
- "gpui",
+ "gpui_rn",
  "ui",
  "workspace",
 ]
@@ -5832,7 +5815,6 @@ dependencies = [
  "chrono",
  "clap",
  "client",
- "collections",
  "debug_adapter_extension",
  "dirs 4.0.0",
  "dotenvy",
@@ -5840,7 +5822,9 @@ dependencies = [
  "extension",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "gpui_tokio",
  "handlebars 4.5.0",
  "language",
@@ -5867,7 +5851,6 @@ dependencies = [
  "terminal_view",
  "toml 0.8.23",
  "unindent",
- "util",
  "uuid",
  "watch",
 ]
@@ -5876,7 +5859,7 @@ dependencies = [
 name = "eval_utils"
 version = "0.1.0"
 dependencies = [
- "gpui",
+ "gpui_rn",
  "serde",
  "smol",
 ]
@@ -5954,13 +5937,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "collections",
  "dap",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "heck 0.5.0",
- "http_client",
  "indoc",
  "language",
  "log",
@@ -5976,7 +5960,6 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "url",
- "util",
  "wasm-encoder 0.221.3",
  "wasmparser 0.221.3",
  "ztracing",
@@ -5991,7 +5974,7 @@ dependencies = [
  "env_logger 0.11.8",
  "extension",
  "fs",
- "gpui",
+ "gpui_rn",
  "language",
  "log",
  "reqwest_client",
@@ -6014,16 +5997,17 @@ dependencies = [
  "async-tar",
  "async-trait",
  "client",
- "collections",
  "criterion",
  "ctor",
  "dap",
  "extension",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "language",
  "language_extension",
  "log",
@@ -6050,7 +6034,6 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "url",
- "util",
  "wasmparser 0.221.3",
  "wasmtime",
  "wasmtime-wasi",
@@ -6064,14 +6047,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "collections",
  "db",
  "editor",
  "extension",
  "extension_host",
  "fs",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "log",
  "num-format",
@@ -6086,7 +6070,6 @@ dependencies = [
  "telemetry",
  "theme",
  "ui",
- "util",
  "vim_mode_setting",
  "workspace",
  "zed_actions",
@@ -6175,7 +6158,7 @@ name = "feature_flags"
 version = "0.1.0"
 dependencies = [
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
 ]
 
 [[package]]
@@ -6183,10 +6166,10 @@ name = "feedback"
 version = "0.1.0"
 dependencies = [
  "editor",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "system_specs",
  "urlencoding",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -6206,13 +6189,14 @@ name = "file_finder"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "ctor",
  "editor",
  "file_icons",
  "futures 0.3.31",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "menu",
  "picker",
@@ -6226,7 +6210,6 @@ dependencies = [
  "text",
  "theme",
  "ui",
- "util",
  "workspace",
  "zlog",
 ]
@@ -6235,10 +6218,10 @@ dependencies = [
 name = "file_icons"
 version = "0.1.0"
 dependencies = [
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "serde",
  "theme",
- "util",
 ]
 
 [[package]]
@@ -6493,11 +6476,12 @@ dependencies = [
  "async-tar",
  "async-trait",
  "cocoa 0.26.0",
- "collections",
  "fsevent",
  "futures 0.3.31",
  "git",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "ignore",
  "is_executable",
  "libc",
@@ -6514,7 +6498,6 @@ dependencies = [
  "tempfile",
  "text",
  "time",
- "util",
  "windows 0.61.3",
 ]
 
@@ -6544,7 +6527,7 @@ name = "fs_benchmarks"
 version = "0.1.0"
 dependencies = [
  "fs",
- "gpui",
+ "gpui_rn",
 ]
 
 [[package]]
@@ -6739,9 +6722,9 @@ dependencies = [
 name = "fuzzy"
 version = "0.1.0"
 dependencies = [
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "log",
- "util",
 ]
 
 [[package]]
@@ -7121,12 +7104,14 @@ dependencies = [
  "anyhow",
  "askpass",
  "async-trait",
- "collections",
  "derive_more 0.99.20",
  "futures 0.3.31",
  "git2",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "log",
  "parking_lot",
@@ -7138,7 +7123,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
- "sum_tree",
  "tempfile",
  "text",
  "thiserror 2.0.17",
@@ -7146,7 +7130,6 @@ dependencies = [
  "unindent",
  "url",
  "urlencoding",
- "util",
  "uuid",
  "ztracing",
 ]
@@ -7172,8 +7155,9 @@ dependencies = [
  "async-trait",
  "futures 0.3.31",
  "git",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "pretty_assertions",
@@ -7183,7 +7167,6 @@ dependencies = [
  "settings",
  "url",
  "urlencoding",
- "util",
 ]
 
 [[package]]
@@ -7196,7 +7179,6 @@ dependencies = [
  "buffer_diff",
  "call",
  "cloud_llm_client",
- "collections",
  "command_palette_hooks",
  "component",
  "ctor",
@@ -7206,7 +7188,9 @@ dependencies = [
  "fuzzy",
  "git",
  "git_hosting_providers",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -7238,7 +7222,6 @@ dependencies = [
  "tracing",
  "ui",
  "unindent",
- "util",
  "watch",
  "windows 0.61.3",
  "workspace",
@@ -7296,7 +7279,8 @@ name = "go_to_line"
 version = "0.1.0"
 dependencies = [
  "editor",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "indoc",
  "language",
  "menu",
@@ -7310,7 +7294,6 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -7331,7 +7314,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "schemars",
  "serde",
  "serde_json",
@@ -7370,14 +7353,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui"
-version = "0.2.2"
+name = "gpui_rn"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "as-raw-xcb-connection",
  "ashpd",
  "async-task",
  "backtrace",
+ "base64 0.22.1",
  "bindgen 0.71.1",
  "bitflags 2.9.4",
  "blade-graphics",
@@ -7392,7 +7376,6 @@ dependencies = [
  "circular-buffer",
  "cocoa 0.26.0",
  "cocoa-foundation 0.2.0",
- "collections",
  "core-foundation 0.10.0",
  "core-foundation-sys",
  "core-graphics 0.24.0",
@@ -7407,8 +7390,14 @@ dependencies = [
  "filedescriptor",
  "foreign-types 0.5.0",
  "futures 0.3.31",
- "gpui_macros",
- "http_client",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_macros",
+ "gpui_rn_media",
+ "gpui_rn_refineable",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
+ "gpui_rn_util_macros",
  "image",
  "inventory",
  "itertools 0.14.0",
@@ -7416,7 +7405,6 @@ dependencies = [
  "log",
  "lyon",
  "mach2 0.5.0",
- "media",
  "metal",
  "naga",
  "num_cpus",
@@ -7434,7 +7422,6 @@ dependencies = [
  "profiling",
  "rand 0.9.2",
  "raw-window-handle",
- "refineable",
  "reqwest_client",
  "resvg",
  "scheduler",
@@ -7449,14 +7436,11 @@ dependencies = [
  "spin 0.10.0",
  "stacksafe",
  "strum 0.27.2",
- "sum_tree",
  "swash",
  "taffy",
  "thiserror 2.0.17",
  "unicode-segmentation",
  "usvg",
- "util",
- "util_macros",
  "uuid",
  "waker-fn",
  "wayland-backend",
@@ -7478,12 +7462,142 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui_macros"
-version = "0.1.0"
+name = "gpui_rn_collections"
+version = "0.1.1"
 dependencies = [
- "gpui",
+ "indexmap",
+ "rustc-hash 2.1.1",
+]
+
+[[package]]
+name = "gpui_rn_derive_refineable"
+version = "0.1.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
+]
+
+[[package]]
+name = "gpui_rn_http_client"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "async-compression",
+ "async-fs",
+ "async-tar",
+ "bytes 1.10.1",
+ "derive_more 0.99.20",
+ "futures 0.3.31",
+ "gpui_rn_util",
+ "http 1.3.1",
+ "http-body 1.0.1",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha2",
+ "tempfile",
+ "url",
+]
+
+[[package]]
+name = "gpui_rn_macros"
+version = "0.1.1"
+dependencies = [
+ "gpui_rn",
  "heck 0.5.0",
  "proc-macro2",
+ "quote",
+ "syn 2.0.106",
+]
+
+[[package]]
+name = "gpui_rn_media"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "bindgen 0.71.1",
+ "core-foundation 0.10.0",
+ "core-video",
+ "ctor",
+ "foreign-types 0.5.0",
+ "metal",
+ "objc",
+]
+
+[[package]]
+name = "gpui_rn_perf"
+version = "0.1.1"
+dependencies = [
+ "gpui_rn_collections",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "gpui_rn_refineable"
+version = "0.1.1"
+dependencies = [
+ "gpui_rn_derive_refineable",
+]
+
+[[package]]
+name = "gpui_rn_sum_tree"
+version = "0.1.1"
+dependencies = [
+ "arrayvec",
+ "log",
+ "rand 0.9.2",
+ "rayon",
+]
+
+[[package]]
+name = "gpui_rn_util"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "async-fs",
+ "async_zip",
+ "command-fds",
+ "dirs 4.0.0",
+ "dunce",
+ "futures 0.3.31",
+ "futures-lite 1.13.0",
+ "git2",
+ "globset",
+ "gpui_rn_collections",
+ "gpui_rn_util_macros",
+ "indoc",
+ "itertools 0.14.0",
+ "libc",
+ "log",
+ "mach2 0.5.0",
+ "nix 0.29.0",
+ "pretty_assertions",
+ "rand 0.9.2",
+ "regex",
+ "rust-embed",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_json_lenient",
+ "shlex",
+ "smol",
+ "take-until",
+ "tempfile",
+ "tendril",
+ "unicase",
+ "walkdir",
+ "which 6.0.3",
+]
+
+[[package]]
+name = "gpui_rn_util_macros"
+version = "0.1.1"
+dependencies = [
+ "gpui_rn_perf",
  "quote",
  "syn 2.0.106",
 ]
@@ -7493,9 +7607,9 @@ name = "gpui_tokio"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "tokio",
- "util",
 ]
 
 [[package]]
@@ -7905,30 +8019,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "add0ab9360ddbd88cfeb3bd9574a1d85cfdfa14db10b3e21d3700dbc4328758f"
 
 [[package]]
-name = "http_client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-compression",
- "async-fs",
- "async-tar",
- "bytes 1.10.1",
- "derive_more 0.99.20",
- "futures 0.3.31",
- "http 1.3.1",
- "http-body 1.0.1",
- "log",
- "parking_lot",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sha2",
- "tempfile",
- "url",
- "util",
-]
-
-[[package]]
 name = "http_client_tls"
 version = "0.1.0"
 dependencies = [
@@ -8285,7 +8375,8 @@ dependencies = [
  "db",
  "editor",
  "file_icons",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "language",
  "log",
  "project",
@@ -8293,7 +8384,6 @@ dependencies = [
  "settings",
  "theme",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -8396,7 +8486,9 @@ dependencies = [
  "command_palette_hooks",
  "editor",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
+ "gpui_rn_util_macros",
  "language",
  "project",
  "serde_json",
@@ -8404,8 +8496,6 @@ dependencies = [
  "theme",
  "title_bar",
  "ui",
- "util",
- "util_macros",
  "workspace",
  "zed_actions",
 ]
@@ -8416,10 +8506,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "release_channel",
  "smol",
- "util",
  "workspace",
 ]
 
@@ -8674,7 +8764,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "editor",
- "gpui",
+ "gpui_rn",
  "log",
  "serde",
  "settings",
@@ -8709,10 +8799,11 @@ name = "json_schema_store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "dap",
  "extension",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "parking_lot",
  "paths",
@@ -8724,7 +8815,6 @@ dependencies = [
  "snippet_provider",
  "task",
  "theme",
- "util",
 ]
 
 [[package]]
@@ -8809,14 +8899,15 @@ name = "keymap_editor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "command_palette",
  "component",
  "db",
  "editor",
  "fs",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "json_schema_store",
  "language",
@@ -8836,7 +8927,6 @@ dependencies = [
  "tree-sitter-rust",
  "ui",
  "ui_input",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -8898,7 +8988,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clock",
- "collections",
  "ctor",
  "diffy",
  "ec4rs",
@@ -8907,8 +8996,11 @@ dependencies = [
  "futures 0.3.31",
  "fuzzy",
  "globset",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "imara-diff",
  "indoc",
  "itertools 0.14.0",
@@ -8930,7 +9022,6 @@ dependencies = [
  "smol",
  "streaming-iterator",
  "strsim",
- "sum_tree",
  "task",
  "text",
  "theme",
@@ -8949,7 +9040,6 @@ dependencies = [
  "tree-sitter-typescript",
  "unicase",
  "unindent",
- "util",
  "watch",
  "zlog",
  "ztracing",
@@ -8961,11 +9051,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "collections",
  "extension",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "log",
  "lsp",
@@ -8973,7 +9064,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
- "util",
  "ztracing",
 ]
 
@@ -8987,11 +9077,12 @@ dependencies = [
  "client",
  "cloud_api_types",
  "cloud_llm_client",
- "collections",
  "credentials_provider",
  "futures 0.3.31",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "icons",
  "image",
  "log",
@@ -9005,7 +9096,6 @@ dependencies = [
  "settings",
  "smol",
  "thiserror 2.0.17",
- "util",
  "zed_env_vars",
 ]
 
@@ -9023,7 +9113,6 @@ dependencies = [
  "chrono",
  "client",
  "cloud_llm_client",
- "collections",
  "component",
  "convert_case 0.8.0",
  "copilot",
@@ -9038,9 +9127,11 @@ dependencies = [
  "fs",
  "futures 0.3.31",
  "google_ai",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "language",
  "language_model",
  "lmstudio",
@@ -9066,7 +9157,6 @@ dependencies = [
  "tokio",
  "ui",
  "ui_input",
- "util",
  "vercel",
  "x_ai",
 ]
@@ -9077,7 +9167,7 @@ version = "0.1.0"
 dependencies = [
  "db",
  "editor",
- "gpui",
+ "gpui_rn",
  "project",
  "ui",
  "workspace",
@@ -9092,13 +9182,13 @@ dependencies = [
  "file_finder",
  "file_icons",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "language",
  "picker",
  "project",
  "settings",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -9108,12 +9198,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "collections",
  "command_palette_hooks",
  "edit_prediction",
  "editor",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "language",
  "lsp",
@@ -9126,7 +9217,6 @@ dependencies = [
  "theme",
  "tree-sitter",
  "ui",
- "util",
  "workspace",
  "zed_actions",
  "zlog",
@@ -9142,11 +9232,12 @@ dependencies = [
  "async-tar",
  "async-trait",
  "chrono",
- "collections",
  "futures 0.3.31",
  "globset",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "json_schema_store",
  "language",
@@ -9199,7 +9290,6 @@ dependencies = [
  "tree-sitter-yaml",
  "unindent",
  "url",
- "util",
  "workspace",
 ]
 
@@ -9371,12 +9461,12 @@ name = "line_ending_selector"
 version = "0.1.0"
 dependencies = [
  "editor",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "language",
  "picker",
  "project",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -9512,13 +9602,14 @@ dependencies = [
  "async-trait",
  "audio",
  "cocoa 0.26.0",
- "collections",
  "core-foundation 0.10.0",
  "core-video",
  "coreaudio-rs 0.12.1",
  "cpal",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "gpui_tokio",
  "http_client_tls",
  "image",
@@ -9540,7 +9631,6 @@ dependencies = [
  "smallvec",
  "tokio-tungstenite 0.26.2",
  "ui",
- "util",
  "zed-scap",
 ]
 
@@ -9561,7 +9651,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "schemars",
  "serde",
  "serde_json",
@@ -9629,10 +9719,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-pipe",
- "collections",
  "ctor",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "log",
  "lsp-types",
  "parking_lot",
@@ -9643,7 +9734,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
- "util",
  "zlog",
 ]
 
@@ -9766,11 +9856,13 @@ version = "0.1.0"
 dependencies = [
  "assets",
  "base64 0.22.1",
- "collections",
  "env_logger 0.11.8",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "language",
  "languages",
  "linkify",
@@ -9778,10 +9870,8 @@ dependencies = [
  "node_runtime",
  "pulldown-cmark 0.13.0",
  "settings",
- "sum_tree",
  "theme",
  "ui",
- "util",
 ]
 
 [[package]]
@@ -9790,10 +9880,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-recursion",
- "collections",
  "editor",
  "fs",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "html5ever 0.27.0",
  "language",
  "linkify",
@@ -9805,7 +9896,6 @@ dependencies = [
  "theme",
  "ui",
  "urlencoding",
- "util",
  "workspace",
 ]
 
@@ -9935,20 +10025,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "media"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bindgen 0.71.1",
- "core-foundation 0.10.0",
- "core-video",
- "ctor",
- "foreign-types 0.5.0",
- "metal",
- "objc",
-]
-
-[[package]]
 name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9986,7 +10062,7 @@ dependencies = [
 name = "menu"
 version = "0.1.0"
 dependencies = [
- "gpui",
+ "gpui_rn",
 ]
 
 [[package]]
@@ -10031,8 +10107,8 @@ name = "migrator"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "convert_case 0.8.0",
+ "gpui_rn_collections",
  "log",
  "pretty_assertions",
  "serde_json",
@@ -10136,10 +10212,10 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 name = "miniprofiler_ui"
 version = "0.1.0"
 dependencies = [
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "serde_json",
  "smol",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -10199,7 +10275,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "schemars",
  "serde",
  "serde_json",
@@ -10250,9 +10326,11 @@ dependencies = [
  "anyhow",
  "buffer_diff",
  "clock",
- "collections",
  "ctor",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -10266,12 +10344,10 @@ dependencies = [
  "settings",
  "smallvec",
  "smol",
- "sum_tree",
  "text",
  "theme",
  "tracing",
  "tree-sitter",
- "util",
  "zlog",
  "ztracing",
 ]
@@ -10466,14 +10542,14 @@ dependencies = [
  "async-tar",
  "async-trait",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "log",
  "paths",
  "semver",
  "serde",
  "serde_json",
  "smol",
- "util",
  "watch",
  "which 6.0.3",
 ]
@@ -10519,16 +10595,16 @@ dependencies = [
  "anyhow",
  "channel",
  "client",
- "collections",
  "component",
  "db",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "rpc",
  "settings",
- "sum_tree",
  "time",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -10986,7 +11062,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "schemars",
  "serde",
  "serde_json",
@@ -11004,7 +11080,8 @@ dependencies = [
  "documented",
  "fs",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "menu",
  "notifications",
  "picker",
@@ -11015,7 +11092,6 @@ dependencies = [
  "telemetry",
  "theme",
  "ui",
- "util",
  "vim_mode_setting",
  "workspace",
  "zed_actions",
@@ -11092,7 +11168,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "log",
  "schemars",
  "serde",
@@ -11108,7 +11184,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
  "schemars",
  "serde",
  "serde_json",
@@ -11248,7 +11324,8 @@ version = "0.1.0"
 dependencies = [
  "editor",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "indoc",
  "language",
  "menu",
@@ -11263,7 +11340,6 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -11273,12 +11349,13 @@ name = "outline_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "db",
  "editor",
  "file_icons",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "language",
  "log",
@@ -11294,7 +11371,6 @@ dependencies = [
  "smol",
  "theme",
  "ui",
- "util",
  "workspace",
  "worktree",
  "zed_actions",
@@ -11355,7 +11431,7 @@ name = "panel"
 version = "0.1.0"
 dependencies = [
  "editor",
- "gpui",
+ "gpui_rn",
  "settings",
  "theme",
  "ui",
@@ -11464,8 +11540,8 @@ name = "paths"
 version = "0.1.0"
 dependencies = [
  "dirs 4.0.0",
+ "gpui_rn_util",
  "ignore",
- "util",
 ]
 
 [[package]]
@@ -11557,15 +11633,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "perf"
-version = "0.1.0"
-dependencies = [
- "collections",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "pest"
@@ -12117,7 +12184,7 @@ dependencies = [
  "ctor",
  "editor",
  "env_logger 0.11.8",
- "gpui",
+ "gpui_rn",
  "menu",
  "schemars",
  "serde",
@@ -12415,9 +12482,10 @@ name = "prettier"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "fs",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "log",
  "lsp",
@@ -12426,7 +12494,6 @@ dependencies = [
  "paths",
  "serde",
  "serde_json",
- "util",
 ]
 
 [[package]]
@@ -12577,7 +12644,6 @@ dependencies = [
  "circular-buffer",
  "client",
  "clock",
- "collections",
  "context_server",
  "dap",
  "dap_adapters",
@@ -12592,8 +12658,11 @@ dependencies = [
  "git2",
  "git_hosting_providers",
  "globset",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "image",
  "indexmap",
  "itertools 0.14.0",
@@ -12623,7 +12692,6 @@ dependencies = [
  "smol",
  "snippet",
  "snippet_provider",
- "sum_tree",
  "task",
  "tempfile",
  "terminal",
@@ -12632,7 +12700,6 @@ dependencies = [
  "tracing",
  "unindent",
  "url",
- "util",
  "watch",
  "wax",
  "which 6.0.3",
@@ -12651,8 +12718,8 @@ dependencies = [
  "clap",
  "client",
  "futures 0.3.31",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_http_client",
  "language",
  "node_runtime",
  "project",
@@ -12670,7 +12737,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "collections",
  "command_palette_hooks",
  "criterion",
  "db",
@@ -12678,7 +12744,9 @@ dependencies = [
  "file_icons",
  "git",
  "git_ui",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "language",
  "menu",
@@ -12696,7 +12764,6 @@ dependencies = [
  "tempfile",
  "theme",
  "ui",
- "util",
  "workspace",
  "worktree",
  "zed_actions",
@@ -12710,7 +12777,8 @@ dependencies = [
  "editor",
  "futures 0.3.31",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "language",
  "lsp",
  "ordered-float 2.10.1",
@@ -12721,7 +12789,6 @@ dependencies = [
  "serde_json",
  "settings",
  "theme",
- "util",
  "workspace",
 ]
 
@@ -12747,11 +12814,12 @@ dependencies = [
  "anyhow",
  "assets",
  "chrono",
- "collections",
  "fs",
  "futures 0.3.31",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "handlebars 4.5.0",
  "heed",
  "language",
@@ -12763,7 +12831,6 @@ dependencies = [
  "strum 0.27.2",
  "tempfile",
  "text",
- "util",
  "uuid",
 ]
 
@@ -12878,7 +12945,7 @@ name = "proto"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
+ "gpui_rn_collections",
  "prost 0.9.0",
  "prost-build 0.9.0",
  "serde",
@@ -13359,8 +13426,9 @@ dependencies = [
  "fs",
  "futures 0.3.31",
  "fuzzy",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "indoc",
  "language",
  "log",
@@ -13383,7 +13451,6 @@ dependencies = [
  "telemetry",
  "theme",
  "ui",
- "util",
  "windows-registry 0.6.1",
  "workspace",
  "worktree",
@@ -13466,13 +13533,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "refineable"
-version = "0.1.0"
-dependencies = [
- "derive_refineable",
-]
-
-[[package]]
 name = "regalloc2"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13526,7 +13586,7 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 name = "release_channel"
 version = "0.1.0"
 dependencies = [
- "gpui",
+ "gpui_rn",
  "semver",
 ]
 
@@ -13537,10 +13597,11 @@ dependencies = [
  "anyhow",
  "askpass",
  "async-trait",
- "collections",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "log",
  "parking_lot",
  "paths",
@@ -13556,7 +13617,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "urlencoding",
- "util",
  "which 6.0.3",
 ]
 
@@ -13572,7 +13632,6 @@ dependencies = [
  "clap",
  "client",
  "clock",
- "collections",
  "crash-handler",
  "crashes",
  "dap",
@@ -13588,9 +13647,11 @@ dependencies = [
  "git",
  "git2",
  "git_hosting_providers",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "image",
  "json_schema_store",
  "language",
@@ -13625,7 +13686,6 @@ dependencies = [
  "thiserror 2.0.17",
  "toml 0.8.23",
  "unindent",
- "util",
  "watch",
  "workspace",
  "worktree",
@@ -13652,15 +13712,16 @@ dependencies = [
  "async-tungstenite",
  "base64 0.22.1",
  "client",
- "collections",
  "command_palette_hooks",
  "editor",
  "env_logger 0.11.8",
  "feature_flags",
  "file_icons",
  "futures 0.3.31",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "image",
  "indoc",
  "jupyter-protocol",
@@ -13687,7 +13748,6 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-typescript",
  "ui",
- "util",
  "uuid",
  "workspace",
 ]
@@ -13777,8 +13837,8 @@ dependencies = [
  "anyhow",
  "bytes 1.10.1",
  "futures 0.3.31",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_http_client",
  "http_client_tls",
  "log",
  "regex",
@@ -13826,13 +13886,13 @@ name = "rich_text"
 version = "0.1.0"
 dependencies = [
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "language",
  "linkify",
  "pulldown-cmark 0.13.0",
  "theme",
  "ui",
- "util",
 ]
 
 [[package]]
@@ -13920,14 +13980,14 @@ dependencies = [
  "arrayvec",
  "criterion",
  "ctor",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "log",
  "rand 0.9.2",
  "rayon",
- "sum_tree",
  "tracing",
  "unicode-segmentation",
- "util",
  "zlog",
  "ztracing",
 ]
@@ -13957,9 +14017,10 @@ dependencies = [
  "async-tungstenite",
  "base64 0.22.1",
  "chrono",
- "collections",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "parking_lot",
  "proto",
  "rand 0.9.2",
@@ -13969,7 +14030,6 @@ dependencies = [
  "sha2",
  "strum 0.27.2",
  "tracing",
- "util",
  "zlog",
  "zstd",
 ]
@@ -14015,9 +14075,10 @@ name = "rules_library"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "editor",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "language_model",
  "log",
@@ -14031,7 +14092,6 @@ dependencies = [
  "theme",
  "title_bar",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -14662,10 +14722,12 @@ dependencies = [
  "anyhow",
  "bitflags 2.9.4",
  "client",
- "collections",
  "editor",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
+ "gpui_rn_util_macros",
  "itertools 0.14.0",
  "language",
  "lsp",
@@ -14681,8 +14743,6 @@ dependencies = [
  "tracing",
  "ui",
  "unindent",
- "util",
- "util_macros",
  "workspace",
  "zed_actions",
  "ztracing",
@@ -14918,9 +14978,9 @@ name = "session"
 version = "0.1.0"
 dependencies = [
  "db",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "serde_json",
- "util",
  "uuid",
 ]
 
@@ -14929,11 +14989,12 @@ name = "settings"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "ec4rs",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "inventory",
  "log",
@@ -14951,7 +15012,6 @@ dependencies = [
  "settings_macros",
  "smallvec",
  "unindent",
- "util",
  "zlog",
 ]
 
@@ -14960,8 +15020,9 @@ name = "settings_content"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "derive_more 0.99.20",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "log",
  "schemars",
  "serde",
@@ -14970,7 +15031,6 @@ dependencies = [
  "settings_json",
  "settings_macros",
  "strum 0.27.2",
- "util",
 ]
 
 [[package]]
@@ -14978,6 +15038,7 @@ name = "settings_json"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "gpui_rn_util",
  "pretty_assertions",
  "serde",
  "serde_json",
@@ -14986,7 +15047,6 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-json",
  "unindent",
- "util",
 ]
 
 [[package]]
@@ -15005,7 +15065,7 @@ dependencies = [
  "client",
  "editor",
  "fuzzy",
- "gpui",
+ "gpui_rn",
  "language",
  "menu",
  "picker",
@@ -15033,7 +15093,8 @@ dependencies = [
  "fs",
  "futures 0.3.31",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "heck 0.5.0",
  "itertools 0.14.0",
  "language",
@@ -15057,7 +15118,6 @@ dependencies = [
  "title_bar",
  "ui",
  "ui_input",
- "util",
  "workspace",
  "zed_actions",
  "zlog",
@@ -15332,11 +15392,12 @@ name = "snippet_provider"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "extension",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "log",
  "parking_lot",
@@ -15346,7 +15407,6 @@ dependencies = [
  "serde_json",
  "serde_json_lenient",
  "snippet",
- "util",
 ]
 
 [[package]]
@@ -15356,13 +15416,13 @@ dependencies = [
  "file_finder",
  "file_icons",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "language",
  "paths",
  "picker",
  "settings",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -15453,8 +15513,9 @@ name = "sqlez"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "futures 0.3.31",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "indoc",
  "libsqlite3-sys",
  "log",
@@ -15462,7 +15523,6 @@ dependencies = [
  "smol",
  "sqlformat",
  "thread_local",
- "util",
  "uuid",
 ]
 
@@ -15753,7 +15813,7 @@ dependencies = [
 name = "story"
 version = "0.1.0"
 dependencies = [
- "gpui",
+ "gpui_rn",
  "itertools 0.14.0",
  "smallvec",
 ]
@@ -15769,7 +15829,7 @@ dependencies = [
  "dialoguer",
  "editor",
  "fuzzy",
- "gpui",
+ "gpui_rn",
  "indoc",
  "language",
  "log",
@@ -15796,10 +15856,10 @@ checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
 name = "streaming_diff"
 version = "0.1.0"
 dependencies = [
+ "gpui_rn_util",
  "ordered-float 2.10.1",
  "rand 0.9.2",
  "rope",
- "util",
 ]
 
 [[package]]
@@ -15909,32 +15969,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
-name = "sum_tree"
-version = "0.1.0"
-dependencies = [
- "arrayvec",
- "ctor",
- "log",
- "rand 0.9.2",
- "rayon",
- "tracing",
- "zlog",
- "ztracing",
-]
-
-[[package]]
 name = "supermaven"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "collections",
  "edit_prediction_types",
  "editor",
  "env_logger 0.11.8",
  "futures 0.3.31",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "language",
  "log",
  "postage",
@@ -15948,7 +15995,6 @@ dependencies = [
  "theme",
  "ui",
  "unicode-segmentation",
- "util",
 ]
 
 [[package]]
@@ -15957,12 +16003,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
- "http_client",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "paths",
  "serde",
  "serde_json",
  "smol",
- "util",
 ]
 
 [[package]]
@@ -16054,7 +16100,7 @@ name = "svg_preview"
 version = "0.1.0"
 dependencies = [
  "file_icons",
- "gpui",
+ "gpui_rn",
  "language",
  "multi_buffer",
  "ui",
@@ -16428,7 +16474,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "gpui",
+ "gpui_rn",
  "human_bytes",
  "pciid-parser",
  "release_channel",
@@ -16442,11 +16488,12 @@ name = "tab_switcher"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "ctor",
  "editor",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "language",
  "menu",
  "picker",
@@ -16458,7 +16505,6 @@ dependencies = [
  "smol",
  "theme",
  "ui",
- "util",
  "workspace",
  "zlog",
 ]
@@ -16522,9 +16568,10 @@ name = "task"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "hex",
  "log",
  "parking_lot",
@@ -16536,7 +16583,6 @@ dependencies = [
  "serde_json_lenient",
  "sha2",
  "shellexpand 2.1.2",
- "util",
  "zed_actions",
 ]
 
@@ -16545,11 +16591,12 @@ name = "tasks_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "editor",
  "file_icons",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "language",
  "menu",
@@ -16561,7 +16608,6 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -16624,9 +16670,11 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
- "collections",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
+ "gpui_rn_util_macros",
  "itertools 0.14.0",
  "libc",
  "log",
@@ -16645,8 +16693,6 @@ dependencies = [
  "thiserror 2.0.17",
  "url",
  "urlencoding",
- "util",
- "util_macros",
  "windows 0.61.3",
 ]
 
@@ -16669,12 +16715,13 @@ dependencies = [
  "async-recursion",
  "breadcrumbs",
  "client",
- "collections",
  "db",
  "dirs 4.0.0",
  "editor",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "language",
  "log",
@@ -16692,7 +16739,6 @@ dependencies = [
  "terminal",
  "theme",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -16703,10 +16749,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clock",
- "collections",
  "ctor",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "log",
  "parking_lot",
  "postage",
@@ -16714,8 +16762,6 @@ dependencies = [
  "regex",
  "rope",
  "smallvec",
- "sum_tree",
- "util",
  "zlog",
 ]
 
@@ -16724,15 +16770,16 @@ name = "theme"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collections",
  "derive_more 0.99.20",
  "fs",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_refineable",
+ "gpui_rn_util",
  "log",
  "palette",
  "parking_lot",
- "refineable",
  "schemars",
  "serde",
  "serde_json",
@@ -16740,7 +16787,6 @@ dependencies = [
  "settings",
  "strum 0.27.2",
  "thiserror 2.0.17",
- "util",
  "uuid",
 ]
 
@@ -16751,7 +16797,7 @@ dependencies = [
  "anyhow",
  "extension",
  "fs",
- "gpui",
+ "gpui_rn",
  "theme",
 ]
 
@@ -16761,8 +16807,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "collections",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
  "indexmap",
  "log",
  "palette",
@@ -16781,7 +16827,8 @@ version = "0.1.0"
 dependencies = [
  "fs",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "log",
  "picker",
  "serde",
@@ -16789,7 +16836,6 @@ dependencies = [
  "telemetry",
  "theme",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -17008,11 +17054,12 @@ dependencies = [
  "chrono",
  "client",
  "cloud_llm_client",
- "collections",
  "db",
  "git_ui",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "menu",
  "notifications",
  "pretty_assertions",
@@ -17029,7 +17076,6 @@ dependencies = [
  "theme",
  "tree-sitter-md",
  "ui",
- "util",
  "windows 0.61.3",
  "workspace",
  "zed_actions",
@@ -17292,13 +17338,13 @@ dependencies = [
  "file_finder",
  "futures 0.3.31",
  "fuzzy",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "language",
  "menu",
  "picker",
  "project",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -17942,8 +17988,9 @@ dependencies = [
  "chrono",
  "component",
  "documented",
- "gpui",
- "gpui_macros",
+ "gpui_rn",
+ "gpui_rn_macros",
+ "gpui_rn_util",
  "icons",
  "itertools 0.14.0",
  "menu",
@@ -17955,7 +18002,6 @@ dependencies = [
  "strum 0.27.2",
  "theme",
  "ui_macros",
- "util",
  "windows 0.61.3",
 ]
 
@@ -17965,7 +18011,7 @@ version = "0.1.0"
 dependencies = [
  "component",
  "editor",
- "gpui",
+ "gpui_rn",
  "menu",
  "settings",
  "theme",
@@ -17986,7 +18032,7 @@ dependencies = [
 name = "ui_prompt"
 version = "0.1.0"
 dependencies = [
- "gpui",
+ "gpui_rn",
  "markdown",
  "menu",
  "settings",
@@ -18188,55 +18234,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
-name = "util"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-fs",
- "async_zip",
- "collections",
- "command-fds",
- "dirs 4.0.0",
- "dunce",
- "futures 0.3.31",
- "futures-lite 1.13.0",
- "git2",
- "globset",
- "indoc",
- "itertools 0.14.0",
- "libc",
- "log",
- "mach2 0.5.0",
- "nix 0.29.0",
- "pretty_assertions",
- "rand 0.9.2",
- "regex",
- "rust-embed",
- "schemars",
- "serde",
- "serde_json",
- "serde_json_lenient",
- "shlex",
- "smol",
- "take-until",
- "tempfile",
- "tendril",
- "unicase",
- "util_macros",
- "walkdir",
- "which 6.0.3",
-]
-
-[[package]]
-name = "util_macros"
-version = "0.1.0"
-dependencies = [
- "perf",
- "quote",
- "syn 2.0.106",
-]
-
-[[package]]
 name = "uuid"
 version = "1.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -18348,7 +18345,6 @@ dependencies = [
  "assets",
  "async-compat",
  "async-trait",
- "collections",
  "command_palette",
  "command_palette_hooks",
  "db",
@@ -18357,7 +18353,11 @@ dependencies = [
  "futures 0.3.31",
  "fuzzy",
  "git_ui",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_perf",
+ "gpui_rn_util",
+ "gpui_rn_util_macros",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -18369,7 +18369,6 @@ dependencies = [
  "nvim-rs",
  "outline_panel",
  "parking_lot",
- "perf",
  "picker",
  "project",
  "project_panel",
@@ -18388,8 +18387,6 @@ dependencies = [
  "title_bar",
  "tokio",
  "ui",
- "util",
- "util_macros",
  "vim_mode_setting",
  "workspace",
  "zed_actions",
@@ -19040,7 +19037,7 @@ version = "0.1.0"
 dependencies = [
  "ctor",
  "futures 0.3.31",
- "gpui",
+ "gpui_rn",
  "parking_lot",
  "rand 0.9.2",
  "zlog",
@@ -19197,8 +19194,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cloud_llm_client",
- "collections",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
  "serde",
 ]
 
@@ -19210,8 +19207,8 @@ dependencies = [
  "client",
  "cloud_llm_client",
  "futures 0.3.31",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_http_client",
  "language_model",
  "serde",
  "serde_json",
@@ -19297,12 +19294,12 @@ name = "which_key"
 version = "0.1.0"
 dependencies = [
  "command_palette",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_util",
  "serde",
  "settings",
  "theme",
  "ui",
- "util",
  "workspace",
 ]
 
@@ -20356,7 +20353,6 @@ dependencies = [
  "call",
  "client",
  "clock",
- "collections",
  "component",
  "dap",
  "db",
@@ -20364,8 +20360,10 @@ dependencies = [
  "fs",
  "futures 0.3.31",
  "git",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "itertools 0.14.0",
  "language",
  "log",
@@ -20390,7 +20388,6 @@ dependencies = [
  "tempfile",
  "theme",
  "ui",
- "util",
  "uuid",
  "windows 0.61.3",
  "zed_actions",
@@ -20405,15 +20402,17 @@ dependencies = [
  "async-lock 2.8.0",
  "chardetng",
  "clock",
- "collections",
  "encoding_rs",
  "fs",
  "futures 0.3.31",
  "fuzzy",
  "git",
  "git2",
- "gpui",
- "http_client",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_sum_tree",
+ "gpui_rn_util",
  "ignore",
  "language",
  "log",
@@ -20428,10 +20427,8 @@ dependencies = [
  "settings",
  "smallvec",
  "smol",
- "sum_tree",
  "text",
  "tracing",
- "util",
  "zlog",
  "ztracing",
 ]
@@ -20441,7 +20438,7 @@ name = "worktree_benchmarks"
 version = "0.1.0"
 dependencies = [
  "fs",
- "gpui",
+ "gpui_rn",
  "settings",
  "worktree",
 ]
@@ -20817,7 +20814,6 @@ dependencies = [
  "clock",
  "codestral",
  "collab_ui",
- "collections",
  "command_palette",
  "component",
  "component_preview",
@@ -20850,9 +20846,11 @@ dependencies = [
  "git_hosting_providers",
  "git_ui",
  "go_to_line",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
+ "gpui_rn_http_client",
+ "gpui_rn_util",
  "gpui_tokio",
- "http_client",
  "image",
  "image_viewer",
  "inspector_ui",
@@ -20937,7 +20935,6 @@ dependencies = [
  "ui_prompt",
  "url",
  "urlencoding",
- "util",
  "uuid",
  "vim",
  "vim_mode_setting",
@@ -21067,7 +21064,7 @@ dependencies = [
 name = "zed_actions"
 version = "0.1.0"
 dependencies = [
- "gpui",
+ "gpui_rn",
  "schemars",
  "serde",
  "uuid",
@@ -21077,7 +21074,7 @@ dependencies = [
 name = "zed_env_vars"
 version = "0.1.0"
 dependencies = [
- "gpui",
+ "gpui_rn",
 ]
 
 [[package]]
@@ -21313,7 +21310,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "collections",
+ "gpui_rn_collections",
  "log",
  "tempfile",
 ]
@@ -21322,8 +21319,8 @@ dependencies = [
 name = "zlog_settings"
 version = "0.1.0"
 dependencies = [
- "collections",
- "gpui",
+ "gpui_rn",
+ "gpui_rn_collections",
  "settings",
  "zlog",
 ]

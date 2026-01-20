@@ -1,10 +1,12 @@
 [package]
-name = "gpui_macros"
-version = "0.1.0"
+name = "gpui_rn_macros"
+version = "0.1.1"
 edition.workspace = true
-publish = false
+authors = ["Nathan Sobo <nathan@zed.dev>", "Madeline Lane <maddythewisp@gmail.com>"]
+publish = true
 license = "Apache-2.0"
-description = "Macros used by gpui"
+repository = "https://github.com/rngpui/zed-react-native-gpui"
+description = "Macros for GPUI (fork for React Native GPUI)"
 
 [lints]
 workspace = true

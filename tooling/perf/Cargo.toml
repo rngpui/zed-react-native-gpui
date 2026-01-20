@@ -1,10 +1,12 @@
 [package]
-name = "perf"
-version = "0.1.0"
-publish = false
+name = "gpui_rn_perf"
+version = "0.1.1"
 edition.workspace = true
+authors = ["Nathan Sobo <nathan@zed.dev>", "Madeline Lane <maddythewisp@gmail.com>"]
+publish = true
 license = "Apache-2.0"
-description = "A tool for measuring Zed test performance, with too many Clippy lints"
+repository = "https://github.com/rngpui/zed-react-native-gpui"
+description = "Performance measurement utilities (fork for React Native GPUI)"
 
 [lib]
 

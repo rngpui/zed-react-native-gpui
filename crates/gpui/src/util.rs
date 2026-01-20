@@ -112,6 +112,20 @@ impl<T: Future> Future for WithTimeout<T> {
     }
 }
 
+/// A simple timeout utility using smol::Timer.
+/// Returns Ok(result) if the future completes before timeout, Err(()) otherwise.
+pub async fn smol_timeout<F, T>(timeout: Duration, f: F) -> Result<T, ()>
+where
+    F: Future<Output = T>,
+{
+    let timer = async {
+        smol::Timer::after(timeout).await;
+        Err(())
+    };
+    let future = async move { Ok(f.await) };
+    smol::future::FutureExt::race(timer, future).await
+}
+
 /// Increment the given atomic counter if it is not zero.
 /// Return the new value of the counter.
 pub(crate) fn atomic_incr_if_not_zero(counter: &AtomicUsize) -> usize {
