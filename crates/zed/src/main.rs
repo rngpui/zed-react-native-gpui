@@ -664,6 +664,8 @@ fn main() {
         search::init(cx);
         vim::init(cx);
         terminal_view::init(cx);
+        #[cfg(feature = "rn-chat-demo")]
+        rn_chat_panel::init(cx);
         journal::init(app_state.clone(), cx);
         language_selector::init(cx);
         line_ending_selector::init(cx);

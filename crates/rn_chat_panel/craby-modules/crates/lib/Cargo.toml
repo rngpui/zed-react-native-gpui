@@ -1,0 +1,23 @@
+[package]
+name = "zedmodules"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+cxx = { workspace = true, features = ["c++20"] }
+log.workspace = true
+rngpui-craby.workspace = true
+serde_json.workspace = true
+
+# Shared types for command bus (breaks cyclic dependency)
+rn_chat_panel_types.workspace = true
+
+[build-dependencies]
+cc.workspace = true
+cxx-build.workspace = true
+
+[lib]
+name = "zedmodules"
+# staticlib for C++ linkage via CXX bridge, rlib for Rust consumers
+crate-type = ["staticlib", "rlib"]

@@ -50,6 +50,9 @@ visual-tests = [
     "recent_projects/test-support",
     "title_bar/test-support",
 ]
+# React Native Chat Panel demo - embeds RNGPUI within Zed
+# Disabled for publishing - depends on react-native-gpui git deps
+# rn-chat-demo = ["dep:rn_chat_panel", "dep:rngpui_build"]
 
 [[bin]]
 name = "zed"
@@ -175,6 +178,11 @@ release_channel.workspace = true
 remote.workspace = true
 repl.workspace = true
 reqwest.workspace = true
+# rn_chat_panel = { workspace = true, optional = true }  # Disabled for publishing
+# Craby-generated TurboModules staticlib (links Rust FFI for C++ TurboModules)
+# TODO: Re-enable after craby template issue is fixed
+# gpui_modules = { git = "https://github.com/rngpui/react-native-gpui", rev = "c6f35530b32ade9b61710ca9c59268afe3909bd3", optional = true }
+# gpui_modules = { path = "../../../react-native-gpui/craby-modules/crates/lib", optional = true }
 reqwest_client.workspace = true
 rope.workspace = true
 search.workspace = true
@@ -228,6 +236,10 @@ chrono.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true
 chrono.workspace = true
+
+[build-dependencies]
+rngpui_build = { git = "https://github.com/rngpui/react-native-gpui", rev = "9b10834ef63238591c9060d4d2ae984519f5b2af", optional = true }
+# rngpui_build = { path = "../../../react-native-gpui/rust/rngpui_build", optional = true }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"

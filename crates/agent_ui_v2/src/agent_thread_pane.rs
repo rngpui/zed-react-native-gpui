@@ -1,5 +1,5 @@
 use acp_thread::AgentSessionInfo;
-use agent::{NativeAgentServer, ThreadStore};
+use agent::{ActiveAcpThreadStore, NativeAgentServer, ThreadStore};
 use agent_client_protocol as acp;
 use agent_servers::AgentServer;
 use agent_settings::AgentSettings;
@@ -54,6 +54,7 @@ struct ActiveThreadView {
     view: Entity<AcpThreadView>,
     thread_id: acp::SessionId,
     _notify: Subscription,
+    _active_thread_sync: Subscription,
 }
 
 pub struct AgentThreadPane {
@@ -111,13 +112,14 @@ impl AgentThreadPane {
         let agent: Rc<dyn AgentServer> = Rc::new(NativeAgentServer::new(fs, thread_store.clone()));
 
         let history = self.history.clone();
+        let project_for_view = project.clone();
         let thread_view = cx.new(|cx| {
             AcpThreadView::new(
                 agent,
                 resume_thread,
                 None,
                 workspace,
-                project,
+                project_for_view,
                 Some(thread_store),
                 prompt_store,
                 history,
@@ -131,10 +133,28 @@ impl AgentThreadPane {
             cx.notify();
         });
 
+        let project_for_active = project.clone();
+        let active_thread_sync = cx.observe(&thread_view, move |_, thread_view, cx| {
+            let thread = thread_view.read(cx).thread().cloned();
+            if let Some(thread) = thread {
+                ActiveAcpThreadStore::global(cx).update(cx, |store, cx| {
+                    store.set_active_thread(&project_for_active, Some(thread), cx);
+                });
+            }
+        });
+
+        let initial_thread = thread_view.read(cx).thread().cloned();
+        if let Some(thread) = initial_thread {
+            ActiveAcpThreadStore::global(cx).update(cx, |store, cx| {
+                store.set_active_thread(&project, Some(thread), cx);
+            });
+        }
+
         self.thread_view = Some(ActiveThreadView {
             view: thread_view,
             thread_id,
             _notify: notify,
+            _active_thread_sync: active_thread_sync,
         });
 
         cx.notify();

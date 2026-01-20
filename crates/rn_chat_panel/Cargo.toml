@@ -1,0 +1,77 @@
+[package]
+name = "rn_chat_panel"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "React Native Chat Panel Demo - RNGPUI integration for Zed"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Enable Metro dev server for hot reload during development
+dev-mode = []
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+# Core Zed dependencies
+collections.workspace = true
+gpui.workspace = true
+editor.workspace = true
+terminal_view.workspace = true
+workspace.workspace = true
+project.workspace = true
+language_model.workspace = true
+ui.workspace = true
+settings.workspace = true
+theme.workspace = true
+icons.workspace = true
+strum.workspace = true
+log.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+# Agent infrastructure for tool execution
+agent.workspace = true
+agent-client-protocol.workspace = true
+acp_thread.workspace = true
+agent_settings.workspace = true
+assistant_text_thread.workspace = true
+assistant_slash_command.workspace = true
+fs.workspace = true
+prompt_store.workspace = true
+agent_servers.workspace = true
+
+# Async and concurrency
+tokio = { workspace = true, features = ["sync"] }
+async-channel.workspace = true
+parking_lot.workspace = true
+
+# Markdown parsing
+pulldown-cmark = "0.12"
+
+# File system utilities
+dirs = "5.0"
+
+# RNGPUI - workspace dependencies
+rngpui.workspace = true
+rngpui_core.workspace = true
+rngpui_ffi.workspace = true
+rngpui_macros.workspace = true
+# Shared types crate (breaks cyclic dependency)
+rn_chat_panel_types = { path = "./crates/types" }
+# Zed-specific craby modules (theme, workspace, llm)
+zedmodules = { path = "./craby-modules/crates/lib" }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+workspace = { workspace = true, features = ["test-support"] }

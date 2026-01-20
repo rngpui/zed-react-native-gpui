@@ -1,5 +1,6 @@
 mod db;
 mod edit_agent;
+mod active_thread;
 mod legacy_thread;
 mod native_agent_server;
 pub mod outline;
@@ -14,6 +15,7 @@ mod tools;
 
 use context_server::ContextServerId;
 pub use db::*;
+pub use active_thread::*;
 pub use native_agent_server::NativeAgentServer;
 pub use pattern_extraction::*;
 pub use templates::*;
@@ -928,6 +930,16 @@ impl NativeAgentConnection {
             .sessions
             .get(session_id)
             .map(|session| session.thread.clone())
+    }
+
+    /// Get the AcpThread for a session.
+    /// This is useful for subscribing to AcpThreadEvent::ToolAuthorizationRequired.
+    pub fn acp_thread(&self, session_id: &acp::SessionId, cx: &App) -> Option<Entity<AcpThread>> {
+        self.0
+            .read(cx)
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.acp_thread.upgrade())
     }
 
     pub fn load_thread(&self, id: acp::SessionId, cx: &mut App) -> Task<Result<Entity<Thread>>> {

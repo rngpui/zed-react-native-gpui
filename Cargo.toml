@@ -35,7 +35,6 @@ members = [
     "crates/cloud_llm_client",
     "crates/collab",
     "crates/collab_ui",
-    "crates/collections",
     "crates/command_palette",
     "crates/command_palette_hooks",
     "crates/component",
@@ -83,11 +82,8 @@ members = [
     "crates/git_ui",
     "crates/go_to_line",
     "crates/google_ai",
-    "crates/gpui",
-    "crates/gpui_macros",
     "crates/gpui_tokio",
     "crates/html_to_markdown",
-    "crates/http_client",
     "crates/http_client_tls",
     "crates/icons",
     "crates/image_viewer",
@@ -111,7 +107,6 @@ members = [
     "crates/lsp",
     "crates/markdown",
     "crates/markdown_preview",
-    "crates/media",
     "crates/menu",
     "crates/migrator",
     "crates/mistral",
@@ -138,14 +133,15 @@ members = [
     "crates/prompt_store",
     "crates/proto",
     "crates/recent_projects",
-    "crates/refineable",
-    "crates/refineable/derive_refineable",
     "crates/release_channel",
     "crates/scheduler",
     "crates/remote",
     "crates/remote_server",
     "crates/repl",
     "crates/reqwest_client",
+    "crates/rn_chat_panel",
+    "crates/rn_chat_panel/crates/types",
+    "crates/rn_chat_panel/craby-modules/crates/lib",
     "crates/rich_text",
     "crates/rope",
     "crates/rpc",
@@ -167,7 +163,6 @@ members = [
     "crates/story",
     "crates/storybook",
     "crates/streaming_diff",
-    "crates/sum_tree",
     "crates/supermaven",
     "crates/supermaven_api",
     "crates/codestral",
@@ -192,8 +187,6 @@ members = [
     "crates/ui_input",
     "crates/ui_macros",
     "crates/ui_prompt",
-    "crates/util",
-    "crates/util_macros",
     "crates/vercel",
     "crates/vim",
     "crates/vim_mode_setting",
@@ -229,7 +222,6 @@ members = [
     # Tooling
     #
 
-    "tooling/perf",
     "tooling/xtask",
 ]
 default-members = ["crates/zed"]
@@ -276,7 +268,7 @@ cloud_api_client = { path = "crates/cloud_api_client" }
 cloud_api_types = { path = "crates/cloud_api_types" }
 cloud_llm_client = { path = "crates/cloud_llm_client" }
 collab_ui = { path = "crates/collab_ui" }
-collections = { path = "crates/collections", version = "0.1.0" }
+collections = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support", version = "0.1.0" }
 command_palette = { path = "crates/command_palette" }
 command_palette_hooks = { path = "crates/command_palette_hooks" }
 component = { path = "crates/component" }
@@ -295,7 +287,7 @@ debug_adapter_extension = { path = "crates/debug_adapter_extension" }
 debugger_tools = { path = "crates/debugger_tools" }
 debugger_ui = { path = "crates/debugger_ui" }
 deepseek = { path = "crates/deepseek" }
-derive_refineable = { path = "crates/refineable/derive_refineable" }
+derive_refineable = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
 dev_container = { path = "crates/dev_container" }
 diagnostics = { path = "crates/diagnostics" }
 editor = { path = "crates/editor" }
@@ -316,11 +308,11 @@ git_hosting_providers = { path = "crates/git_hosting_providers" }
 git_ui = { path = "crates/git_ui" }
 go_to_line = { path = "crates/go_to_line" }
 google_ai = { path = "crates/google_ai" }
-gpui = { path = "crates/gpui", default-features = false }
-gpui_macros = { path = "crates/gpui_macros" }
+gpui = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support", package = "gpui_rn", default-features = false }
+gpui_macros = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support", version = "0.1.1", package = "gpui_rn_macros" }
 gpui_tokio = { path = "crates/gpui_tokio" }
 html_to_markdown = { path = "crates/html_to_markdown" }
-http_client = { path = "crates/http_client" }
+http_client = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
 http_client_tls = { path = "crates/http_client_tls" }
 icons = { path = "crates/icons" }
 image_viewer = { path = "crates/image_viewer" }
@@ -348,7 +340,7 @@ lsp = { path = "crates/lsp" }
 markdown = { path = "crates/markdown" }
 markdown_preview = { path = "crates/markdown_preview" }
 svg_preview = { path = "crates/svg_preview" }
-media = { path = "crates/media" }
+media = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
 menu = { path = "crates/menu" }
 migrator = { path = "crates/migrator" }
 mistral = { path = "crates/mistral" }
@@ -366,7 +358,7 @@ outline = { path = "crates/outline" }
 outline_panel = { path = "crates/outline_panel" }
 panel = { path = "crates/panel" }
 paths = { path = "crates/paths" }
-perf = { path = "tooling/perf" }
+perf = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
 picker = { path = "crates/picker" }
 prettier = { path = "crates/prettier" }
 settings_profile_selector = { path = "crates/settings_profile_selector" }
@@ -376,12 +368,18 @@ project_symbols = { path = "crates/project_symbols" }
 prompt_store = { path = "crates/prompt_store" }
 proto = { path = "crates/proto" }
 recent_projects = { path = "crates/recent_projects" }
-refineable = { path = "crates/refineable" }
+refineable = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
 release_channel = { path = "crates/release_channel" }
 remote = { path = "crates/remote" }
 remote_server = { path = "crates/remote_server" }
 repl = { path = "crates/repl" }
 reqwest_client = { path = "crates/reqwest_client" }
+rn_chat_panel = { path = "crates/rn_chat_panel" }
+# RNGPUI crates from react-native-gpui (local paths)
+rngpui = { path = "../react-native-gpui/crates/rngpui", features = ["library-mode"] }
+rngpui_core = { path = "../react-native-gpui/crates/rngpui_core" }
+rngpui_ffi = { path = "../react-native-gpui/crates/rngpui_ffi" }
+rngpui_macros = { path = "../react-native-gpui/crates/rngpui_macros" }
 rodio = { git = "https://github.com/RustAudio/rodio", rev ="e2074c6c2acf07b57cf717e076bdda7a9ac6e70b", features = ["wav", "playback", "wav_output", "recording"] }
 rope = { path = "crates/rope" }
 rpc = { path = "crates/rpc" }
@@ -401,7 +399,7 @@ sqlez = { path = "crates/sqlez" }
 sqlez_macros = { path = "crates/sqlez_macros" }
 story = { path = "crates/story" }
 streaming_diff = { path = "crates/streaming_diff" }
-sum_tree = { path = "crates/sum_tree" }
+sum_tree = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
 supermaven = { path = "crates/supermaven" }
 supermaven_api = { path = "crates/supermaven_api" }
 codestral = { path = "crates/codestral" }
@@ -424,8 +422,8 @@ ui = { path = "crates/ui" }
 ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }
 ui_prompt = { path = "crates/ui_prompt" }
-util = { path = "crates/util" }
-util_macros = { path = "crates/util_macros" }
+util = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
+util_macros = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
 vercel = { path = "crates/vercel" }
 vim = { path = "crates/vim" }
 vim_mode_setting = { path = "crates/vim_mode_setting" }
@@ -458,6 +456,7 @@ any_vec = "0.14"
 anyhow = "1.0.86"
 arrayvec = { version = "0.7.4", features = ["serde"] }
 ashpd = { version = "0.12.1", default-features = false, features = ["async-std"] }
+async-channel = "2"
 async-compat = "0.2.1"
 async-compression = { version = "0.4", features = ["gzip", "futures-io"] }
 async-dispatcher = "0.1"
@@ -493,6 +492,7 @@ cargo_toml = "0.21"
 cfg-if = "1.0.3"
 chardetng = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+cc = "1"
 ciborium = "0.2"
 circular-buffer = "1.0"
 clap = { version = "4.4", features = ["derive", "wrap_help"] }
@@ -506,6 +506,8 @@ cpal = "0.16"
 crash-handler = "0.6"
 criterion = { version = "0.5", features = ["html_reports"] }
 ctor = "0.4.0"
+cxx = "1"
+cxx-build = "1"
 dap-types = { git = "https://github.com/zed-industries/dap-types", rev = "1b461b310481d01e02b2603c16d7144b926339f8" }
 dashmap = "6.0"
 derive_more = "0.99.17"
@@ -624,6 +626,8 @@ reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662
     "socks",
     "stream",
 ], package = "zed-reqwest", version = "0.12.15-zed" }
+rngpui-craby = "0.2.2"
+rn_chat_panel_types = { path = "crates/rn_chat_panel/crates/types" }
 rsa = "0.9.6"
 runtimelib = { version = "0.30.0", default-features = false, features = [
     "async-dispatcher-runtime", "aws-lc-rs"
@@ -785,6 +789,19 @@ features = [
 
 [patch.crates-io]
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+# Patch gpui_rn_* crates from crates.io to use rngpui-support branch
+# (react-native-gpui depends on published gpui_rn_* crates)
+gpui_rn = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
+gpui_rn_collections = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
+gpui_rn_http_client = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
+gpui_rn_macros = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
+gpui_rn_media = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
+gpui_rn_refineable = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
+gpui_rn_sum_tree = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
+gpui_rn_util = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
+gpui_rn_util_macros = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
+gpui_rn_derive_refineable = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
+gpui_rn_perf = { git = "https://github.com/rngpui/zed-react-native-gpui", branch = "rngpui-support" }
 notify = { git = "https://github.com/zed-industries/notify.git", rev = "b4588b2e5aee68f4c0e100f140e808cbce7b1419" }
 notify-types = { git = "https://github.com/zed-industries/notify.git", rev = "b4588b2e5aee68f4c0e100f140e808cbce7b1419" }
 windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
@@ -803,12 +820,10 @@ codegen-units = 16
 
 [profile.dev.package]
 # proc-macros start
-gpui_macros = { opt-level = 3 }
-derive_refineable = { opt-level = 3 }
+# gpui_macros, derive_refineable, util_macros are now from git dependencies
 settings_macros = { opt-level = 3 }
 sqlez_macros = { opt-level = 3, codegen-units = 1 }
 ui_macros = { opt-level = 3 }
-util_macros = { opt-level = 3 }
 quote = { opt-level = 3 }
 syn = { opt-level = 3 }
 proc-macro2 = { opt-level = 3 }
@@ -821,7 +836,6 @@ wasmtime = { opt-level = 3 }
 activity_indicator = { codegen-units = 1 }
 assets = { codegen-units = 1 }
 breadcrumbs = { codegen-units = 1 }
-collections = { codegen-units = 1 }
 command_palette = { codegen-units = 1 }
 command_palette_hooks = { codegen-units = 1 }
 feature_flags = { codegen-units = 1 }
@@ -840,7 +854,6 @@ outline = { codegen-units = 1 }
 paths = { codegen-units = 1 }
 prettier = { codegen-units = 1 }
 project_symbols = { codegen-units = 1 }
-refineable = { codegen-units = 1 }
 release_channel = { codegen-units = 1 }
 reqwest_client = { codegen-units = 1 }
 session = { codegen-units = 1 }

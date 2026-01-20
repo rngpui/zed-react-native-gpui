@@ -1,0 +1,23 @@
+# Codegen configuration for rn_chat_panel native components.
+#
+# This generates NativeDiffView and NativeTerminalView component
+# props from TypeScript specs.
+#
+# Run codegen with:
+#   cargo xtask codegen-config ~/rngpui/zed/crates/rn_chat_panel/craby.toml
+#
+# C++ outputs go to the RNGPUI native/generated/ directory so
+# generate_view_config_patches_from_codegen.py can discover them.
+
+[package]
+name = "rn_chat_panel"
+
+[components]
+enabled = true
+sources = ["js/src/specs"]
+module_name = "rn_chat_panel"
+java_package = "com.gpui.rn_chat_panel"
+
+[components.output]
+cpp = "../../../react-native-gpui/native/generated/cpp/rn_chat_panel"
+rust_props = "src/generated"
